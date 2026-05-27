@@ -120,6 +120,16 @@ impl ArtifactStore {
         Ok(metadata)
     }
 
+    pub fn store_file(&self, path: &Path) -> Result<ArtifactMetadata, ArtifactError> {
+        let bytes = fs::read(path).map_err(|source| ArtifactError::ReadFile {
+            path: path.display().to_string(),
+            source,
+        })?;
+        let checksum = hex::encode(Sha256::digest(&bytes));
+
+        self.store_bytes(&bytes, Some(&checksum))
+    }
+
     pub fn load(&self, artifact_id: &str) -> Result<StoredArtifact, ArtifactError> {
         let artifact_dir = self.root_dir.join(artifact_id);
         let blob_path = artifact_dir.join("blob");
@@ -188,6 +198,10 @@ pub enum ArtifactError {
         path: String,
         source: std::io::Error,
     },
+    ReadFile {
+        path: String,
+        source: std::io::Error,
+    },
     SerializeMetadata {
         source: serde_json::Error,
     },
@@ -228,6 +242,9 @@ impl fmt::Display for ArtifactError {
             }
             Self::WriteFile { path, source } => {
                 write!(f, "failed to write artifact file {path}: {source}")
+            }
+            Self::ReadFile { path, source } => {
+                write!(f, "failed to read artifact file {path}: {source}")
             }
             Self::SerializeMetadata { source } => {
                 write!(f, "failed to serialize artifact metadata: {source}")

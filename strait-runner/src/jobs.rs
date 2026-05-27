@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::{
     artifacts::{ArtifactError, ArtifactStore},
-    manifest::{Concurrency, JobManifest, ManifestStore, ParamType},
+    manifest::{Concurrency, JobManifest, ManifestStore, OutputSpec, ParamType},
 };
 
 #[derive(Debug)]
@@ -73,6 +73,7 @@ impl JobStore {
             exit_code: None,
             params,
             resolved_artifacts: resolved,
+            outputs: BTreeMap::new(),
         };
 
         {
@@ -115,6 +116,7 @@ impl JobStore {
         })?;
 
         let execution = JobExecution {
+            artifacts: Arc::new(artifacts.clone()),
             manifest,
             job_id: job_id.clone(),
             metadata_path: job_dir.join("metadata.json"),
@@ -205,12 +207,21 @@ pub struct JobMetadata {
     pub exit_code: Option<i32>,
     pub params: Map<String, Value>,
     pub resolved_artifacts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub outputs: BTreeMap<String, JobOutputArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobLogs {
     pub stdout: String,
     pub stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobOutputArtifact {
+    pub artifact_id: String,
+    pub sha256: String,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -233,6 +244,7 @@ struct RunningJob {
 
 #[derive(Debug, Clone)]
 struct JobExecution {
+    artifacts: Arc<ArtifactStore>,
     manifest: JobManifest,
     job_id: String,
     metadata_path: PathBuf,
@@ -287,6 +299,10 @@ pub enum JobError {
         name: String,
         artifact_id: String,
     },
+    MissingOutput {
+        name: String,
+        path: String,
+    },
     ConcurrencyConflict {
         reason: String,
     },
@@ -331,6 +347,9 @@ impl fmt::Display for JobError {
                     "artifact param {name} references expired artifact {artifact_id}"
                 )
             }
+            Self::MissingOutput { name, path } => {
+                write!(f, "required output {name} is missing at {path}")
+            }
             Self::ConcurrencyConflict { reason } => write!(f, "{reason}"),
             Self::InvalidBody(message) => write!(f, "invalid job request body: {message}"),
         }
@@ -358,11 +377,13 @@ impl IntoResponse for JobError {
             | Self::Artifact(ArtifactError::TooLarge { .. })
             | Self::Artifact(ArtifactError::InvalidHeader { .. })
             | Self::Artifact(ArtifactError::ParseExpiry { .. })
+            | Self::MissingOutput { .. }
             | Self::ExpiredArtifact { .. }
             | Self::InvalidBody(_) => StatusCode::BAD_REQUEST,
             Self::ConcurrencyConflict { .. } => StatusCode::CONFLICT,
             Self::Artifact(ArtifactError::ParseMetadata { .. })
             | Self::Artifact(ArtifactError::CreateDir { .. })
+            | Self::Artifact(ArtifactError::ReadFile { .. })
             | Self::Artifact(ArtifactError::WriteFile { .. })
             | Self::Artifact(ArtifactError::SerializeMetadata { .. })
             | Self::Artifact(ArtifactError::InvalidMaxSize { .. })
@@ -645,13 +666,30 @@ impl JobStore {
 
         match outcome {
             ExecutionOutcome::Completed { status, exit_code } => {
-                metadata.status = status.clone();
+                let final_status = if matches!(status, JobStatus::Success) {
+                    match register_outputs(
+                        &execution.artifacts,
+                        &execution.manifest.outputs,
+                        &execution.output_dir,
+                        &mut metadata,
+                    ) {
+                        Ok(()) => JobStatus::Success,
+                        Err(error) => {
+                            let _ = append_error(&execution.stderr_path, &error);
+                            JobStatus::Failed
+                        }
+                    }
+                } else {
+                    status
+                };
+
+                metadata.status = final_status.clone();
                 metadata.exit_code = exit_code;
                 metadata.finished_at = Some(finished_at);
 
                 let _ = self.persist_metadata(&execution.metadata_path, &metadata);
 
-                match status {
+                match final_status {
                     JobStatus::Success if execution.cleanup_successful_workdirs => {
                         let _ = fs::remove_dir_all(&execution.work_dir);
                     }
@@ -728,6 +766,66 @@ fn build_job_env(metadata: &JobMetadata, execution: &JobExecution) -> BTreeMap<S
 
 fn normalize_param_env(name: &str) -> String {
     format!("JOB_{}", name.replace('-', "_").to_ascii_uppercase())
+}
+
+fn register_outputs(
+    artifacts: &ArtifactStore,
+    specs: &BTreeMap<String, OutputSpec>,
+    output_dir: &Path,
+    metadata: &mut JobMetadata,
+) -> Result<(), JobError> {
+    for (name, spec) in specs {
+        let path = output_dir.join(&spec.path);
+
+        match fs::metadata(&path) {
+            Ok(file_type) if file_type.is_file() => {}
+            Ok(_) => {
+                return Err(JobError::MissingOutput {
+                    name: name.clone(),
+                    path: path.display().to_string(),
+                });
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound && spec.required => {
+                return Err(JobError::MissingOutput {
+                    name: name.clone(),
+                    path: path.display().to_string(),
+                });
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(JobError::ReadFile {
+                    path: path.display().to_string(),
+                    source,
+                });
+            }
+        }
+
+        let stored = artifacts.store_file(&path)?;
+        metadata.outputs.insert(
+            name.clone(),
+            JobOutputArtifact {
+                artifact_id: stored.artifact_id,
+                sha256: stored.sha256,
+                size: stored.size,
+            },
+        );
+    }
+
+    Ok(())
+}
+
+fn append_error(path: &Path, error: &JobError) -> Result<(), JobError> {
+    let mut stderr = fs::read_to_string(path).unwrap_or_default();
+    if !stderr.is_empty() && !stderr.ends_with('\n') {
+        stderr.push('\n');
+    }
+    stderr.push_str(&error.to_string());
+    stderr.push('\n');
+
+    fs::write(path, stderr).map_err(|source| JobError::WriteFile {
+        path: path.display().to_string(),
+        source,
+    })
 }
 
 #[cfg(test)]
@@ -1008,6 +1106,98 @@ exit 0
     }
 
     #[tokio::test]
+    async fn registers_declared_outputs_as_artifacts() {
+        let temp = temp_dir("job_output_artifact");
+        let state = test_state_from_manifest(
+            &temp,
+            "build-app",
+            r#"
+[params.commit]
+type = "string"
+required = false
+"#,
+            r#"
+[outputs.app]
+path = "app.tar.gz"
+required = true
+"#,
+            "#!/bin/sh\nprintf 'bundle' > \"$JOB_OUTPUT_DIR/app.tar.gz\"\n",
+            600,
+        );
+        let app = Router::new()
+            .route("/jobs/{id}", post(create_job))
+            .with_state(state);
+
+        let created = read_created_job(
+            app.oneshot(
+                Request::post("/jobs/build-app")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "abc123" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed"),
+        )
+        .await;
+        let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+
+        assert_eq!(metadata.status, super::JobStatus::Success);
+        let output = &metadata.outputs["app"];
+        assert_eq!(output.size, 6);
+        let stored = fs::read_to_string(
+            temp.join("artifacts")
+                .join(&output.artifact_id)
+                .join("blob"),
+        )
+        .expect("stored output artifact");
+        assert_eq!(stored, "bundle");
+    }
+
+    #[tokio::test]
+    async fn fails_successful_script_when_required_output_is_missing() {
+        let temp = temp_dir("job_output_missing");
+        let state = test_state_from_manifest(
+            &temp,
+            "build-app",
+            r#"
+[params.commit]
+type = "string"
+required = false
+"#,
+            r#"
+[outputs.app]
+path = "app.tar.gz"
+required = true
+"#,
+            "#!/bin/sh\nexit 0\n",
+            600,
+        );
+        let app = Router::new()
+            .route("/jobs/{id}", post(create_job))
+            .with_state(state);
+
+        let created = read_created_job(
+            app.oneshot(
+                Request::post("/jobs/build-app")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "abc123" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed"),
+        )
+        .await;
+        let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+
+        assert_eq!(metadata.status, super::JobStatus::Failed);
+        assert!(
+            fs::read_to_string(temp.join("jobs").join(&created.job_id).join("stderr.log"))
+                .expect("stderr log")
+                .contains("required output app is missing")
+        );
+    }
+
+    #[tokio::test]
     async fn reads_job_status_over_http() {
         let temp = temp_dir("job_status_http");
         let state = test_state_with_script(&temp, "build-app", "#!/bin/sh\nexit 0\n", 600);
@@ -1111,6 +1301,7 @@ required = true
 type = "string"
 required = true
 "#,
+            "",
             "#!/bin/sh\nexit 0\n",
             600,
         )
@@ -1125,6 +1316,7 @@ required = true
 type = "artifact"
 required = true
 "#,
+            "",
             "#!/bin/sh\nexit 0\n",
             600,
         )
@@ -1148,6 +1340,7 @@ required = false
 type = "artifact"
 required = false
 "#,
+            "",
             script_body,
             timeout_seconds,
         )
@@ -1157,6 +1350,7 @@ required = false
         temp: &Path,
         job_name: &str,
         params_toml: &str,
+        outputs_toml: &str,
         script_body: &str,
         timeout_seconds: u64,
     ) -> AppState {
@@ -1175,6 +1369,7 @@ timeout_seconds = {timeout_seconds}
 concurrency = "parallel"
 
 {params_toml}
+{outputs_toml}
 "#,
                 script.display()
             ),
