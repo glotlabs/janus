@@ -1,0 +1,20 @@
+name = "build-app"
+script = "/opt/strait-runner/jobs/build-app.sh"
+timeout_seconds = 600
+concurrency = "job_exclusive"
+
+[params.commit]
+type = "string"
+required = true
+
+[params.branch]
+type = "string"
+required = true
+
+[params.source]
+type = "artifact"
+required = true
+
+[outputs.app]
+path = "app.tar.gz"
+required = true
