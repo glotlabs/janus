@@ -397,7 +397,9 @@ impl IntoResponse for JobError {
             Self::ConcurrencyConflict { .. } => StatusCode::CONFLICT,
             Self::Artifact(ArtifactError::ParseMetadata { .. })
             | Self::Artifact(ArtifactError::CreateDir { .. })
+            | Self::Artifact(ArtifactError::ReadDir { .. })
             | Self::Artifact(ArtifactError::ReadFile { .. })
+            | Self::Artifact(ArtifactError::RemoveDir { .. })
             | Self::Artifact(ArtifactError::WriteFile { .. })
             | Self::Artifact(ArtifactError::SerializeMetadata { .. })
             | Self::Artifact(ArtifactError::InvalidMaxSize { .. })

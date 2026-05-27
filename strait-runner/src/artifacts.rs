@@ -14,6 +14,8 @@ use axum::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::time::{self, MissedTickBehavior};
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::auth::{ArtifactsRead, ArtifactsWrite, Authorized};
@@ -158,6 +160,60 @@ impl ArtifactStore {
     pub fn artifact_blob_path(&self, artifact_id: &str) -> PathBuf {
         self.root_dir.join(artifact_id).join("blob")
     }
+
+    pub fn cleanup_expired(&self) -> Result<usize, ArtifactError> {
+        let mut removed = 0;
+        let entries = fs::read_dir(&self.root_dir).map_err(|source| ArtifactError::ReadDir {
+            path: self.root_dir.display().to_string(),
+            source,
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|source| ArtifactError::ReadDir {
+                path: self.root_dir.display().to_string(),
+                source,
+            })?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let artifact_id = entry.file_name().to_string_lossy().to_string();
+            let metadata = match self.load_metadata(&artifact_id) {
+                Ok(metadata) => metadata,
+                Err(ArtifactError::NotFound(_)) => continue,
+                Err(error) => return Err(error),
+            };
+
+            if metadata.is_expired()? {
+                fs::remove_dir_all(&path).map_err(|source| ArtifactError::RemoveDir {
+                    path: path.display().to_string(),
+                    source,
+                })?;
+                removed += 1;
+            }
+        }
+
+        Ok(removed)
+    }
+
+    pub async fn run_cleanup_loop(self: std::sync::Arc<Self>, cleanup_interval_seconds: u64) {
+        let mut interval = time::interval(Duration::from_secs(cleanup_interval_seconds.max(1)));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+            match self.cleanup_expired() {
+                Ok(removed) if removed > 0 => {
+                    info!(removed, "cleaned expired artifacts");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    error!(%error, "artifact cleanup failed");
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -193,6 +249,14 @@ pub enum ArtifactError {
         max_size_mb: u64,
     },
     CreateDir {
+        path: String,
+        source: std::io::Error,
+    },
+    ReadDir {
+        path: String,
+        source: std::io::Error,
+    },
+    RemoveDir {
         path: String,
         source: std::io::Error,
     },
@@ -241,6 +305,12 @@ impl fmt::Display for ArtifactError {
             }
             Self::CreateDir { path, source } => {
                 write!(f, "failed to create artifact directory {path}: {source}")
+            }
+            Self::ReadDir { path, source } => {
+                write!(f, "failed to read artifact directory {path}: {source}")
+            }
+            Self::RemoveDir { path, source } => {
+                write!(f, "failed to remove artifact directory {path}: {source}")
             }
             Self::WriteFile { path, source } => {
                 write!(f, "failed to write artifact file {path}: {source}")
@@ -492,6 +562,34 @@ mod tests {
             .await
             .expect("download body");
         assert_eq!(body.as_ref(), payload);
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_expired_artifacts() {
+        let temp = temp_dir("artifact_cleanup_expired");
+        let store = ArtifactStore::new(&temp, 0, 1, false).expect("store should init");
+        let metadata = store
+            .store_bytes(b"expired", None)
+            .expect("artifact should store");
+
+        let removed = store.cleanup_expired().expect("cleanup should succeed");
+
+        assert_eq!(removed, 1);
+        assert!(!temp.join("artifacts").join(metadata.artifact_id).exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_keeps_unexpired_artifacts() {
+        let temp = temp_dir("artifact_cleanup_keep");
+        let store = ArtifactStore::new(&temp, 3600, 1, false).expect("store should init");
+        let metadata = store
+            .store_bytes(b"alive", None)
+            .expect("artifact should store");
+
+        let removed = store.cleanup_expired().expect("cleanup should succeed");
+
+        assert_eq!(removed, 0);
+        assert!(temp.join("artifacts").join(metadata.artifact_id).exists());
     }
 
     fn test_state(temp: &Path) -> AppState {

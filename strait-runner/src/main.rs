@@ -51,6 +51,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.artifacts.max_size_mb,
         config.artifacts.require_checksum_on_upload,
     )?);
+    let artifacts_cleanup = Arc::clone(&artifacts);
+    let cleanup_interval_seconds = config.artifacts.cleanup_interval_seconds;
     let state = AppState {
         config: Arc::clone(&config),
         auth,
@@ -58,6 +60,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         artifacts,
         jobs: Arc::new(JobStore::new(&config.data_dir)?),
     };
+    tokio::spawn(async move {
+        artifacts_cleanup
+            .run_cleanup_loop(cleanup_interval_seconds)
+            .await;
+    });
     let app = build_app(state);
 
     let address: SocketAddr = config.server.listen.parse()?;
