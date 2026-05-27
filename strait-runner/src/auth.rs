@@ -12,6 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+use tracing::warn;
 
 use crate::config::AuthConfig;
 
@@ -45,7 +46,11 @@ impl AuthStore {
         Ok(Self { tokens })
     }
 
-    fn authorize(&self, header_value: Option<&str>, permission: &str) -> Result<(), AuthRejection> {
+    fn authorize(
+        &self,
+        header_value: Option<&str>,
+        permission: &str,
+    ) -> Result<String, AuthRejection> {
         let token = parse_bearer_token(header_value)?;
         let record = self.tokens.get(token).ok_or(AuthRejection::InvalidToken)?;
 
@@ -56,7 +61,7 @@ impl AuthStore {
             });
         }
 
-        Ok(())
+        Ok(record.name.clone())
     }
 }
 
@@ -87,15 +92,25 @@ pub trait RequiredPermission {
     const NAME: &'static str;
 }
 
-pub struct Authorized<P>(PhantomData<P>);
+pub struct Authorized<P> {
+    token_name: String,
+    _marker: PhantomData<P>,
+}
 
 impl<P> Clone for Authorized<P> {
     fn clone(&self) -> Self {
-        Self(PhantomData)
+        Self {
+            token_name: self.token_name.clone(),
+            _marker: PhantomData,
+        }
     }
 }
 
-impl<P> Copy for Authorized<P> {}
+impl<P> Authorized<P> {
+    pub fn token_name(&self) -> &str {
+        &self.token_name
+    }
+}
 
 impl<S, P> FromRequestParts<S> for Authorized<P>
 where
@@ -112,9 +127,12 @@ where
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok());
 
-        auth.authorize(header_value, P::NAME)?;
+        let token_name = auth.authorize(header_value, P::NAME)?;
 
-        Ok(Self(PhantomData))
+        Ok(Self {
+            token_name,
+            _marker: PhantomData,
+        })
     }
 }
 
@@ -137,6 +155,32 @@ pub enum AuthRejection {
 
 impl IntoResponse for AuthRejection {
     fn into_response(self) -> Response {
+        match &self {
+            Self::MissingAuthorization => {
+                warn!(reason = "missing_authorization", "auth request rejected");
+            }
+            Self::InvalidAuthorizationHeader => {
+                warn!(
+                    reason = "invalid_authorization_header",
+                    "auth request rejected"
+                );
+            }
+            Self::InvalidToken => {
+                warn!(reason = "invalid_token", "auth request rejected");
+            }
+            Self::MissingPermission {
+                token_name,
+                permission,
+            } => {
+                warn!(
+                    token_name = %token_name,
+                    permission = %permission,
+                    reason = "missing_permission",
+                    "auth request rejected"
+                );
+            }
+        }
+
         let status = match self {
             Self::MissingPermission { .. } => StatusCode::FORBIDDEN,
             Self::MissingAuthorization | Self::InvalidAuthorizationHeader | Self::InvalidToken => {
@@ -399,10 +443,12 @@ mod tests {
                 ttl_seconds: 3600,
                 cleanup_interval_seconds: 600,
                 require_checksum_on_upload: true,
+                max_upload_requests_per_minute: 60,
             },
             jobs: JobsConfig {
                 default_log_limit_mb: 50,
                 max_request_body_kb: 64,
+                max_run_requests_per_minute: 60,
                 cleanup_successful_workdirs: true,
                 keep_failed_workdirs: true,
             },
@@ -448,6 +494,7 @@ mod tests {
                 .expect("artifact store should init"),
             ),
             jobs: Arc::new(JobStore::new(&config.data_dir).expect("job store should init")),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::new()),
             runtime_status: Arc::new(crate::RuntimeStatus::new(0, 0)),
         }
     }

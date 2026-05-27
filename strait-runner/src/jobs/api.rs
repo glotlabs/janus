@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
 };
 use serde_json::Value;
+use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::auth::{Authorized, JobsRead, JobsRun, LogsRead};
@@ -14,12 +15,25 @@ use super::{
 };
 
 pub async fn create_job(
-    _: Authorized<JobsRun>,
+    auth: Authorized<JobsRun>,
     State(state): State<crate::AppState>,
     AxumPath(name): AxumPath<String>,
     body: Body,
 ) -> Result<(StatusCode, Json<JobCreatedResponse>), JobError> {
     info!(job_name = %name, "job run requested");
+    state
+        .rate_limiter
+        .check(
+            "jobs_run",
+            auth.token_name(),
+            state.config.jobs.max_run_requests_per_minute,
+            Duration::from_secs(60),
+        )
+        .map_err(|error| JobError::RateLimitExceeded {
+            token_name: auth.token_name().to_string(),
+            limit: error.limit,
+            window_seconds: error.window_seconds,
+        })?;
     let max_bytes = state
         .config
         .jobs

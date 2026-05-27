@@ -232,6 +232,60 @@ async fn rejects_job_request_body_over_limit() {
 }
 
 #[tokio::test]
+async fn rate_limits_job_creation_per_token() {
+    let temp = temp_dir("job_rate_limit");
+    let state = test_state_with_job_run_rate_limit(&temp, 1);
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "commit": "abc123",
+                        "branch": "main"
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    let second = app
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "commit": "abc123",
+                        "branch": "main"
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(first.status(), StatusCode::CREATED);
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        second
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+        Some("60")
+    );
+}
+
+#[tokio::test]
 async fn rejects_string_param_over_max_length() {
     let temp = temp_dir("job_string_max_length");
     let state = test_state_from_manifest(
@@ -1419,6 +1473,63 @@ fn test_state_with_request_body_limit(temp: &Path, max_request_body_kb: u64) -> 
     )
 }
 
+fn test_state_with_job_run_rate_limit(temp: &Path, max_run_requests_per_minute: u32) -> AppState {
+    let manifests_dir = temp.join("manifests");
+    let scripts_dir = temp.join("scripts");
+    fs::create_dir_all(&manifests_dir).expect("manifests dir should be created");
+    fs::create_dir_all(&scripts_dir).expect("scripts dir should be created");
+    let script = write_executable_script(&scripts_dir, "build.sh", "#!/bin/sh\nexit 0\n");
+    fs::write(
+        manifests_dir.join("build-app.toml"),
+        format!(
+            r#"
+name = "build-app"
+script = "{}"
+timeout_seconds = 600
+concurrency = "parallel"
+
+[params.commit]
+type = "string"
+required = true
+
+[params.branch]
+type = "string"
+required = true
+"#,
+            script.display()
+        ),
+    )
+    .expect("manifest should be written");
+
+    let config = Config {
+        data_dir: temp.display().to_string(),
+        manifests_dir: manifests_dir.display().to_string(),
+        server: ServerConfig {
+            listen: "127.0.0.1:0".to_string(),
+        },
+        auth: AuthConfig {
+            mode: "bearer".to_string(),
+            tokens: Vec::new(),
+        },
+        artifacts: ArtifactsConfig {
+            max_size_mb: 1,
+            ttl_seconds: 3600,
+            cleanup_interval_seconds: 600,
+            require_checksum_on_upload: true,
+            max_upload_requests_per_minute: 60,
+        },
+        jobs: JobsConfig {
+            default_log_limit_mb: 50,
+            max_request_body_kb: 64,
+            max_run_requests_per_minute,
+            cleanup_successful_workdirs: true,
+            keep_failed_workdirs: true,
+        },
+    };
+
+    build_state(config)
+}
+
 fn test_state_with_script(
     temp: &Path,
     job_name: &str,
@@ -1495,10 +1606,12 @@ concurrency = "parallel"
             ttl_seconds: 3600,
             cleanup_interval_seconds: 600,
             require_checksum_on_upload: true,
+            max_upload_requests_per_minute: 60,
         },
         jobs: JobsConfig {
             default_log_limit_mb,
             max_request_body_kb,
+            max_run_requests_per_minute: 60,
             cleanup_successful_workdirs: true,
             keep_failed_workdirs: true,
         },
@@ -1558,10 +1671,12 @@ concurrency = "{}"
             ttl_seconds: 3600,
             cleanup_interval_seconds: 600,
             require_checksum_on_upload: true,
+            max_upload_requests_per_minute: 60,
         },
         jobs: JobsConfig {
             default_log_limit_mb: 50,
             max_request_body_kb: 64,
+            max_run_requests_per_minute: 60,
             cleanup_successful_workdirs: true,
             keep_failed_workdirs: true,
         },
@@ -1609,6 +1724,7 @@ fn build_state(config: Config) -> AppState {
             .expect("artifact store should init"),
         ),
         jobs: Arc::new(JobStore::new(&config.data_dir).expect("job store should init")),
+        rate_limiter: Arc::new(crate::rate_limit::RateLimiter::new()),
         runtime_status: Arc::new(crate::RuntimeStatus::new(0, 0)),
     }
 }

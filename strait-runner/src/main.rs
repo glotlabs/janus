@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod jobs;
 mod manifest;
+mod rate_limit;
 mod storage;
 
 use std::{env, net::SocketAddr, sync::Arc};
@@ -19,6 +20,7 @@ use chrono::{SecondsFormat, Utc};
 use config::Config;
 use jobs::JobStore;
 use manifest::ManifestStore;
+use rate_limit::RateLimiter;
 use serde::Serialize;
 use tokio::time::{self, MissedTickBehavior};
 use tracing::{info, warn};
@@ -32,6 +34,7 @@ pub(crate) struct AppState {
     manifests: Arc<ManifestStore>,
     artifacts: Arc<ArtifactStore>,
     jobs: Arc<JobStore>,
+    rate_limiter: Arc<RateLimiter>,
     runtime_status: Arc<RuntimeStatus>,
 }
 
@@ -168,6 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         manifests: Arc::clone(&manifests),
         artifacts,
         jobs,
+        rate_limiter: Arc::new(RateLimiter::new()),
         runtime_status: Arc::clone(&runtime_status),
     };
     let cleanup_runtime_status = Arc::clone(&runtime_status);
@@ -595,10 +599,12 @@ required = true
                 ttl_seconds: 3600,
                 cleanup_interval_seconds: 600,
                 require_checksum_on_upload: true,
+                max_upload_requests_per_minute: 60,
             },
             jobs: JobsConfig {
                 default_log_limit_mb: 50,
                 max_request_body_kb: 64,
+                max_run_requests_per_minute: 60,
                 cleanup_successful_workdirs: true,
                 keep_failed_workdirs: true,
             },
@@ -662,6 +668,7 @@ required = true
                 .expect("artifact store should init"),
             ),
             jobs: Arc::new(JobStore::new(&config.data_dir).expect("job store should init")),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::new()),
             runtime_status: Arc::new(RuntimeStatus::new(0, 0)),
         }
     }

@@ -2,10 +2,11 @@ use std::fmt;
 
 use axum::{
     Json,
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+use tracing::warn;
 
 use crate::artifacts::ArtifactError;
 
@@ -56,6 +57,11 @@ pub enum JobError {
     },
     InvalidRequestBodyLimit {
         max_size_kb: u64,
+    },
+    RateLimitExceeded {
+        token_name: String,
+        limit: u32,
+        window_seconds: u64,
     },
     ShuttingDown,
     Artifact(ArtifactError),
@@ -121,6 +127,16 @@ impl fmt::Display for JobError {
             Self::InvalidRequestBodyLimit { max_size_kb } => {
                 write!(f, "invalid job request body limit in kb: {max_size_kb}")
             }
+            Self::RateLimitExceeded {
+                token_name,
+                limit,
+                window_seconds,
+            } => {
+                write!(
+                    f,
+                    "token {token_name} exceeded job run rate limit of {limit} requests per {window_seconds} seconds"
+                )
+            }
             Self::ShuttingDown => write!(f, "runner is shutting down and not accepting new jobs"),
             Self::Artifact(source) => write!(f, "{source}"),
             Self::ExpiredArtifact { name, artifact_id } => {
@@ -158,6 +174,38 @@ impl From<ArtifactError> for JobError {
 
 impl IntoResponse for JobError {
     fn into_response(self) -> Response {
+        let retry_after = match &self {
+            Self::RateLimitExceeded {
+                token_name,
+                limit,
+                window_seconds,
+            } => {
+                warn!(
+                    token_name = %token_name,
+                    limit,
+                    window_seconds,
+                    reason = "job_rate_limit_exceeded",
+                    "request rejected"
+                );
+                Some(*window_seconds)
+            }
+            Self::Artifact(ArtifactError::RateLimitExceeded {
+                token_name,
+                limit,
+                window_seconds,
+            }) => {
+                warn!(
+                    token_name = %token_name,
+                    limit,
+                    window_seconds,
+                    reason = "artifact_rate_limit_exceeded",
+                    "request rejected"
+                );
+                Some(*window_seconds)
+            }
+            _ => None,
+        };
+
         let status = match self {
             Self::UnknownJob(_) | Self::JobNotFound(_) => StatusCode::NOT_FOUND,
             Self::JobNotRunning(_) => StatusCode::CONFLICT,
@@ -180,6 +228,10 @@ impl IntoResponse for JobError {
             | Self::InvalidBody(_)
             | Self::ParseRequestBody { .. }
             | Self::InvalidJobId(_) => StatusCode::BAD_REQUEST,
+            Self::Artifact(ArtifactError::RateLimitExceeded { .. }) => {
+                StatusCode::TOO_MANY_REQUESTS
+            }
+            Self::RateLimitExceeded { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::RequestTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ConcurrencyConflict { .. } => StatusCode::CONFLICT,
             Self::Artifact(ArtifactError::ParseMetadata { .. })
@@ -201,7 +253,16 @@ impl IntoResponse for JobError {
             | Self::SerializeMetadata { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
-        (status, Json(JobErrorResponse::from_job_error(&self))).into_response()
+        let mut response = (status, Json(JobErrorResponse::from_job_error(&self))).into_response();
+        if let Some(retry_after) = retry_after {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                header::HeaderValue::from_str(&retry_after.to_string())
+                    .expect("retry-after header should be valid"),
+            );
+        }
+
+        response
     }
 }
 
@@ -230,6 +291,7 @@ impl JobErrorResponse {
             JobError::InvalidParamValue { .. } => "job_invalid_param_value",
             JobError::InvalidLogLimit { .. } => "job_invalid_log_limit",
             JobError::InvalidRequestBodyLimit { .. } => "job_invalid_request_body_limit",
+            JobError::RateLimitExceeded { .. } => "job_rate_limit_exceeded",
             JobError::ShuttingDown => "job_runner_shutting_down",
             JobError::Artifact(_) => "artifact_error",
             JobError::ExpiredArtifact { .. } => "artifact_expired",

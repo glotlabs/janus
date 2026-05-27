@@ -14,6 +14,8 @@ use axum::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::time::Duration as StdDuration;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
@@ -346,6 +348,11 @@ pub enum ArtifactError {
         size: usize,
         max: usize,
     },
+    RateLimitExceeded {
+        token_name: String,
+        limit: u32,
+        window_seconds: u64,
+    },
     NotFound(String),
     InvalidArtifactId(String),
     InvalidBody(axum::Error),
@@ -399,6 +406,16 @@ impl fmt::Display for ArtifactError {
                     "artifact exceeds size limit: got {size} bytes, max {max} bytes"
                 )
             }
+            Self::RateLimitExceeded {
+                token_name,
+                limit,
+                window_seconds,
+            } => {
+                write!(
+                    f,
+                    "token {token_name} exceeded artifact upload rate limit of {limit} requests per {window_seconds} seconds"
+                )
+            }
             Self::NotFound(artifact_id) => write!(f, "artifact not found: {artifact_id}"),
             Self::InvalidArtifactId(artifact_id) => write!(f, "invalid artifact id: {artifact_id}"),
             Self::InvalidBody(source) => write!(f, "failed to read request body: {source}"),
@@ -414,6 +431,24 @@ impl std::error::Error for ArtifactError {}
 
 impl IntoResponse for ArtifactError {
     fn into_response(self) -> Response {
+        let retry_after = match &self {
+            Self::RateLimitExceeded {
+                token_name,
+                limit,
+                window_seconds,
+            } => {
+                warn!(
+                    token_name = %token_name,
+                    limit,
+                    window_seconds,
+                    reason = "artifact_rate_limit_exceeded",
+                    "request rejected"
+                );
+                Some(*window_seconds)
+            }
+            _ => None,
+        };
+
         let status = match self {
             Self::MissingChecksum
             | Self::ChecksumMismatch { .. }
@@ -421,6 +456,7 @@ impl IntoResponse for ArtifactError {
             | Self::InvalidArtifactId(_)
             | Self::InvalidBody(_)
             | Self::InvalidHeader { .. } => StatusCode::BAD_REQUEST,
+            Self::RateLimitExceeded { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -430,7 +466,16 @@ impl IntoResponse for ArtifactError {
             message: self.to_string(),
         });
 
-        (status, payload).into_response()
+        let mut response = (status, payload).into_response();
+        if let Some(retry_after) = retry_after {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                HeaderValue::from_str(&retry_after.to_string())
+                    .expect("retry-after header should be valid"),
+            );
+        }
+
+        response
     }
 }
 
@@ -454,6 +499,7 @@ fn artifact_error_code(error: &ArtifactError) -> &'static str {
         ArtifactError::MissingChecksum => "artifact_missing_checksum",
         ArtifactError::ChecksumMismatch { .. } => "artifact_checksum_mismatch",
         ArtifactError::TooLarge { .. } => "artifact_too_large",
+        ArtifactError::RateLimitExceeded { .. } => "artifact_rate_limit_exceeded",
         ArtifactError::NotFound(_) => "artifact_not_found",
         ArtifactError::InvalidArtifactId(_) => "artifact_invalid_id",
         ArtifactError::InvalidBody(_) => "artifact_invalid_body",
@@ -463,11 +509,24 @@ fn artifact_error_code(error: &ArtifactError) -> &'static str {
 }
 
 pub async fn upload_artifact(
-    _: Authorized<ArtifactsWrite>,
+    auth: Authorized<ArtifactsWrite>,
     State(state): State<crate::AppState>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<(StatusCode, Json<ArtifactMetadata>), ArtifactError> {
+    state
+        .rate_limiter
+        .check(
+            "artifacts_write",
+            auth.token_name(),
+            state.config.artifacts.max_upload_requests_per_minute,
+            StdDuration::from_secs(60),
+        )
+        .map_err(|error| ArtifactError::RateLimitExceeded {
+            token_name: auth.token_name().to_string(),
+            limit: error.limit,
+            window_seconds: error.window_seconds,
+        })?;
     let checksum = checksum_from_headers(&headers, state.artifacts.require_checksum_on_upload())?;
     let limit = state.artifacts.max_upload_bytes();
     let bytes: Bytes = axum::body::to_bytes(body, limit)
@@ -734,6 +793,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rate_limits_artifact_uploads_per_token() {
+        let temp = temp_dir("artifact_http_rate_limit");
+        let state = test_state_with_upload_rate_limit(&temp, 1);
+        let app = Router::new()
+            .route("/artifacts", post(upload_artifact))
+            .with_state(state);
+        let payload = b"artifact-body";
+        let checksum = hex::encode(Sha256::digest(payload));
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::post("/artifacts")
+                    .header("authorization", "Bearer artifacts-write-token")
+                    .header("content-type", "application/octet-stream")
+                    .header("x-sha256", checksum.as_str())
+                    .body(Body::from(payload.to_vec()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let second = app
+            .oneshot(
+                Request::post("/artifacts")
+                    .header("authorization", "Bearer artifacts-write-token")
+                    .header("content-type", "application/octet-stream")
+                    .header("x-sha256", checksum.as_str())
+                    .body(Body::from(payload.to_vec()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            second
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Some("60")
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_invalid_artifact_id_over_http() {
         let temp = temp_dir("artifact_http_invalid_id");
         let state = test_state(&temp);
@@ -844,10 +949,12 @@ mod tests {
                 ttl_seconds: 3600,
                 cleanup_interval_seconds: 600,
                 require_checksum_on_upload: true,
+                max_upload_requests_per_minute: 60,
             },
             jobs: crate::config::JobsConfig {
                 default_log_limit_mb: 50,
                 max_request_body_kb: 64,
+                max_run_requests_per_minute: 60,
                 cleanup_successful_workdirs: true,
                 keep_failed_workdirs: true,
             },
@@ -895,6 +1002,86 @@ mod tests {
             jobs: std::sync::Arc::new(
                 JobStore::new(&config.data_dir).expect("job store should init"),
             ),
+            rate_limiter: std::sync::Arc::new(crate::rate_limit::RateLimiter::new()),
+            runtime_status: std::sync::Arc::new(crate::RuntimeStatus::new(0, 0)),
+        }
+    }
+
+    fn test_state_with_upload_rate_limit(
+        temp: &Path,
+        max_upload_requests_per_minute: u32,
+    ) -> AppState {
+        let manifests_dir = temp.join("manifests");
+        fs::create_dir_all(&manifests_dir).expect("manifests dir should be created");
+        let config = Config {
+            data_dir: temp.display().to_string(),
+            manifests_dir: manifests_dir.display().to_string(),
+            server: crate::config::ServerConfig {
+                listen: "127.0.0.1:0".to_string(),
+            },
+            auth: crate::config::AuthConfig {
+                mode: "bearer".to_string(),
+                tokens: Vec::new(),
+            },
+            artifacts: crate::config::ArtifactsConfig {
+                max_size_mb: 1,
+                ttl_seconds: 3600,
+                cleanup_interval_seconds: 600,
+                require_checksum_on_upload: true,
+                max_upload_requests_per_minute,
+            },
+            jobs: crate::config::JobsConfig {
+                default_log_limit_mb: 50,
+                max_request_body_kb: 64,
+                max_run_requests_per_minute: 60,
+                cleanup_successful_workdirs: true,
+                keep_failed_workdirs: true,
+            },
+        };
+
+        AppState {
+            config: std::sync::Arc::new(config.clone()),
+            auth: std::sync::Arc::new(
+                AuthStore::load_from_config(
+                    &crate::config::AuthConfig {
+                        mode: "bearer".to_string(),
+                        tokens: vec![
+                            crate::config::AuthTokenConfig {
+                                name: "writer".to_string(),
+                                token_env: "TOKEN_ARTIFACTS_WRITE".to_string(),
+                                permissions: vec!["artifacts:write".to_string()],
+                            },
+                            crate::config::AuthTokenConfig {
+                                name: "reader".to_string(),
+                                token_env: "TOKEN_ARTIFACTS_READ".to_string(),
+                                permissions: vec!["artifacts:read".to_string()],
+                            },
+                        ],
+                    },
+                    |name| match name {
+                        "TOKEN_ARTIFACTS_WRITE" => Some("artifacts-write-token".to_string()),
+                        "TOKEN_ARTIFACTS_READ" => Some("artifacts-read-token".to_string()),
+                        _ => None,
+                    },
+                )
+                .expect("auth should load"),
+            ),
+            manifests: std::sync::Arc::new(
+                ManifestStore::load_from_dir(&config.manifests_dir).expect("manifests should load"),
+            ),
+            artifacts: std::sync::Arc::new(
+                ArtifactStore::new(
+                    &config.data_dir,
+                    config.artifacts.ttl_seconds,
+                    config.artifacts.max_size_mb,
+                    config.artifacts.require_checksum_on_upload,
+                )
+                .expect("artifact store should init"),
+            ),
+            jobs: std::sync::Arc::new(
+                JobStore::new(&config.data_dir).expect("job store should init"),
+            ),
+            rate_limiter: std::sync::Arc::new(crate::rate_limit::RateLimiter::new()),
             runtime_status: std::sync::Arc::new(crate::RuntimeStatus::new(0, 0)),
         }
     }

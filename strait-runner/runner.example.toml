@@ -23,9 +23,11 @@ max_size_mb = 500
 ttl_seconds = 86400
 cleanup_interval_seconds = 600
 require_checksum_on_upload = true
+max_upload_requests_per_minute = 60
 
 [jobs]
 default_log_limit_mb = 50
 max_request_body_kb = 64
+max_run_requests_per_minute = 60
 cleanup_successful_workdirs = true
 keep_failed_workdirs = true
