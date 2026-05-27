@@ -1,8 +1,11 @@
-use std::{collections::BTreeMap, fs, path::Path, process::Stdio, sync::Arc};
+use std::{collections::BTreeMap, fs, io::Write, path::Path, process::Stdio, sync::Arc};
 
 use tokio::{
-    process::Command,
-    time::{Duration, timeout},
+    io::AsyncReadExt,
+    process::{Child, Command},
+    sync::mpsc,
+    task::JoinHandle,
+    time::{Duration, Instant},
 };
 
 use crate::{artifacts::ArtifactStore, manifest::OutputSpec};
@@ -23,22 +26,12 @@ impl JobStore {
         &self,
         execution: &JobExecution,
     ) -> Result<ExecutionOutcome, JobError> {
-        let stdout =
-            fs::File::create(&execution.stdout_path).map_err(|source| JobError::WriteFile {
-                path: execution.stdout_path.display().to_string(),
-                source,
-            })?;
-        let stderr =
-            fs::File::create(&execution.stderr_path).map_err(|source| JobError::WriteFile {
-                path: execution.stderr_path.display().to_string(),
-                source,
-            })?;
-
         let mut command = Command::new(&execution.manifest.script);
         command
             .current_dir(&execution.work_dir)
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        configure_process_group(&mut command);
 
         for (key, value) in build_job_env(&execution.metadata, execution) {
             command.env(key, value);
@@ -49,6 +42,31 @@ impl JobStore {
             source,
         })?;
 
+        let stdout = child.stdout.take().ok_or_else(|| JobError::SpawnProcess {
+            script: execution.manifest.script.clone(),
+            source: std::io::Error::other("stdout pipe missing"),
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| JobError::SpawnProcess {
+            script: execution.manifest.script.clone(),
+            source: std::io::Error::other("stderr pipe missing"),
+        })?;
+        let (log_limit_tx, mut log_limit_rx) = mpsc::unbounded_channel();
+
+        let mut stdout_task = tokio::spawn(capture_output(
+            stdout,
+            execution.stdout_path.clone(),
+            execution.log_limit_bytes,
+            "stdout",
+            log_limit_tx.clone(),
+        ));
+        let mut stderr_task = tokio::spawn(capture_output(
+            stderr,
+            execution.stderr_path.clone(),
+            execution.log_limit_bytes,
+            "stderr",
+            log_limit_tx,
+        ));
+
         let cancel_wait = async {
             let mut cancel_rx = execution.cancel_rx.clone();
             if *cancel_rx.borrow() {
@@ -57,43 +75,61 @@ impl JobStore {
                 cancel_rx.changed().await.map_err(|_| ())
             }
         };
+        tokio::pin!(cancel_wait);
+        let deadline = Instant::now() + Duration::from_secs(execution.manifest.timeout_seconds);
 
-        tokio::select! {
-            result = timeout(
-                Duration::from_secs(execution.manifest.timeout_seconds),
-                child.wait(),
-            ) => match result {
-                Ok(Ok(status)) => {
-                    let code = status.code();
-                    Ok(ExecutionOutcome {
+        loop {
+            if Instant::now() >= deadline {
+                terminate_job(&mut child).await;
+                abort_capture_tasks(&mut stdout_task, &mut stderr_task).await;
+                return Ok(ExecutionOutcome {
+                    status: JobStatus::TimedOut,
+                    exit_code: None,
+                    message: None,
+                });
+            }
+
+            tokio::select! {
+                _ = &mut cancel_wait => {
+                    terminate_job(&mut child).await;
+                    abort_capture_tasks(&mut stdout_task, &mut stderr_task).await;
+                    return Ok(ExecutionOutcome {
+                        status: JobStatus::Canceled,
+                        exit_code: None,
+                        message: None,
+                    });
+                },
+                Some(message) = log_limit_rx.recv() => {
+                    terminate_job(&mut child).await;
+                    abort_capture_tasks(&mut stdout_task, &mut stderr_task).await;
+                    return Ok(ExecutionOutcome {
+                        status: JobStatus::Failed,
+                        exit_code: None,
+                        message: Some(message),
+                    });
+                },
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+            }
+
+            match child.try_wait().map_err(|source| JobError::WaitProcess {
+                script: execution.manifest.script.clone(),
+                source,
+            })? {
+                Some(status) => {
+                    await_capture_result(&mut stdout_task).await?;
+                    await_capture_result(&mut stderr_task).await?;
+
+                    return Ok(ExecutionOutcome {
                         status: if status.success() {
                             JobStatus::Success
                         } else {
                             JobStatus::Failed
                         },
-                        exit_code: code,
-                    })
+                        exit_code: status.code(),
+                        message: None,
+                    });
                 }
-                Ok(Err(source)) => Err(JobError::WaitProcess {
-                    script: execution.manifest.script.clone(),
-                    source,
-                }),
-                Err(_) => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    Ok(ExecutionOutcome {
-                        status: JobStatus::TimedOut,
-                        exit_code: None,
-                    })
-                }
-            },
-            _ = cancel_wait => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                Ok(ExecutionOutcome {
-                    status: JobStatus::Canceled,
-                    exit_code: None,
-                })
+                None => {}
             }
         }
     }
@@ -104,6 +140,10 @@ impl JobStore {
 
         match outcome {
             Ok(outcome) => {
+                if let Some(message) = &outcome.message {
+                    let _ = append_runtime_message(&execution.stderr_path, message);
+                }
+
                 let final_status = if matches!(outcome.status, JobStatus::Success) {
                     match register_outputs(
                         &execution.artifacts,
@@ -234,12 +274,125 @@ fn register_outputs(
     Ok(())
 }
 
+async fn capture_output<R: tokio::io::AsyncRead + Unpin>(
+    mut reader: R,
+    path: std::path::PathBuf,
+    limit_bytes: u64,
+    stream_name: &'static str,
+    log_limit_tx: mpsc::UnboundedSender<String>,
+) -> Result<(), JobError> {
+    let mut file = fs::File::create(&path).map_err(|source| JobError::WriteFile {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let mut buffer = [0_u8; 8192];
+    let mut written = 0_u64;
+
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|source| JobError::ReadFile {
+                path: path.display().to_string(),
+                source,
+            })?;
+        if read == 0 {
+            return Ok(());
+        }
+
+        let remaining = limit_bytes.saturating_sub(written) as usize;
+        if remaining == 0 {
+            let _ = log_limit_tx.send(log_limit_message(stream_name, limit_bytes));
+            return Ok(());
+        }
+
+        let to_write = remaining.min(read);
+        file.write_all(&buffer[..to_write])
+            .map_err(|source| JobError::WriteFile {
+                path: path.display().to_string(),
+                source,
+            })?;
+        written += to_write as u64;
+
+        if to_write < read {
+            let _ = log_limit_tx.send(log_limit_message(stream_name, limit_bytes));
+            return Ok(());
+        }
+    }
+}
+
+async fn await_capture_result(task: &mut JoinHandle<Result<(), JobError>>) -> Result<(), JobError> {
+    match task.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(JobError::ReadFile {
+            path: "job output capture task".to_string(),
+            source: std::io::Error::other(error.to_string()),
+        }),
+    }
+}
+
+async fn abort_capture_tasks(
+    first: &mut JoinHandle<Result<(), JobError>>,
+    second: &mut JoinHandle<Result<(), JobError>>,
+) {
+    first.abort();
+    second.abort();
+    let _ = first.await;
+    let _ = second.await;
+}
+
+fn log_limit_message(stream_name: &str, limit_bytes: u64) -> String {
+    format!("job {stream_name} log exceeded configured limit of {limit_bytes} bytes")
+}
+
+async fn terminate_job(child: &mut Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        if unix_kill_process_group(pid as i32).is_ok() {
+            let _ = child.wait().await;
+            return;
+        }
+    }
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn unix_kill_process_group(pid: i32) -> std::io::Result<()> {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+
+    const SIGKILL: i32 = 9;
+
+    let result = unsafe { kill(-pid, SIGKILL) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 fn append_error(path: &Path, error: &JobError) -> Result<(), JobError> {
+    append_runtime_message(path, &error.to_string())
+}
+
+fn append_runtime_message(path: &Path, message: &str) -> Result<(), JobError> {
     let mut stderr = fs::read_to_string(path).unwrap_or_default();
     if !stderr.is_empty() && !stderr.ends_with('\n') {
         stderr.push('\n');
     }
-    stderr.push_str(&error.to_string());
+    stderr.push_str(message);
     stderr.push('\n');
 
     fs::write(path, stderr).map_err(|source| JobError::WriteFile {

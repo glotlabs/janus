@@ -26,6 +26,7 @@ pub async fn create_job(
         params,
         &state.manifests,
         &state.artifacts,
+        state.config.jobs.default_log_limit_mb,
         state.config.jobs.cleanup_successful_workdirs,
         state.config.jobs.keep_failed_workdirs,
     )?;

@@ -303,6 +303,7 @@ required = true
 "#,
         "#!/bin/sh\nprintf 'bundle' > \"$JOB_OUTPUT_DIR/app.tar.gz\"\n",
         600,
+        50,
     );
     let app = Router::new()
         .route("/jobs/{name}/runs", post(create_job))
@@ -352,6 +353,7 @@ required = true
 "#,
         "#!/bin/sh\nexit 0\n",
         600,
+        50,
     );
     let app = Router::new()
         .route("/jobs/{name}/runs", post(create_job))
@@ -545,6 +547,99 @@ async fn cancels_running_job_over_http() {
     let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
     assert_eq!(metadata.status, JobStatus::Canceled);
     assert_eq!(metadata.exit_code, None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancel_kills_child_process_tree() {
+    let temp = temp_dir("job_cancel_process_tree");
+    let state = test_state_with_script(
+        &temp,
+        "build-app",
+        "#!/bin/sh\nsleep 30 &\necho $! > \"$JOB_WORKDIR/child.pid\"\nwait\n",
+        600,
+    );
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .route("/runs/{job_id}", get(get_job).delete(cancel_job))
+        .with_state(state);
+
+    let created = read_created_job(
+        app.clone()
+            .oneshot(
+                Request::post("/jobs/build-app/runs")
+                    .header("authorization", "Bearer runner-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "abc123" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed"),
+    )
+    .await;
+
+    let child_pid_path = temp
+        .join("jobs")
+        .join(&created.job_id)
+        .join("work")
+        .join("child.pid");
+    let child_pid = wait_for_file(&child_pid_path).await;
+
+    let cancel = app
+        .oneshot(
+            Request::delete(format!("/runs/{}", created.job_id))
+                .header("authorization", "Bearer runner-token")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(cancel.status(), StatusCode::ACCEPTED);
+
+    let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+    assert_eq!(metadata.status, JobStatus::Canceled);
+    assert!(!unix_process_exists(
+        child_pid.trim().parse().expect("child pid should parse")
+    ));
+}
+
+#[tokio::test]
+async fn fails_job_when_log_limit_is_exceeded() {
+    let temp = temp_dir("job_log_limit");
+    let state =
+        test_state_with_script_and_log_limit(&temp, "build-app", "#!/bin/sh\nprintf 'a'\n", 600, 0);
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let created = read_created_job(
+        app.oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "commit": "abc123" }).to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed"),
+    )
+    .await;
+    let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+
+    assert_eq!(metadata.status, JobStatus::Failed);
+    assert_eq!(metadata.exit_code, None);
+    assert_eq!(
+        fs::read(temp.join("jobs").join(&created.job_id).join("stdout.log"))
+            .expect("stdout should read")
+            .len(),
+        0
+    );
+    assert!(
+        fs::read_to_string(temp.join("jobs").join(&created.job_id).join("stderr.log"))
+            .expect("stderr should read")
+            .contains("job stdout log exceeded configured limit")
+    );
 }
 
 #[test]
@@ -826,6 +921,7 @@ fn test_state(temp: &Path) -> AppState {
         "",
         "#!/bin/sh\nexit 0\n",
         600,
+        50,
     )
 }
 
@@ -837,6 +933,7 @@ fn test_state_with_artifact_manifest(temp: &Path) -> AppState {
         "",
         "#!/bin/sh\nexit 0\n",
         600,
+        50,
     )
 }
 
@@ -846,6 +943,16 @@ fn test_state_with_script(
     script_body: &str,
     timeout_seconds: u64,
 ) -> AppState {
+    test_state_with_script_and_log_limit(temp, job_name, script_body, timeout_seconds, 50)
+}
+
+fn test_state_with_script_and_log_limit(
+    temp: &Path,
+    job_name: &str,
+    script_body: &str,
+    timeout_seconds: u64,
+    default_log_limit_mb: u64,
+) -> AppState {
     test_state_from_manifest(
         temp,
         job_name,
@@ -853,6 +960,7 @@ fn test_state_with_script(
         "",
         script_body,
         timeout_seconds,
+        default_log_limit_mb,
     )
 }
 
@@ -863,6 +971,7 @@ fn test_state_from_manifest(
     outputs_toml: &str,
     script_body: &str,
     timeout_seconds: u64,
+    default_log_limit_mb: u64,
 ) -> AppState {
     let manifests_dir = temp.join("manifests");
     let scripts_dir = temp.join("scripts");
@@ -903,7 +1012,7 @@ concurrency = "parallel"
             require_checksum_on_upload: true,
         },
         jobs: JobsConfig {
-            default_log_limit_mb: 50,
+            default_log_limit_mb,
             cleanup_successful_workdirs: true,
             keep_failed_workdirs: true,
         },
@@ -1040,6 +1149,32 @@ async fn wait_for_terminal_metadata(temp: &Path, job_id: &str) -> JobMetadata {
     }
 
     panic!("job did not reach a terminal state");
+}
+
+async fn wait_for_file(path: &Path) -> String {
+    for _ in 0..100 {
+        if let Ok(contents) = fs::read_to_string(path) {
+            return contents;
+        }
+
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    panic!("file was not written: {}", path.display());
+}
+
+#[cfg(unix)]
+fn unix_process_exists(pid: i32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+
+    let result = unsafe { kill(pid, 0) };
+    if result == 0 {
+        true
+    } else {
+        std::io::Error::last_os_error().raw_os_error() != Some(3)
+    }
 }
 
 fn store_artifact(store: &ArtifactStore, bytes: &[u8]) -> String {

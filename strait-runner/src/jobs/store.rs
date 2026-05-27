@@ -55,6 +55,7 @@ impl JobStore {
         params: Map<String, Value>,
         manifests: &ManifestStore,
         artifacts: &ArtifactStore,
+        default_log_limit_mb: u64,
         cleanup_successful_workdirs: bool,
         keep_failed_workdirs: bool,
     ) -> Result<JobCreatedResponse, JobError> {
@@ -64,6 +65,11 @@ impl JobStore {
             .ok_or_else(|| JobError::UnknownJob(name.to_string()))?;
 
         let resolved = validate_params(&manifest, &params, artifacts)?;
+        let log_limit_bytes = default_log_limit_mb
+            .checked_mul(1024_u64 * 1024_u64)
+            .ok_or(JobError::InvalidLogLimit {
+                max_size_mb: default_log_limit_mb,
+            })?;
 
         let job_id = format!("job_{}", Uuid::now_v7().simple());
         let started_at = now_rfc3339();
@@ -136,6 +142,7 @@ impl JobStore {
             output_dir: job_dir.join("output"),
             stdout_path: job_dir.join("stdout.log"),
             stderr_path: job_dir.join("stderr.log"),
+            log_limit_bytes,
             cleanup_successful_workdirs,
             keep_failed_workdirs,
             metadata: job,

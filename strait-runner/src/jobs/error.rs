@@ -47,6 +47,9 @@ pub enum JobError {
         name: String,
         expected: &'static str,
     },
+    InvalidLogLimit {
+        max_size_mb: u64,
+    },
     Artifact(ArtifactError),
     ExpiredArtifact {
         name: String,
@@ -94,6 +97,9 @@ impl fmt::Display for JobError {
             Self::InvalidParamType { name, expected } => {
                 write!(f, "invalid param type for {name}: expected {expected}")
             }
+            Self::InvalidLogLimit { max_size_mb } => {
+                write!(f, "invalid job log limit in mb: {max_size_mb}")
+            }
             Self::Artifact(source) => write!(f, "{source}"),
             Self::ExpiredArtifact { name, artifact_id } => {
                 write!(
@@ -126,6 +132,7 @@ impl IntoResponse for JobError {
             Self::MissingParam(_)
             | Self::UnknownParam(_)
             | Self::InvalidParamType { .. }
+            | Self::InvalidLogLimit { .. }
             | Self::Artifact(ArtifactError::NotFound(_))
             | Self::Artifact(ArtifactError::MissingChecksum)
             | Self::Artifact(ArtifactError::ChecksumMismatch { .. })
@@ -181,6 +188,7 @@ impl JobErrorResponse {
             JobError::MissingParam(_) => "job_missing_param",
             JobError::UnknownParam(_) => "job_unknown_param",
             JobError::InvalidParamType { .. } => "job_invalid_param_type",
+            JobError::InvalidLogLimit { .. } => "job_invalid_log_limit",
             JobError::Artifact(_) => "artifact_error",
             JobError::ExpiredArtifact { .. } => "artifact_expired",
             JobError::MissingOutput { .. } => "job_missing_output",

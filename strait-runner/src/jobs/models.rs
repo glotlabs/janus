@@ -112,6 +112,7 @@ pub(super) struct JobExecution {
     pub(super) output_dir: std::path::PathBuf,
     pub(super) stdout_path: std::path::PathBuf,
     pub(super) stderr_path: std::path::PathBuf,
+    pub(super) log_limit_bytes: u64,
     pub(super) cleanup_successful_workdirs: bool,
     pub(super) keep_failed_workdirs: bool,
     pub(super) metadata: JobMetadata,
@@ -121,6 +122,7 @@ pub(super) struct JobExecution {
 pub(super) struct ExecutionOutcome {
     pub(super) status: JobStatus,
     pub(super) exit_code: Option<i32>,
+    pub(super) message: Option<String>,
 }
 
 impl From<JobCreated> for JobCreatedResponse {
