@@ -138,6 +138,54 @@ impl JobStore {
             started_at,
         })
     }
+
+    pub fn read_job(&self, job_id: &str) -> Result<JobMetadata, JobError> {
+        let metadata_path = self.root_dir.join(job_id).join("metadata.json");
+        let bytes = fs::read(&metadata_path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                JobError::JobNotFound(job_id.to_string())
+            } else {
+                JobError::ReadFile {
+                    path: metadata_path.display().to_string(),
+                    source,
+                }
+            }
+        })?;
+
+        serde_json::from_slice(&bytes).map_err(|source| JobError::ParseMetadata {
+            path: metadata_path.display().to_string(),
+            source,
+        })
+    }
+
+    pub fn read_logs(&self, job_id: &str) -> Result<JobLogs, JobError> {
+        let job_dir = self.root_dir.join(job_id);
+        let stdout_path = job_dir.join("stdout.log");
+        let stderr_path = job_dir.join("stderr.log");
+
+        let stdout = fs::read_to_string(&stdout_path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                JobError::JobNotFound(job_id.to_string())
+            } else {
+                JobError::ReadFile {
+                    path: stdout_path.display().to_string(),
+                    source,
+                }
+            }
+        })?;
+        let stderr = fs::read_to_string(&stderr_path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                JobError::JobNotFound(job_id.to_string())
+            } else {
+                JobError::ReadFile {
+                    path: stderr_path.display().to_string(),
+                    source,
+                }
+            }
+        })?;
+
+        Ok(JobLogs { stdout, stderr })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -157,6 +205,12 @@ pub struct JobMetadata {
     pub exit_code: Option<i32>,
     pub params: Map<String, Value>,
     pub resolved_artifacts: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobLogs {
+    pub stdout: String,
+    pub stderr: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,9 +251,17 @@ pub enum JobError {
         path: String,
         source: std::io::Error,
     },
+    ReadFile {
+        path: String,
+        source: std::io::Error,
+    },
     WriteFile {
         path: String,
         source: std::io::Error,
+    },
+    ParseMetadata {
+        path: String,
+        source: serde_json::Error,
     },
     SerializeMetadata {
         source: serde_json::Error,
@@ -212,6 +274,7 @@ pub enum JobError {
         script: String,
         source: std::io::Error,
     },
+    JobNotFound(String),
     UnknownJob(String),
     MissingParam(String),
     UnknownParam(String),
@@ -236,8 +299,14 @@ impl fmt::Display for JobError {
             Self::CreateDir { path, source } => {
                 write!(f, "failed to create job directory {path}: {source}")
             }
+            Self::ReadFile { path, source } => {
+                write!(f, "failed to read job file {path}: {source}")
+            }
             Self::WriteFile { path, source } => {
                 write!(f, "failed to write job file {path}: {source}")
+            }
+            Self::ParseMetadata { path, source } => {
+                write!(f, "failed to parse job metadata {path}: {source}")
             }
             Self::SerializeMetadata { source } => {
                 write!(f, "failed to serialize job metadata: {source}")
@@ -248,6 +317,7 @@ impl fmt::Display for JobError {
             Self::WaitProcess { script, source } => {
                 write!(f, "failed while waiting for job script {script}: {source}")
             }
+            Self::JobNotFound(job_id) => write!(f, "job not found: {job_id}"),
             Self::UnknownJob(name) => write!(f, "job not found: {name}"),
             Self::MissingParam(name) => write!(f, "missing required param: {name}"),
             Self::UnknownParam(name) => write!(f, "unknown param: {name}"),
@@ -278,7 +348,7 @@ impl From<ArtifactError> for JobError {
 impl IntoResponse for JobError {
     fn into_response(self) -> Response {
         let status = match self {
-            Self::UnknownJob(_) => StatusCode::NOT_FOUND,
+            Self::UnknownJob(_) | Self::JobNotFound(_) => StatusCode::NOT_FOUND,
             Self::MissingParam(_)
             | Self::UnknownParam(_)
             | Self::InvalidParamType { .. }
@@ -299,7 +369,9 @@ impl IntoResponse for JobError {
             | Self::Artifact(ArtifactError::InvalidBody(_))
             | Self::Artifact(ArtifactError::TimeOverflow)
             | Self::CreateDir { .. }
+            | Self::ReadFile { .. }
             | Self::WriteFile { .. }
+            | Self::ParseMetadata { .. }
             | Self::SpawnProcess { .. }
             | Self::WaitProcess { .. }
             | Self::SerializeMetadata { .. } => StatusCode::INTERNAL_SERVER_ERROR,
@@ -339,6 +411,20 @@ pub async fn create_job(
     )?;
 
     Ok((StatusCode::CREATED, Json(created)))
+}
+
+pub async fn get_job(
+    State(state): State<crate::AppState>,
+    AxumPath(job_id): AxumPath<String>,
+) -> Result<Json<JobMetadata>, JobError> {
+    Ok(Json(state.jobs.read_job(&job_id)?))
+}
+
+pub async fn get_job_logs(
+    State(state): State<crate::AppState>,
+    AxumPath(job_id): AxumPath<String>,
+) -> Result<Json<JobLogs>, JobError> {
+    Ok(Json(state.jobs.read_logs(&job_id)?))
 }
 
 fn validate_params(
@@ -657,14 +743,14 @@ mod tests {
         Router,
         body::Body,
         http::{Request, StatusCode},
-        routing::post,
+        routing::{get, post},
     };
     use serde_json::json;
     use sha2::Digest;
     use tokio::time::{Duration, sleep};
     use tower::util::ServiceExt;
 
-    use super::{JobMetadata, JobStore, create_job};
+    use super::{JobLogs, JobMetadata, JobStore, create_job, get_job, get_job_logs};
     use crate::{
         AppState,
         artifacts::ArtifactStore,
@@ -677,7 +763,7 @@ mod tests {
         let temp = temp_dir("job_create");
         let state = test_state(&temp);
         let app = Router::new()
-            .route("/jobs/{name}", post(create_job))
+            .route("/jobs/{id}", post(create_job))
             .with_state(state);
 
         let response = app
@@ -718,7 +804,7 @@ mod tests {
         let temp = temp_dir("job_missing_param");
         let state = test_state(&temp);
         let app = Router::new()
-            .route("/jobs/{name}", post(create_job))
+            .route("/jobs/{id}", post(create_job))
             .with_state(state);
 
         let response = app
@@ -739,7 +825,7 @@ mod tests {
         let temp = temp_dir("job_unknown_param");
         let state = test_state(&temp);
         let app = Router::new()
-            .route("/jobs/{name}", post(create_job))
+            .route("/jobs/{id}", post(create_job))
             .with_state(state);
 
         let response = app
@@ -768,7 +854,7 @@ mod tests {
         let state = test_state_with_artifact_manifest(&temp);
         let artifact_id = store_artifact(&state.artifacts, b"src");
         let app = Router::new()
-            .route("/jobs/{name}", post(create_job))
+            .route("/jobs/{id}", post(create_job))
             .with_state(state);
 
         let response = app
@@ -817,7 +903,7 @@ exit 0
         );
         let artifact_id = store_artifact(&state.artifacts, b"src");
         let app = Router::new()
-            .route("/jobs/{name}", post(create_job))
+            .route("/jobs/{id}", post(create_job))
             .with_state(state);
 
         let response = app
@@ -870,7 +956,7 @@ exit 0
             600,
         );
         let app = Router::new()
-            .route("/jobs/{name}", post(create_job))
+            .route("/jobs/{id}", post(create_job))
             .with_state(state);
 
         let response = app
@@ -901,7 +987,7 @@ exit 0
         let temp = temp_dir("job_execute_timeout");
         let state = test_state_with_script(&temp, "build-app", "#!/bin/sh\nsleep 2\n", 1);
         let app = Router::new()
-            .route("/jobs/{name}", post(create_job))
+            .route("/jobs/{id}", post(create_job))
             .with_state(state);
 
         let response = app
@@ -919,6 +1005,97 @@ exit 0
 
         assert_eq!(metadata.status, super::JobStatus::TimedOut);
         assert_eq!(metadata.exit_code, None);
+    }
+
+    #[tokio::test]
+    async fn reads_job_status_over_http() {
+        let temp = temp_dir("job_status_http");
+        let state = test_state_with_script(&temp, "build-app", "#!/bin/sh\nexit 0\n", 600);
+        let app = Router::new()
+            .route("/jobs/{id}", get(get_job).post(create_job))
+            .with_state(state);
+
+        let created = read_created_job(
+            app.clone()
+                .oneshot(
+                    Request::post("/jobs/build-app")
+                        .header("content-type", "application/json")
+                        .body(Body::from(json!({ "commit": "abc123" }).to_string()))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("request should succeed"),
+        )
+        .await;
+
+        let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+
+        let response = app
+            .oneshot(
+                Request::get(format!("/jobs/{}", created.job_id))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let fetched: JobMetadata = serde_json::from_slice(&body).expect("job metadata body");
+
+        assert_eq!(fetched.job_id, created.job_id);
+        assert_eq!(fetched.status, metadata.status);
+        assert_eq!(fetched.finished_at, metadata.finished_at);
+    }
+
+    #[tokio::test]
+    async fn reads_job_logs_over_http() {
+        let temp = temp_dir("job_logs_http");
+        let state = test_state_with_script(
+            &temp,
+            "build-app",
+            "#!/bin/sh\nprintf 'out'\nprintf 'err' >&2\n",
+            600,
+        );
+        let app = Router::new()
+            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{job_id}/logs", get(get_job_logs))
+            .with_state(state);
+
+        let created = read_created_job(
+            app.clone()
+                .oneshot(
+                    Request::post("/jobs/build-app")
+                        .header("content-type", "application/json")
+                        .body(Body::from(json!({ "commit": "abc123" }).to_string()))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("request should succeed"),
+        )
+        .await;
+
+        let _ = wait_for_terminal_metadata(&temp, &created.job_id).await;
+
+        let response = app
+            .oneshot(
+                Request::get(format!("/jobs/{}/logs", created.job_id))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let logs: JobLogs = serde_json::from_slice(&body).expect("job logs body");
+
+        assert_eq!(logs.stdout, "out");
+        assert_eq!(logs.stderr, "err");
     }
 
     fn test_state(temp: &Path) -> AppState {
