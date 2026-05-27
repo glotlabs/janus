@@ -50,6 +50,9 @@ pub enum JobError {
     InvalidLogLimit {
         max_size_mb: u64,
     },
+    InvalidRequestBodyLimit {
+        max_size_kb: u64,
+    },
     ShuttingDown,
     Artifact(ArtifactError),
     ExpiredArtifact {
@@ -64,6 +67,12 @@ pub enum JobError {
         reason: String,
     },
     InvalidBody(&'static str),
+    RequestTooLarge {
+        max_bytes: usize,
+    },
+    ParseRequestBody {
+        source: serde_json::Error,
+    },
     InvalidJobId(String),
 }
 
@@ -102,6 +111,9 @@ impl fmt::Display for JobError {
             Self::InvalidLogLimit { max_size_mb } => {
                 write!(f, "invalid job log limit in mb: {max_size_mb}")
             }
+            Self::InvalidRequestBodyLimit { max_size_kb } => {
+                write!(f, "invalid job request body limit in kb: {max_size_kb}")
+            }
             Self::ShuttingDown => write!(f, "runner is shutting down and not accepting new jobs"),
             Self::Artifact(source) => write!(f, "{source}"),
             Self::ExpiredArtifact { name, artifact_id } => {
@@ -115,6 +127,15 @@ impl fmt::Display for JobError {
             }
             Self::ConcurrencyConflict { reason } => write!(f, "{reason}"),
             Self::InvalidBody(message) => write!(f, "invalid job request body: {message}"),
+            Self::RequestTooLarge { max_bytes } => {
+                write!(
+                    f,
+                    "job request body exceeds configured limit of {max_bytes} bytes"
+                )
+            }
+            Self::ParseRequestBody { source } => {
+                write!(f, "failed to parse job request body as json: {source}")
+            }
             Self::InvalidJobId(job_id) => write!(f, "invalid job id: {job_id}"),
         }
     }
@@ -138,6 +159,7 @@ impl IntoResponse for JobError {
             | Self::UnknownParam(_)
             | Self::InvalidParamType { .. }
             | Self::InvalidLogLimit { .. }
+            | Self::InvalidRequestBodyLimit { .. }
             | Self::Artifact(ArtifactError::NotFound(_))
             | Self::Artifact(ArtifactError::MissingChecksum)
             | Self::Artifact(ArtifactError::ChecksumMismatch { .. })
@@ -148,7 +170,9 @@ impl IntoResponse for JobError {
             | Self::MissingOutput { .. }
             | Self::ExpiredArtifact { .. }
             | Self::InvalidBody(_)
+            | Self::ParseRequestBody { .. }
             | Self::InvalidJobId(_) => StatusCode::BAD_REQUEST,
+            Self::RequestTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ConcurrencyConflict { .. } => StatusCode::CONFLICT,
             Self::Artifact(ArtifactError::ParseMetadata { .. })
             | Self::Artifact(ArtifactError::CreateDir { .. })
@@ -196,12 +220,15 @@ impl JobErrorResponse {
             JobError::UnknownParam(_) => "job_unknown_param",
             JobError::InvalidParamType { .. } => "job_invalid_param_type",
             JobError::InvalidLogLimit { .. } => "job_invalid_log_limit",
+            JobError::InvalidRequestBodyLimit { .. } => "job_invalid_request_body_limit",
             JobError::ShuttingDown => "job_runner_shutting_down",
             JobError::Artifact(_) => "artifact_error",
             JobError::ExpiredArtifact { .. } => "artifact_expired",
             JobError::MissingOutput { .. } => "job_missing_output",
             JobError::ConcurrencyConflict { .. } => "job_concurrency_conflict",
             JobError::InvalidBody(_) => "job_invalid_body",
+            JobError::RequestTooLarge { .. } => "job_request_body_too_large",
+            JobError::ParseRequestBody { .. } => "job_request_body_parse_failed",
             JobError::InvalidJobId(_) => "job_invalid_id",
         };
 

@@ -84,6 +84,7 @@ pub struct ArtifactsConfig {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct JobsConfig {
     pub default_log_limit_mb: u64,
+    pub max_request_body_kb: u64,
     pub cleanup_successful_workdirs: bool,
     pub keep_failed_workdirs: bool,
 }
@@ -117,6 +118,7 @@ require_checksum_on_upload = true
 
 [jobs]
 default_log_limit_mb = 50
+max_request_body_kb = 64
 cleanup_successful_workdirs = true
 keep_failed_workdirs = true
 "#;
@@ -127,6 +129,7 @@ keep_failed_workdirs = true
         assert_eq!(parsed.server.listen, "127.0.0.1:8080");
         assert_eq!(parsed.auth.tokens.len(), 1);
         assert!(parsed.artifacts.require_checksum_on_upload);
+        assert_eq!(parsed.jobs.max_request_body_kb, 64);
         assert!(parsed.jobs.keep_failed_workdirs);
     }
 }

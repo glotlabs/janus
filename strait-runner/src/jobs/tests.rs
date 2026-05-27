@@ -123,6 +123,64 @@ async fn rejects_unknown_param() {
 }
 
 #[tokio::test]
+async fn accepts_job_request_with_body_within_limit() {
+    let temp = temp_dir("job_request_within_limit");
+    let state = test_state_with_request_body_limit(&temp, 1);
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let branch = "b".repeat(900);
+    let response = app
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "commit": "abc123",
+                        "branch": branch
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn rejects_job_request_body_over_limit() {
+    let temp = temp_dir("job_request_over_limit");
+    let state = test_state_with_request_body_limit(&temp, 1);
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let branch = "b".repeat(1500);
+    let response = app
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "commit": "abc123",
+                        "branch": branch
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
 async fn resolves_artifact_params() {
     let temp = temp_dir("job_artifact_param");
     let state = test_state_with_artifact_manifest(&temp);
@@ -304,6 +362,7 @@ required = true
         "#!/bin/sh\nprintf 'bundle' > \"$JOB_OUTPUT_DIR/app.tar.gz\"\n",
         600,
         50,
+        64,
     );
     let app = Router::new()
         .route("/jobs/{name}/runs", post(create_job))
@@ -354,6 +413,7 @@ required = true
         "#!/bin/sh\nexit 0\n",
         600,
         50,
+        64,
     );
     let app = Router::new()
         .route("/jobs/{name}/runs", post(create_job))
@@ -670,8 +730,14 @@ async fn cancel_kills_child_process_tree() {
 #[tokio::test]
 async fn fails_job_when_log_limit_is_exceeded() {
     let temp = temp_dir("job_log_limit");
-    let state =
-        test_state_with_script_and_log_limit(&temp, "build-app", "#!/bin/sh\nprintf 'a'\n", 600, 0);
+    let state = test_state_with_script_and_log_limit(
+        &temp,
+        "build-app",
+        "#!/bin/sh\nprintf 'a'\n",
+        600,
+        0,
+        64,
+    );
     let app = Router::new()
         .route("/jobs/{name}/runs", post(create_job))
         .with_state(state);
@@ -1073,6 +1139,7 @@ fn test_state(temp: &Path) -> AppState {
         "#!/bin/sh\nexit 0\n",
         600,
         50,
+        64,
     )
 }
 
@@ -1085,6 +1152,20 @@ fn test_state_with_artifact_manifest(temp: &Path) -> AppState {
         "#!/bin/sh\nexit 0\n",
         600,
         50,
+        64,
+    )
+}
+
+fn test_state_with_request_body_limit(temp: &Path, max_request_body_kb: u64) -> AppState {
+    test_state_from_manifest(
+        temp,
+        "build-app",
+        REQUIRED_COMMIT_AND_BRANCH_PARAMS,
+        "",
+        "#!/bin/sh\nexit 0\n",
+        600,
+        50,
+        max_request_body_kb,
     )
 }
 
@@ -1094,7 +1175,7 @@ fn test_state_with_script(
     script_body: &str,
     timeout_seconds: u64,
 ) -> AppState {
-    test_state_with_script_and_log_limit(temp, job_name, script_body, timeout_seconds, 50)
+    test_state_with_script_and_log_limit(temp, job_name, script_body, timeout_seconds, 50, 64)
 }
 
 fn test_state_with_script_and_log_limit(
@@ -1103,6 +1184,7 @@ fn test_state_with_script_and_log_limit(
     script_body: &str,
     timeout_seconds: u64,
     default_log_limit_mb: u64,
+    max_request_body_kb: u64,
 ) -> AppState {
     test_state_from_manifest(
         temp,
@@ -1112,6 +1194,7 @@ fn test_state_with_script_and_log_limit(
         script_body,
         timeout_seconds,
         default_log_limit_mb,
+        max_request_body_kb,
     )
 }
 
@@ -1123,6 +1206,7 @@ fn test_state_from_manifest(
     script_body: &str,
     timeout_seconds: u64,
     default_log_limit_mb: u64,
+    max_request_body_kb: u64,
 ) -> AppState {
     let manifests_dir = temp.join("manifests");
     let scripts_dir = temp.join("scripts");
@@ -1164,6 +1248,7 @@ concurrency = "parallel"
         },
         jobs: JobsConfig {
             default_log_limit_mb,
+            max_request_body_kb,
             cleanup_successful_workdirs: true,
             keep_failed_workdirs: true,
         },
@@ -1226,6 +1311,7 @@ concurrency = "{}"
         },
         jobs: JobsConfig {
             default_log_limit_mb: 50,
+            max_request_body_kb: 64,
             cleanup_successful_workdirs: true,
             keep_failed_workdirs: true,
         },

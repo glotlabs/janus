@@ -1,5 +1,6 @@
 use axum::{
     Json,
+    body::{Body, Bytes},
     extract::{Path as AxumPath, State},
     http::StatusCode,
 };
@@ -16,9 +17,23 @@ pub async fn create_job(
     _: Authorized<JobsRun>,
     State(state): State<crate::AppState>,
     AxumPath(name): AxumPath<String>,
-    Json(body): Json<Value>,
+    body: Body,
 ) -> Result<(StatusCode, Json<JobCreatedResponse>), JobError> {
     info!(job_name = %name, "job run requested");
+    let max_bytes = state
+        .config
+        .jobs
+        .max_request_body_kb
+        .checked_mul(1024)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or(JobError::InvalidRequestBodyLimit {
+            max_size_kb: state.config.jobs.max_request_body_kb,
+        })?;
+    let bytes: Bytes = axum::body::to_bytes(body, max_bytes)
+        .await
+        .map_err(|_| JobError::RequestTooLarge { max_bytes })?;
+    let body: Value =
+        serde_json::from_slice(&bytes).map_err(|source| JobError::ParseRequestBody { source })?;
     let params = body
         .as_object()
         .cloned()

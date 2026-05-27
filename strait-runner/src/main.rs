@@ -598,6 +598,7 @@ required = true
             },
             jobs: JobsConfig {
                 default_log_limit_mb: 50,
+                max_request_body_kb: 64,
                 cleanup_successful_workdirs: true,
                 keep_failed_workdirs: true,
             },
