@@ -1,5 +1,6 @@
 mod artifacts;
 mod config;
+mod jobs;
 mod manifest;
 
 use std::{env, net::SocketAddr, sync::Arc};
@@ -11,6 +12,7 @@ use axum::{
     routing::{get, post},
 };
 use config::Config;
+use jobs::JobStore;
 use manifest::ManifestStore;
 use serde::Serialize;
 use tracing::info;
@@ -20,6 +22,7 @@ pub(crate) struct AppState {
     config: Arc<Config>,
     manifests: Arc<ManifestStore>,
     artifacts: Arc<ArtifactStore>,
+    jobs: Arc<JobStore>,
 }
 
 #[derive(Serialize)]
@@ -46,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config: Arc::clone(&config),
         manifests: Arc::clone(&manifests),
         artifacts,
+        jobs: Arc::new(JobStore::new(&config.data_dir)?),
     };
     let app = build_app(state);
 
@@ -89,6 +93,7 @@ fn build_app(state: AppState) -> Router {
             "/artifacts/{artifact_id}",
             get(artifacts::download_artifact),
         )
+        .route("/jobs/{name}", post(jobs::create_job))
         .with_state(state)
 }
 

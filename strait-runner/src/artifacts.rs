@@ -122,22 +122,29 @@ impl ArtifactStore {
 
     pub fn load(&self, artifact_id: &str) -> Result<StoredArtifact, ArtifactError> {
         let artifact_dir = self.root_dir.join(artifact_id);
-        let metadata_path = artifact_dir.join("metadata.json");
         let blob_path = artifact_dir.join("blob");
 
-        let metadata_raw = fs::read(&metadata_path)
-            .map_err(|_| ArtifactError::NotFound(artifact_id.to_string()))?;
-        let metadata: ArtifactMetadata =
-            serde_json::from_slice(&metadata_raw).map_err(|source| {
-                ArtifactError::ParseMetadata {
-                    path: metadata_path.display().to_string(),
-                    source,
-                }
-            })?;
+        let metadata = self.load_metadata(artifact_id)?;
         let bytes =
             fs::read(&blob_path).map_err(|_| ArtifactError::NotFound(artifact_id.to_string()))?;
 
         Ok(StoredArtifact { metadata, bytes })
+    }
+
+    pub fn load_metadata(&self, artifact_id: &str) -> Result<ArtifactMetadata, ArtifactError> {
+        let artifact_dir = self.root_dir.join(artifact_id);
+        let metadata_path = artifact_dir.join("metadata.json");
+        let metadata_raw = fs::read(&metadata_path)
+            .map_err(|_| ArtifactError::NotFound(artifact_id.to_string()))?;
+
+        serde_json::from_slice(&metadata_raw).map_err(|source| ArtifactError::ParseMetadata {
+            path: metadata_path.display().to_string(),
+            source,
+        })
+    }
+
+    pub fn artifact_blob_path(&self, artifact_id: &str) -> PathBuf {
+        self.root_dir.join(artifact_id).join("blob")
     }
 }
 
@@ -147,6 +154,19 @@ pub struct ArtifactMetadata {
     pub sha256: String,
     pub size: u64,
     pub expires_at: String,
+}
+
+impl ArtifactMetadata {
+    pub fn is_expired(&self) -> Result<bool, ArtifactError> {
+        let expires_at = DateTime::parse_from_rfc3339(&self.expires_at).map_err(|source| {
+            ArtifactError::ParseExpiry {
+                expires_at: self.expires_at.clone(),
+                source,
+            }
+        })?;
+
+        Ok(expires_at.with_timezone(&Utc) <= Utc::now())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +194,10 @@ pub enum ArtifactError {
     ParseMetadata {
         path: String,
         source: serde_json::Error,
+    },
+    ParseExpiry {
+        expires_at: String,
+        source: chrono::ParseError,
     },
     MissingChecksum,
     ChecksumMismatch {
@@ -210,6 +234,9 @@ impl fmt::Display for ArtifactError {
             }
             Self::ParseMetadata { path, source } => {
                 write!(f, "failed to parse artifact metadata {path}: {source}")
+            }
+            Self::ParseExpiry { expires_at, source } => {
+                write!(f, "failed to parse artifact expiry {expires_at}: {source}")
             }
             Self::MissingChecksum => write!(f, "missing required x-sha256 header"),
             Self::ChecksumMismatch { expected, actual } => {
@@ -348,7 +375,7 @@ mod tests {
     use tower::util::ServiceExt;
 
     use super::{ArtifactStore, download_artifact, upload_artifact};
-    use crate::{AppState, config::Config, manifest::ManifestStore};
+    use crate::{AppState, config::Config, jobs::JobStore, manifest::ManifestStore};
 
     #[tokio::test]
     async fn stores_and_reads_artifact() {
@@ -481,6 +508,9 @@ mod tests {
                     config.artifacts.require_checksum_on_upload,
                 )
                 .expect("artifact store should init"),
+            ),
+            jobs: std::sync::Arc::new(
+                JobStore::new(&config.data_dir).expect("job store should init"),
             ),
         }
     }
