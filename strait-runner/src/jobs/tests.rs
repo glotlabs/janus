@@ -396,6 +396,84 @@ max_json_bytes = 16
 }
 
 #[tokio::test]
+async fn accepts_structured_json_param() {
+    let temp = temp_dir("job_json_accepts_structured_value");
+    let state = test_state_from_manifest(
+        &temp,
+        "build-app",
+        r#"
+[params.payload]
+type = "json"
+required = true
+"#,
+        "",
+        "#!/bin/sh\nexit 0\n",
+        600,
+        50,
+        64,
+    );
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "payload": {
+                            "commit": "abc123",
+                            "flags": ["fast", "clean"]
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn rejects_null_json_param() {
+    let temp = temp_dir("job_json_rejects_null");
+    let state = test_state_from_manifest(
+        &temp,
+        "build-app",
+        r#"
+[params.payload]
+type = "json"
+required = true
+"#,
+        "",
+        "#!/bin/sh\nexit 0\n",
+        600,
+        50,
+        64,
+    );
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "payload": null }).to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn resolves_artifact_params() {
     let temp = temp_dir("job_artifact_param");
     let state = test_state_with_artifact_manifest(&temp);
