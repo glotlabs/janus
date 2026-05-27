@@ -181,6 +181,116 @@ async fn rejects_job_request_body_over_limit() {
 }
 
 #[tokio::test]
+async fn rejects_string_param_over_max_length() {
+    let temp = temp_dir("job_string_max_length");
+    let state = test_state_from_manifest(
+        &temp,
+        "build-app",
+        r#"
+[params.commit]
+type = "string"
+required = true
+max_length = 6
+"#,
+        "",
+        "#!/bin/sh\nexit 0\n",
+        600,
+        50,
+        64,
+    );
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "commit": "abcdefg" }).to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn rejects_string_param_that_fails_pattern() {
+    let temp = temp_dir("job_string_pattern");
+    let state = test_state_from_manifest(
+        &temp,
+        "build-app",
+        r#"
+[params.commit]
+type = "string"
+required = true
+pattern = "^[a-f0-9]+$"
+"#,
+        "",
+        "#!/bin/sh\nexit 0\n",
+        600,
+        50,
+        64,
+    );
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "commit": "not-a-sha" }).to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn rejects_json_param_over_max_json_bytes() {
+    let temp = temp_dir("job_json_max_bytes");
+    let state = test_state_from_manifest(
+        &temp,
+        "build-app",
+        r#"
+[params.payload]
+type = "json"
+required = true
+max_json_bytes = 16
+"#,
+        "",
+        "#!/bin/sh\nexit 0\n",
+        600,
+        50,
+        64,
+    );
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "payload": { "long": "value that exceeds the limit" } }).to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn resolves_artifact_params() {
     let temp = temp_dir("job_artifact_param");
     let state = test_state_with_artifact_manifest(&temp);

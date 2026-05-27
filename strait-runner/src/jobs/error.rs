@@ -47,6 +47,10 @@ pub enum JobError {
         name: String,
         expected: &'static str,
     },
+    InvalidParamValue {
+        name: String,
+        reason: String,
+    },
     InvalidLogLimit {
         max_size_mb: u64,
     },
@@ -108,6 +112,9 @@ impl fmt::Display for JobError {
             Self::InvalidParamType { name, expected } => {
                 write!(f, "invalid param type for {name}: expected {expected}")
             }
+            Self::InvalidParamValue { name, reason } => {
+                write!(f, "invalid param value for {name}: {reason}")
+            }
             Self::InvalidLogLimit { max_size_mb } => {
                 write!(f, "invalid job log limit in mb: {max_size_mb}")
             }
@@ -158,6 +165,7 @@ impl IntoResponse for JobError {
             Self::MissingParam(_)
             | Self::UnknownParam(_)
             | Self::InvalidParamType { .. }
+            | Self::InvalidParamValue { .. }
             | Self::InvalidLogLimit { .. }
             | Self::InvalidRequestBodyLimit { .. }
             | Self::Artifact(ArtifactError::NotFound(_))
@@ -219,6 +227,7 @@ impl JobErrorResponse {
             JobError::MissingParam(_) => "job_missing_param",
             JobError::UnknownParam(_) => "job_unknown_param",
             JobError::InvalidParamType { .. } => "job_invalid_param_type",
+            JobError::InvalidParamValue { .. } => "job_invalid_param_value",
             JobError::InvalidLogLimit { .. } => "job_invalid_log_limit",
             JobError::InvalidRequestBodyLimit { .. } => "job_invalid_request_body_limit",
             JobError::ShuttingDown => "job_runner_shutting_down",

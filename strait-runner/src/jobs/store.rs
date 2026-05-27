@@ -9,6 +9,7 @@ use std::{
 };
 
 use chrono::{SecondsFormat, Utc};
+use regex::Regex;
 use serde_json::{Map, Value};
 use tokio::sync::watch;
 use tracing::{Instrument, error, info, info_span, warn};
@@ -411,10 +412,28 @@ fn validate_params(
 
         match spec.kind {
             ParamType::String => {
-                if !value.is_string() {
-                    return Err(JobError::InvalidParamType {
+                let string_value = value.as_str().ok_or_else(|| JobError::InvalidParamType {
+                    name: name.clone(),
+                    expected: "string",
+                })?;
+
+                if let Some(max_length) = spec.max_length
+                    && string_value.chars().count() > max_length
+                {
+                    return Err(JobError::InvalidParamValue {
                         name: name.clone(),
-                        expected: "string",
+                        reason: format!("must be at most {max_length} characters"),
+                    });
+                }
+
+                if let Some(pattern) = &spec.pattern
+                    && !Regex::new(pattern)
+                        .expect("manifest pattern should have been validated")
+                        .is_match(string_value)
+                {
+                    return Err(JobError::InvalidParamValue {
+                        name: name.clone(),
+                        reason: format!("must match pattern {pattern}"),
                     });
                 }
             }
@@ -461,6 +480,15 @@ fn validate_params(
                     return Err(JobError::InvalidParamType {
                         name: name.clone(),
                         expected: "json",
+                    });
+                }
+
+                if let Some(max_json_bytes) = spec.max_json_bytes
+                    && value.to_string().len() > max_json_bytes
+                {
+                    return Err(JobError::InvalidParamValue {
+                        name: name.clone(),
+                        reason: format!("must be at most {max_json_bytes} JSON bytes"),
                     });
                 }
             }

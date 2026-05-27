@@ -4,6 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 const RESERVED_PARAM_NAMES: &[&str] = &["id", "name", "workdir", "output_dir", "metadata_path"];
@@ -119,6 +120,10 @@ impl JobManifest {
             validate_param_name(param_name, path)?;
         }
 
+        for (param_name, param) in &self.params {
+            validate_param_constraints(param_name, param, path)?;
+        }
+
         for output_name in self.outputs.keys() {
             validate_output_name(output_name, path)?;
         }
@@ -146,6 +151,9 @@ pub struct ParamSpec {
     #[serde(rename = "type")]
     pub kind: ParamType,
     pub required: bool,
+    pub max_length: Option<usize>,
+    pub pattern: Option<String>,
+    pub max_json_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -194,6 +202,11 @@ pub enum ManifestError {
     InvalidParamName {
         name: String,
         path: String,
+    },
+    InvalidParamConstraint {
+        name: String,
+        path: String,
+        reason: String,
     },
     InvalidOutputName {
         name: String,
@@ -247,6 +260,12 @@ impl fmt::Display for ManifestError {
             }
             Self::InvalidParamName { name, path } => {
                 write!(f, "invalid param name {name} in manifest {path}")
+            }
+            Self::InvalidParamConstraint { name, path, reason } => {
+                write!(
+                    f,
+                    "invalid param constraint for {name} in manifest {path}: {reason}"
+                )
             }
             Self::InvalidOutputName { name, path } => {
                 write!(f, "invalid output name {name} in manifest {path}")
@@ -307,6 +326,66 @@ fn validate_output_name(name: &str, path: &Path) -> Result<(), ManifestError> {
             name: name.to_string(),
             path: path.display().to_string(),
         });
+    }
+
+    Ok(())
+}
+
+fn validate_param_constraints(
+    name: &str,
+    spec: &ParamSpec,
+    path: &Path,
+) -> Result<(), ManifestError> {
+    if let Some(max_length) = spec.max_length {
+        if max_length == 0 {
+            return Err(ManifestError::InvalidParamConstraint {
+                name: name.to_string(),
+                path: path.display().to_string(),
+                reason: "max_length must be positive".to_string(),
+            });
+        }
+
+        if !matches!(spec.kind, ParamType::String) {
+            return Err(ManifestError::InvalidParamConstraint {
+                name: name.to_string(),
+                path: path.display().to_string(),
+                reason: "max_length is only supported for string params".to_string(),
+            });
+        }
+    }
+
+    if let Some(pattern) = &spec.pattern {
+        if !matches!(spec.kind, ParamType::String) {
+            return Err(ManifestError::InvalidParamConstraint {
+                name: name.to_string(),
+                path: path.display().to_string(),
+                reason: "pattern is only supported for string params".to_string(),
+            });
+        }
+
+        Regex::new(pattern).map_err(|error| ManifestError::InvalidParamConstraint {
+            name: name.to_string(),
+            path: path.display().to_string(),
+            reason: format!("invalid regex pattern: {error}"),
+        })?;
+    }
+
+    if let Some(max_json_bytes) = spec.max_json_bytes {
+        if max_json_bytes == 0 {
+            return Err(ManifestError::InvalidParamConstraint {
+                name: name.to_string(),
+                path: path.display().to_string(),
+                reason: "max_json_bytes must be positive".to_string(),
+            });
+        }
+
+        if !matches!(spec.kind, ParamType::Json) {
+            return Err(ManifestError::InvalidParamConstraint {
+                name: name.to_string(),
+                path: path.display().to_string(),
+                reason: "max_json_bytes is only supported for json params".to_string(),
+            });
+        }
     }
 
     Ok(())
@@ -523,6 +602,108 @@ required = true
             JobManifest::load_from_path(&manifest_path).expect_err("reserved param must fail");
 
         assert!(matches!(error, ManifestError::InvalidParamName { .. }));
+    }
+
+    #[test]
+    fn rejects_invalid_string_param_pattern() {
+        let temp = temp_dir("invalid_param_pattern");
+        let script = write_executable_script(&temp, "build.sh");
+        let manifest_path = temp.join("bad.toml");
+
+        fs::write(
+            &manifest_path,
+            format!(
+                r#"
+name = "build-app"
+script = "{}"
+timeout_seconds = 600
+concurrency = "parallel"
+
+[params.commit]
+type = "string"
+required = true
+pattern = "[unterminated"
+"#,
+                script.display()
+            ),
+        )
+        .expect("manifest should be written");
+
+        let error =
+            JobManifest::load_from_path(&manifest_path).expect_err("invalid regex must fail");
+
+        assert!(matches!(
+            error,
+            ManifestError::InvalidParamConstraint { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_string_constraints_on_non_string_param() {
+        let temp = temp_dir("invalid_string_constraint_kind");
+        let script = write_executable_script(&temp, "build.sh");
+        let manifest_path = temp.join("bad.toml");
+
+        fs::write(
+            &manifest_path,
+            format!(
+                r#"
+name = "build-app"
+script = "{}"
+timeout_seconds = 600
+concurrency = "parallel"
+
+[params.count]
+type = "integer"
+required = true
+max_length = 12
+"#,
+                script.display()
+            ),
+        )
+        .expect("manifest should be written");
+
+        let error = JobManifest::load_from_path(&manifest_path)
+            .expect_err("string constraint on integer must fail");
+
+        assert!(matches!(
+            error,
+            ManifestError::InvalidParamConstraint { .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_json_constraints_on_non_json_param() {
+        let temp = temp_dir("invalid_json_constraint_kind");
+        let script = write_executable_script(&temp, "build.sh");
+        let manifest_path = temp.join("bad.toml");
+
+        fs::write(
+            &manifest_path,
+            format!(
+                r#"
+name = "build-app"
+script = "{}"
+timeout_seconds = 600
+concurrency = "parallel"
+
+[params.commit]
+type = "string"
+required = true
+max_json_bytes = 32
+"#,
+                script.display()
+            ),
+        )
+        .expect("manifest should be written");
+
+        let error = JobManifest::load_from_path(&manifest_path)
+            .expect_err("json constraint on string must fail");
+
+        assert!(matches!(
+            error,
+            ManifestError::InvalidParamConstraint { .. }
+        ));
     }
 
     #[test]
