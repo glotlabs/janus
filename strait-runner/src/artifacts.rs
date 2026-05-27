@@ -512,16 +512,37 @@ fn checksum_from_headers(
     checksum_required: bool,
 ) -> Result<Option<String>, ArtifactError> {
     match headers.get(ARTIFACT_HEADER_SHA256) {
-        Some(value) => value
-            .to_str()
-            .map(|value| Some(value.to_string()))
-            .map_err(|error| ArtifactError::InvalidHeader {
-                name: ARTIFACT_HEADER_SHA256,
-                message: error.to_string(),
-            }),
+        Some(value) => {
+            let value = value
+                .to_str()
+                .map_err(|error| ArtifactError::InvalidHeader {
+                    name: ARTIFACT_HEADER_SHA256,
+                    message: error.to_string(),
+                })?;
+            validate_sha256_header(value)?;
+            Ok(Some(value.to_string()))
+        }
         None if checksum_required => Err(ArtifactError::MissingChecksum),
         None => Ok(None),
     }
+}
+
+fn validate_sha256_header(value: &str) -> Result<(), ArtifactError> {
+    if value.len() != 64 {
+        return Err(ArtifactError::InvalidHeader {
+            name: ARTIFACT_HEADER_SHA256,
+            message: "must be exactly 64 hexadecimal characters".to_string(),
+        });
+    }
+
+    if !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ArtifactError::InvalidHeader {
+            name: ARTIFACT_HEADER_SHA256,
+            message: "must contain only hexadecimal characters".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn validate_artifact_id(artifact_id: &str) -> Result<(), ArtifactError> {
@@ -661,6 +682,55 @@ mod tests {
             .await
             .expect("download body");
         assert_eq!(body.as_ref(), payload);
+    }
+
+    #[tokio::test]
+    async fn rejects_checksum_header_with_invalid_length() {
+        let temp = temp_dir("artifact_http_bad_checksum_length");
+        let state = test_state(&temp);
+        let app = Router::new()
+            .route("/artifacts", post(upload_artifact))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/artifacts")
+                    .header("authorization", "Bearer artifacts-write-token")
+                    .header("content-type", "application/octet-stream")
+                    .header("x-sha256", "deadbeef")
+                    .body(Body::from(b"artifact-body".to_vec()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn rejects_checksum_header_with_non_hex_characters() {
+        let temp = temp_dir("artifact_http_bad_checksum_chars");
+        let state = test_state(&temp);
+        let app = Router::new()
+            .route("/artifacts", post(upload_artifact))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/artifacts")
+                    .header("authorization", "Bearer artifacts-write-token")
+                    .header("content-type", "application/octet-stream")
+                    .header(
+                        "x-sha256",
+                        "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+                    )
+                    .body(Body::from(b"artifact-body".to_vec()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

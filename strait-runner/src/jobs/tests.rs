@@ -1642,13 +1642,15 @@ async fn wait_for_terminal_metadata(temp: &Path, job_id: &str) -> JobMetadata {
 async fn wait_for_file(path: &Path) -> String {
     for _ in 0..100 {
         if let Ok(contents) = fs::read_to_string(path) {
-            return contents;
+            if !contents.trim().is_empty() {
+                return contents;
+            }
         }
 
         sleep(Duration::from_millis(25)).await;
     }
 
-    panic!("file was not written: {}", path.display());
+    panic!("file was not populated: {}", path.display());
 }
 
 #[cfg(unix)]
