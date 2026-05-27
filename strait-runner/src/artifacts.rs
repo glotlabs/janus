@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::auth::{ArtifactsRead, ArtifactsWrite, Authorized};
+
 const ARTIFACT_HEADER_SHA256: &str = "x-sha256";
 
 #[derive(Debug, Clone)]
@@ -306,6 +308,7 @@ struct ErrorResponse {
 }
 
 pub async fn upload_artifact(
+    _: Authorized<ArtifactsWrite>,
     State(state): State<crate::AppState>,
     headers: HeaderMap,
     body: Body,
@@ -324,6 +327,7 @@ pub async fn upload_artifact(
 }
 
 pub async fn download_artifact(
+    _: Authorized<ArtifactsRead>,
     State(state): State<crate::AppState>,
     AxumPath(artifact_id): AxumPath<String>,
 ) -> Result<Response, ArtifactError> {
@@ -392,7 +396,9 @@ mod tests {
     use tower::util::ServiceExt;
 
     use super::{ArtifactStore, download_artifact, upload_artifact};
-    use crate::{AppState, config::Config, jobs::JobStore, manifest::ManifestStore};
+    use crate::{
+        AppState, auth::AuthStore, config::Config, jobs::JobStore, manifest::ManifestStore,
+    };
 
     #[tokio::test]
     async fn stores_and_reads_artifact() {
@@ -455,6 +461,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post("/artifacts")
+                    .header("authorization", "Bearer artifacts-write-token")
                     .header("content-type", "application/octet-stream")
                     .header("x-sha256", checksum.as_str())
                     .body(Body::from(payload.to_vec()))
@@ -473,6 +480,7 @@ mod tests {
         let download = app
             .oneshot(
                 Request::get(format!("/artifacts/{}", metadata.artifact_id))
+                    .header("authorization", "Bearer artifacts-read-token")
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -514,6 +522,31 @@ mod tests {
 
         AppState {
             config: std::sync::Arc::new(config.clone()),
+            auth: std::sync::Arc::new(
+                AuthStore::load_from_config(
+                    &crate::config::AuthConfig {
+                        mode: "bearer".to_string(),
+                        tokens: vec![
+                            crate::config::AuthTokenConfig {
+                                name: "writer".to_string(),
+                                token_env: "TOKEN_ARTIFACTS_WRITE".to_string(),
+                                permissions: vec!["artifacts:write".to_string()],
+                            },
+                            crate::config::AuthTokenConfig {
+                                name: "reader".to_string(),
+                                token_env: "TOKEN_ARTIFACTS_READ".to_string(),
+                                permissions: vec!["artifacts:read".to_string()],
+                            },
+                        ],
+                    },
+                    |name| match name {
+                        "TOKEN_ARTIFACTS_WRITE" => Some("artifacts-write-token".to_string()),
+                        "TOKEN_ARTIFACTS_READ" => Some("artifacts-read-token".to_string()),
+                        _ => None,
+                    },
+                )
+                .expect("auth should load"),
+            ),
             manifests: std::sync::Arc::new(
                 ManifestStore::load_from_dir(&config.manifests_dir).expect("manifests should load"),
             ),

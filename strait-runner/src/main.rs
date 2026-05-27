@@ -1,4 +1,5 @@
 mod artifacts;
+mod auth;
 mod config;
 mod jobs;
 mod manifest;
@@ -6,6 +7,7 @@ mod manifest;
 use std::{env, net::SocketAddr, sync::Arc};
 
 use artifacts::ArtifactStore;
+use auth::AuthStore;
 use axum::{
     Json, Router,
     extract::State,
@@ -20,6 +22,7 @@ use tracing::info;
 #[derive(Clone)]
 pub(crate) struct AppState {
     config: Arc<Config>,
+    auth: Arc<AuthStore>,
     manifests: Arc<ManifestStore>,
     artifacts: Arc<ArtifactStore>,
     jobs: Arc<JobStore>,
@@ -38,6 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_path = config_path();
     let config = Arc::new(Config::load_from_path(&config_path)?);
+    let auth = Arc::new(AuthStore::load_from_config(&config.auth, |name| {
+        env::var(name).ok()
+    })?);
     let manifests = Arc::new(ManifestStore::load_from_dir(&config.manifests_dir)?);
     let artifacts = Arc::new(ArtifactStore::new(
         &config.data_dir,
@@ -47,6 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?);
     let state = AppState {
         config: Arc::clone(&config),
+        auth,
         manifests: Arc::clone(&manifests),
         artifacts,
         jobs: Arc::new(JobStore::new(&config.data_dir)?),

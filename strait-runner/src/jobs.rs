@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::{
     artifacts::{ArtifactError, ArtifactStore},
+    auth::{Authorized, JobsRead, JobsRun, LogsRead},
     manifest::{Concurrency, JobManifest, ManifestStore, OutputSpec, ParamType},
 };
 
@@ -427,6 +428,7 @@ struct JobErrorResponse {
 }
 
 pub async fn create_job(
+    _: Authorized<JobsRun>,
     State(state): State<crate::AppState>,
     AxumPath(name): AxumPath<String>,
     Json(body): Json<Value>,
@@ -448,6 +450,7 @@ pub async fn create_job(
 }
 
 pub async fn get_job(
+    _: Authorized<JobsRead>,
     State(state): State<crate::AppState>,
     AxumPath(job_id): AxumPath<String>,
 ) -> Result<Json<JobMetadata>, JobError> {
@@ -455,6 +458,7 @@ pub async fn get_job(
 }
 
 pub async fn get_job_logs(
+    _: Authorized<LogsRead>,
     State(state): State<crate::AppState>,
     AxumPath(job_id): AxumPath<String>,
 ) -> Result<Json<JobLogs>, JobError> {
@@ -865,6 +869,7 @@ mod tests {
     use crate::{
         AppState,
         artifacts::ArtifactStore,
+        auth::AuthStore,
         config::{ArtifactsConfig, AuthConfig, Config, JobsConfig, ServerConfig},
         manifest::ManifestStore,
     };
@@ -880,6 +885,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::post("/jobs/build-app")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
@@ -921,6 +927,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::post("/jobs/build-app")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                     .expect("request should build"),
@@ -942,6 +949,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::post("/jobs/build-app")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
@@ -971,6 +979,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::post("/jobs/build-with-artifact")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
@@ -1020,6 +1029,7 @@ exit 0
         let response = app
             .oneshot(
                 Request::post("/jobs/build-app")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         json!({
@@ -1073,6 +1083,7 @@ exit 0
         let response = app
             .oneshot(
                 Request::post("/jobs/build-app")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                     .expect("request should build"),
@@ -1104,6 +1115,7 @@ exit 0
         let response = app
             .oneshot(
                 Request::post("/jobs/build-app")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                     .expect("request should build"),
@@ -1144,6 +1156,7 @@ required = true
         let created = read_created_job(
             app.oneshot(
                 Request::post("/jobs/build-app")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                     .expect("request should build"),
@@ -1192,6 +1205,7 @@ required = true
         let created = read_created_job(
             app.oneshot(
                 Request::post("/jobs/build-app")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                     .expect("request should build"),
@@ -1222,6 +1236,7 @@ required = true
             app.clone()
                 .oneshot(
                     Request::post("/jobs/build-app")
+                        .header("authorization", "Bearer runner-token")
                         .header("content-type", "application/json")
                         .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                         .expect("request should build"),
@@ -1236,6 +1251,7 @@ required = true
         let response = app
             .oneshot(
                 Request::get(format!("/jobs/{}", created.job_id))
+                    .header("authorization", "Bearer runner-token")
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -1271,6 +1287,7 @@ required = true
             app.clone()
                 .oneshot(
                     Request::post("/jobs/build-app")
+                        .header("authorization", "Bearer runner-token")
                         .header("content-type", "application/json")
                         .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                         .expect("request should build"),
@@ -1285,6 +1302,7 @@ required = true
         let response = app
             .oneshot(
                 Request::get(format!("/jobs/{}/logs", created.job_id))
+                    .header("authorization", "Bearer runner-token")
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -1331,6 +1349,7 @@ required = true
             .clone()
             .oneshot(
                 Request::post("/jobs/job-a")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "a" }).to_string()))
                     .expect("request should build"),
@@ -1340,6 +1359,7 @@ required = true
         let second = app
             .oneshot(
                 Request::post("/jobs/job-b")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "b" }).to_string()))
                     .expect("request should build"),
@@ -1373,6 +1393,7 @@ required = true
             .clone()
             .oneshot(
                 Request::post("/jobs/build-app")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "a" }).to_string()))
                     .expect("request should build"),
@@ -1382,6 +1403,7 @@ required = true
         let second = app
             .oneshot(
                 Request::post("/jobs/build-app")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "b" }).to_string()))
                     .expect("request should build"),
@@ -1423,6 +1445,7 @@ required = true
             .clone()
             .oneshot(
                 Request::post("/jobs/job-a")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "a" }).to_string()))
                     .expect("request should build"),
@@ -1432,6 +1455,7 @@ required = true
         let second = app
             .oneshot(
                 Request::post("/jobs/job-b")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "b" }).to_string()))
                     .expect("request should build"),
@@ -1473,6 +1497,7 @@ required = true
             .clone()
             .oneshot(
                 Request::post("/jobs/job-a")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "a" }).to_string()))
                     .expect("request should build"),
@@ -1482,6 +1507,7 @@ required = true
         let second = app
             .oneshot(
                 Request::post("/jobs/job-b")
+                    .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "b" }).to_string()))
                     .expect("request should build"),
@@ -1652,6 +1678,29 @@ concurrency = "{}"
     fn build_state(config: Config) -> AppState {
         AppState {
             config: Arc::new(config.clone()),
+            auth: Arc::new(
+                AuthStore::load_from_config(
+                    &AuthConfig {
+                        mode: "bearer".to_string(),
+                        tokens: vec![crate::config::AuthTokenConfig {
+                            name: "runner".to_string(),
+                            token_env: "TOKEN_RUNNER".to_string(),
+                            permissions: vec![
+                                "jobs:run".to_string(),
+                                "jobs:read".to_string(),
+                                "logs:read".to_string(),
+                                "artifacts:read".to_string(),
+                                "artifacts:write".to_string(),
+                            ],
+                        }],
+                    },
+                    |name| match name {
+                        "TOKEN_RUNNER" => Some("runner-token".to_string()),
+                        _ => None,
+                    },
+                )
+                .expect("auth should load"),
+            ),
             manifests: Arc::new(
                 ManifestStore::load_from_dir(&config.manifests_dir).expect("manifests should load"),
             ),
