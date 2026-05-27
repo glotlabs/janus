@@ -1,10 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::Path,
-    process::Stdio,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, fs, path::Path, process::Stdio, sync::Arc};
 
 use tokio::{
     process::Command,
@@ -25,15 +19,20 @@ impl JobStore {
         self.finish_job(execution, outcome);
     }
 
-    async fn execute_process(&self, execution: &JobExecution) -> Result<ExecutionOutcome, JobError> {
-        let stdout = fs::File::create(&execution.stdout_path).map_err(|source| JobError::WriteFile {
-            path: execution.stdout_path.display().to_string(),
-            source,
-        })?;
-        let stderr = fs::File::create(&execution.stderr_path).map_err(|source| JobError::WriteFile {
-            path: execution.stderr_path.display().to_string(),
-            source,
-        })?;
+    async fn execute_process(
+        &self,
+        execution: &JobExecution,
+    ) -> Result<ExecutionOutcome, JobError> {
+        let stdout =
+            fs::File::create(&execution.stdout_path).map_err(|source| JobError::WriteFile {
+                path: execution.stdout_path.display().to_string(),
+                source,
+            })?;
+        let stderr =
+            fs::File::create(&execution.stderr_path).map_err(|source| JobError::WriteFile {
+                path: execution.stderr_path.display().to_string(),
+                source,
+            })?;
 
         let mut command = Command::new(&execution.manifest.script);
         command

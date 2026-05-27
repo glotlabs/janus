@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::{
     artifacts::ArtifactStore,
     manifest::{Concurrency, JobManifest, ManifestStore, ParamType},
+    storage::atomic_write,
 };
 
 use super::{
@@ -238,13 +239,31 @@ impl JobStore {
             let metadata_path = path.join("metadata.json");
             let stderr_path = path.join("stderr.log");
             let mut metadata = match fs::read(&metadata_path) {
-                Ok(bytes) => serde_json::from_slice::<JobMetadata>(&bytes).map_err(|source| {
+                Ok(bytes) => match serde_json::from_slice::<JobMetadata>(&bytes).map_err(|source| {
                     JobError::ParseMetadata {
                         path: metadata_path.display().to_string(),
                         source,
                     }
-                })?,
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+                }) {
+                    Ok(metadata) => metadata,
+                    Err(JobError::ParseMetadata { .. }) => {
+                        fs::remove_dir_all(&path).map_err(|source| JobError::CreateDir {
+                            path: path.display().to_string(),
+                            source,
+                        })?;
+                        recovered += 1;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                },
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                    fs::remove_dir_all(&path).map_err(|source| JobError::CreateDir {
+                        path: path.display().to_string(),
+                        source,
+                    })?;
+                    recovered += 1;
+                    continue;
+                }
                 Err(source) => {
                     return Err(JobError::ReadFile {
                         path: metadata_path.display().to_string(),
@@ -266,10 +285,14 @@ impl JobStore {
         Ok(recovered)
     }
 
-    pub(super) fn persist_metadata(&self, path: &Path, metadata: &JobMetadata) -> Result<(), JobError> {
+    pub(super) fn persist_metadata(
+        &self,
+        path: &Path,
+        metadata: &JobMetadata,
+    ) -> Result<(), JobError> {
         let metadata_json = serde_json::to_vec_pretty(metadata)
             .map_err(|source| JobError::SerializeMetadata { source })?;
-        fs::write(path, metadata_json).map_err(|source| JobError::WriteFile {
+        atomic_write(path, &metadata_json).map_err(|source| JobError::WriteFile {
             path: path.display().to_string(),
             source,
         })

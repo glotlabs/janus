@@ -18,8 +18,8 @@ use tokio::time::{Duration, sleep};
 use tower::util::ServiceExt;
 
 use super::{
-    JobCreatedResponse, JobDefinitionResponse, JobLogsResponse, JobMetadata, JobStatus, JobStatusResponse,
-    JobStore, cancel_job, create_job, get_job, get_job_logs, list_jobs,
+    JobCreatedResponse, JobDefinitionResponse, JobLogsResponse, JobMetadata, JobStatus,
+    JobStatusResponse, JobStore, cancel_job, create_job, get_job, get_job_logs, list_jobs,
 };
 use crate::{
     AppState,
@@ -59,7 +59,10 @@ async fn creates_job_metadata_for_valid_request() {
         .await
         .expect("response body");
     let created: JobCreatedResponse = serde_json::from_slice(&body).expect("created job body");
-    let metadata_path = temp.join("jobs").join(&created.job_id).join("metadata.json");
+    let metadata_path = temp
+        .join("jobs")
+        .join(&created.job_id)
+        .join("metadata.json");
     let metadata: JobMetadata =
         serde_json::from_slice(&fs::read(metadata_path).expect("metadata should be written"))
             .expect("metadata should parse");
@@ -149,7 +152,10 @@ async fn resolves_artifact_params() {
         .await
         .expect("response body");
     let created: JobCreatedResponse = serde_json::from_slice(&body).expect("created job body");
-    let metadata_path = temp.join("jobs").join(&created.job_id).join("metadata.json");
+    let metadata_path = temp
+        .join("jobs")
+        .join(&created.job_id)
+        .join("metadata.json");
     let metadata: JobMetadata =
         serde_json::from_slice(&fs::read(metadata_path).expect("metadata should be written"))
             .expect("metadata should parse");
@@ -207,7 +213,13 @@ exit 0
             .expect("stderr log")
             .ends_with("/blob")
     );
-    assert!(!temp.join("jobs").join(&created.job_id).join("work").exists());
+    assert!(
+        !temp
+            .join("jobs")
+            .join(&created.job_id)
+            .join("work")
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -239,7 +251,12 @@ async fn marks_failed_script_as_failed() {
 
     assert_eq!(metadata.status, JobStatus::Failed);
     assert_eq!(metadata.exit_code, Some(7));
-    assert!(temp.join("jobs").join(&created.job_id).join("work").exists());
+    assert!(
+        temp.join("jobs")
+            .join(&created.job_id)
+            .join("work")
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -308,8 +325,12 @@ required = true
     assert_eq!(metadata.status, JobStatus::Success);
     let output = &metadata.outputs["app"];
     assert_eq!(output.size, 6);
-    let stored = fs::read_to_string(temp.join("artifacts").join(&output.artifact_id).join("blob"))
-        .expect("stored output artifact");
+    let stored = fs::read_to_string(
+        temp.join("artifacts")
+            .join(&output.artifact_id)
+            .join("blob"),
+    )
+    .expect("stored output artifact");
     assert_eq!(stored, "bundle");
 }
 
@@ -458,7 +479,9 @@ async fn reads_job_logs_over_http() {
 async fn lists_job_definitions_over_http() {
     let temp = temp_dir("job_list_http");
     let state = test_state(&temp);
-    let app = Router::new().route("/jobs", get(list_jobs)).with_state(state);
+    let app = Router::new()
+        .route("/jobs", get(list_jobs))
+        .with_state(state);
 
     let response = app
         .oneshot(
@@ -561,6 +584,38 @@ fn recovers_running_jobs_on_startup() {
             .expect("stderr should read")
             .contains("runner restarted before job completion")
     );
+}
+
+#[test]
+fn removes_job_dir_missing_metadata_on_startup() {
+    let temp = temp_dir("job_recovery_missing_metadata");
+    let jobs_dir = temp.join("jobs").join("job_incomplete");
+    fs::create_dir_all(jobs_dir.join("work")).expect("work dir should be created");
+    fs::write(jobs_dir.join("stdout.log"), "").expect("stdout should exist");
+
+    let store = JobStore::new(&temp).expect("job store should init");
+    let recovered = store
+        .recover_interrupted_jobs()
+        .expect("recovery should succeed");
+
+    assert_eq!(recovered, 1);
+    assert!(!jobs_dir.exists());
+}
+
+#[test]
+fn removes_job_dir_with_invalid_metadata_on_startup() {
+    let temp = temp_dir("job_recovery_invalid_metadata");
+    let jobs_dir = temp.join("jobs").join("job_invalid");
+    fs::create_dir_all(&jobs_dir).expect("job dir should be created");
+    fs::write(jobs_dir.join("metadata.json"), b"{not-json").expect("metadata should exist");
+
+    let store = JobStore::new(&temp).expect("job store should init");
+    let recovered = store
+        .recover_interrupted_jobs()
+        .expect("recovery should succeed");
+
+    assert_eq!(recovered, 1);
+    assert!(!jobs_dir.exists());
 }
 
 #[tokio::test]
@@ -973,10 +1028,9 @@ async fn wait_for_terminal_metadata(temp: &Path, job_id: &str) -> JobMetadata {
     let metadata_path = temp.join("jobs").join(job_id).join("metadata.json");
 
     for _ in 0..100 {
-        let metadata: JobMetadata = serde_json::from_slice(
-            &fs::read(&metadata_path).expect("metadata should be readable"),
-        )
-        .expect("metadata should parse");
+        let metadata: JobMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).expect("metadata should be readable"))
+                .expect("metadata should parse");
 
         if metadata.finished_at.is_some() {
             return metadata;

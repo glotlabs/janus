@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod jobs;
 mod manifest;
+mod storage;
 
 use std::{env, net::SocketAddr, sync::Arc};
 
@@ -51,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.artifacts.max_size_mb,
         config.artifacts.require_checksum_on_upload,
     )?);
+    let recovered_artifacts = artifacts.recover_incomplete_artifacts()?;
     let artifacts_cleanup = Arc::clone(&artifacts);
     let cleanup_interval_seconds = config.artifacts.cleanup_interval_seconds;
     let jobs = Arc::new(JobStore::new(&config.data_dir)?);
@@ -76,6 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listen = %config.server.listen,
         config_path = %config_path,
         manifest_count = manifests.len(),
+        recovered_artifacts,
         recovered_jobs,
         "strait-runner listening"
     );

@@ -18,7 +18,10 @@ use tokio::time::{self, MissedTickBehavior};
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::auth::{ArtifactsRead, ArtifactsWrite, Authorized};
+use crate::{
+    auth::{ArtifactsRead, ArtifactsWrite, Authorized},
+    storage::atomic_write,
+};
 
 const ARTIFACT_HEADER_SHA256: &str = "x-sha256";
 
@@ -107,16 +110,18 @@ impl ArtifactStore {
             source,
         })?;
 
-        fs::write(artifact_dir.join("blob"), bytes).map_err(|source| ArtifactError::WriteFile {
-            path: artifact_dir.join("blob").display().to_string(),
+        let blob_path = artifact_dir.join("blob");
+        atomic_write(&blob_path, bytes).map_err(|source| ArtifactError::WriteFile {
+            path: blob_path.display().to_string(),
             source,
         })?;
 
         let metadata_json = serde_json::to_vec_pretty(&metadata)
             .map_err(|source| ArtifactError::SerializeMetadata { source })?;
-        fs::write(artifact_dir.join("metadata.json"), metadata_json).map_err(|source| {
+        let metadata_path = artifact_dir.join("metadata.json");
+        atomic_write(&metadata_path, &metadata_json).map_err(|source| {
             ArtifactError::WriteFile {
-                path: artifact_dir.join("metadata.json").display().to_string(),
+                path: metadata_path.display().to_string(),
                 source,
             }
         })?;
@@ -159,6 +164,35 @@ impl ArtifactStore {
 
     pub fn artifact_blob_path(&self, artifact_id: &str) -> PathBuf {
         self.root_dir.join(artifact_id).join("blob")
+    }
+
+    pub fn recover_incomplete_artifacts(&self) -> Result<usize, ArtifactError> {
+        let mut removed = 0;
+        let entries = fs::read_dir(&self.root_dir).map_err(|source| ArtifactError::ReadDir {
+            path: self.root_dir.display().to_string(),
+            source,
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|source| ArtifactError::ReadDir {
+                path: self.root_dir.display().to_string(),
+                source,
+            })?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            if self.artifact_dir_is_recoverable(&path)? {
+                fs::remove_dir_all(&path).map_err(|source| ArtifactError::RemoveDir {
+                    path: path.display().to_string(),
+                    source,
+                })?;
+                removed += 1;
+            }
+        }
+
+        Ok(removed)
     }
 
     pub fn cleanup_expired(&self) -> Result<usize, ArtifactError> {
@@ -213,6 +247,49 @@ impl ArtifactStore {
                 }
             }
         }
+    }
+
+    fn artifact_dir_is_recoverable(&self, path: &Path) -> Result<bool, ArtifactError> {
+        let artifact_id = path
+            .file_name()
+            .expect("artifact dir should have a name")
+            .to_string_lossy()
+            .to_string();
+        let metadata_path = path.join("metadata.json");
+        let blob_path = path.join("blob");
+
+        let metadata_bytes = match fs::read(&metadata_path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(source) => {
+                return Err(ArtifactError::ReadFile {
+                    path: metadata_path.display().to_string(),
+                    source,
+                });
+            }
+        };
+        let metadata = match serde_json::from_slice::<ArtifactMetadata>(&metadata_bytes) {
+            Ok(metadata) => metadata,
+            Err(_) => return Ok(true),
+        };
+
+        if metadata.artifact_id != artifact_id {
+            return Ok(true);
+        }
+
+        let blob = match fs::read(&blob_path) {
+            Ok(bytes) => bytes,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(source) => {
+                return Err(ArtifactError::ReadFile {
+                    path: blob_path.display().to_string(),
+                    source,
+                });
+            }
+        };
+
+        let actual_sha256 = hex::encode(Sha256::digest(&blob));
+        Ok(metadata.size != blob.len() as u64 || metadata.sha256 != actual_sha256)
     }
 }
 
@@ -613,6 +690,49 @@ mod tests {
 
         assert_eq!(removed, 0);
         assert!(temp.join("artifacts").join(metadata.artifact_id).exists());
+    }
+
+    #[test]
+    fn recovers_artifact_dir_missing_metadata() {
+        let temp = temp_dir("artifact_recovery_missing_metadata");
+        let artifact_dir = temp.join("artifacts").join("art_incomplete");
+        fs::create_dir_all(&artifact_dir).expect("artifact dir should exist");
+        fs::write(artifact_dir.join("blob"), b"partial").expect("blob should exist");
+
+        let store = ArtifactStore::new(&temp, 3600, 1, false).expect("store should init");
+        let removed = store
+            .recover_incomplete_artifacts()
+            .expect("recovery should succeed");
+
+        assert_eq!(removed, 1);
+        assert!(!artifact_dir.exists());
+    }
+
+    #[test]
+    fn recovers_artifact_dir_with_mismatched_blob() {
+        let temp = temp_dir("artifact_recovery_mismatched_blob");
+        let artifact_dir = temp.join("artifacts").join("art_broken");
+        fs::create_dir_all(&artifact_dir).expect("artifact dir should exist");
+        fs::write(artifact_dir.join("blob"), b"wrong-bytes").expect("blob should exist");
+        fs::write(
+            artifact_dir.join("metadata.json"),
+            serde_json::to_vec_pretty(&super::ArtifactMetadata {
+                artifact_id: "art_broken".to_string(),
+                sha256: hex::encode(Sha256::digest(b"expected-bytes")),
+                size: "expected-bytes".len() as u64,
+                expires_at: "2030-01-01T00:00:00Z".to_string(),
+            })
+            .expect("metadata should serialize"),
+        )
+        .expect("metadata should exist");
+
+        let store = ArtifactStore::new(&temp, 3600, 1, false).expect("store should init");
+        let removed = store
+            .recover_incomplete_artifacts()
+            .expect("recovery should succeed");
+
+        assert_eq!(removed, 1);
+        assert!(!artifact_dir.exists());
     }
 
     fn test_state(temp: &Path) -> AppState {
