@@ -2,7 +2,8 @@ use std::{
     collections::BTreeMap,
     fmt, fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    process::Stdio,
+    sync::{Arc, Mutex},
 };
 
 use axum::{
@@ -14,6 +15,10 @@ use axum::{
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use tokio::{
+    process::Command,
+    time::{Duration, timeout},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -42,17 +47,20 @@ impl JobStore {
     }
 
     pub fn create_job(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         params: Map<String, Value>,
         manifests: &ManifestStore,
         artifacts: &ArtifactStore,
+        cleanup_successful_workdirs: bool,
+        keep_failed_workdirs: bool,
     ) -> Result<JobCreated, JobError> {
         let manifest = manifests
             .get(name)
+            .cloned()
             .ok_or_else(|| JobError::UnknownJob(name.to_string()))?;
 
-        let resolved = validate_params(manifest, &params, artifacts)?;
+        let resolved = validate_params(&manifest, &params, artifacts)?;
 
         let job_id = format!("job_{}", Uuid::now_v7().simple());
         let started_at = now_rfc3339();
@@ -69,7 +77,7 @@ impl JobStore {
 
         {
             let mut running_jobs = self.running_jobs.lock().expect("job mutex poisoned");
-            enforce_concurrency(manifest, &running_jobs)?;
+            enforce_concurrency(&manifest, &running_jobs)?;
             running_jobs.insert(
                 job_id.clone(),
                 RunningJob {
@@ -105,6 +113,24 @@ impl JobStore {
                 source,
             }
         })?;
+
+        let execution = JobExecution {
+            manifest,
+            job_id: job_id.clone(),
+            metadata_path: job_dir.join("metadata.json"),
+            work_dir: job_dir.join("work"),
+            output_dir: job_dir.join("output"),
+            stdout_path: job_dir.join("stdout.log"),
+            stderr_path: job_dir.join("stderr.log"),
+            cleanup_successful_workdirs,
+            keep_failed_workdirs,
+            metadata: job,
+        };
+
+        let store = Arc::clone(self);
+        tokio::spawn(async move {
+            store.run_job(execution).await;
+        });
 
         Ok(JobCreated {
             job_id,
@@ -151,6 +177,20 @@ struct RunningJob {
     concurrency: Concurrency,
 }
 
+#[derive(Debug, Clone)]
+struct JobExecution {
+    manifest: JobManifest,
+    job_id: String,
+    metadata_path: PathBuf,
+    work_dir: PathBuf,
+    output_dir: PathBuf,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+    cleanup_successful_workdirs: bool,
+    keep_failed_workdirs: bool,
+    metadata: JobMetadata,
+}
+
 #[derive(Debug)]
 pub enum JobError {
     CreateDir {
@@ -163,6 +203,14 @@ pub enum JobError {
     },
     SerializeMetadata {
         source: serde_json::Error,
+    },
+    SpawnProcess {
+        script: String,
+        source: std::io::Error,
+    },
+    WaitProcess {
+        script: String,
+        source: std::io::Error,
     },
     UnknownJob(String),
     MissingParam(String),
@@ -193,6 +241,12 @@ impl fmt::Display for JobError {
             }
             Self::SerializeMetadata { source } => {
                 write!(f, "failed to serialize job metadata: {source}")
+            }
+            Self::SpawnProcess { script, source } => {
+                write!(f, "failed to spawn job script {script}: {source}")
+            }
+            Self::WaitProcess { script, source } => {
+                write!(f, "failed while waiting for job script {script}: {source}")
             }
             Self::UnknownJob(name) => write!(f, "job not found: {name}"),
             Self::MissingParam(name) => write!(f, "missing required param: {name}"),
@@ -246,6 +300,8 @@ impl IntoResponse for JobError {
             | Self::Artifact(ArtifactError::TimeOverflow)
             | Self::CreateDir { .. }
             | Self::WriteFile { .. }
+            | Self::SpawnProcess { .. }
+            | Self::WaitProcess { .. }
             | Self::SerializeMetadata { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
@@ -273,9 +329,14 @@ pub async fn create_job(
         .as_object()
         .cloned()
         .ok_or(JobError::InvalidBody("expected a JSON object"))?;
-    let created = state
-        .jobs
-        .create_job(&name, params, &state.manifests, &state.artifacts)?;
+    let created = state.jobs.create_job(
+        &name,
+        params,
+        &state.manifests,
+        &state.artifacts,
+        state.config.jobs.cleanup_successful_workdirs,
+        state.config.jobs.keep_failed_workdirs,
+    )?;
 
     Ok((StatusCode::CREATED, Json(created)))
 }
@@ -410,6 +471,179 @@ fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+impl JobStore {
+    async fn run_job(self: Arc<Self>, execution: JobExecution) {
+        let outcome = self.execute_process(&execution).await;
+        self.finish_job(execution, outcome);
+    }
+
+    async fn execute_process(&self, execution: &JobExecution) -> ExecutionOutcome {
+        let stdout = match fs::File::create(&execution.stdout_path) {
+            Ok(file) => file,
+            Err(source) => {
+                return ExecutionOutcome::FailedToStart(JobError::WriteFile {
+                    path: execution.stdout_path.display().to_string(),
+                    source,
+                });
+            }
+        };
+        let stderr = match fs::File::create(&execution.stderr_path) {
+            Ok(file) => file,
+            Err(source) => {
+                return ExecutionOutcome::FailedToStart(JobError::WriteFile {
+                    path: execution.stderr_path.display().to_string(),
+                    source,
+                });
+            }
+        };
+
+        let mut command = Command::new(&execution.manifest.script);
+        command
+            .current_dir(&execution.work_dir)
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+
+        for (key, value) in build_job_env(&execution.metadata, execution) {
+            command.env(key, value);
+        }
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(source) => {
+                return ExecutionOutcome::FailedToStart(JobError::SpawnProcess {
+                    script: execution.manifest.script.clone(),
+                    source,
+                });
+            }
+        };
+
+        let wait_result = timeout(
+            Duration::from_secs(execution.manifest.timeout_seconds),
+            child.wait(),
+        )
+        .await;
+
+        match wait_result {
+            Ok(Ok(status)) => {
+                let code = status.code();
+                if status.success() {
+                    ExecutionOutcome::Completed {
+                        status: JobStatus::Success,
+                        exit_code: code,
+                    }
+                } else {
+                    ExecutionOutcome::Completed {
+                        status: JobStatus::Failed,
+                        exit_code: code,
+                    }
+                }
+            }
+            Ok(Err(source)) => ExecutionOutcome::FailedToStart(JobError::WaitProcess {
+                script: execution.manifest.script.clone(),
+                source,
+            }),
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                ExecutionOutcome::Completed {
+                    status: JobStatus::TimedOut,
+                    exit_code: None,
+                }
+            }
+        }
+    }
+
+    fn finish_job(&self, execution: JobExecution, outcome: ExecutionOutcome) {
+        let mut metadata = execution.metadata;
+        let finished_at = now_rfc3339();
+
+        match outcome {
+            ExecutionOutcome::Completed { status, exit_code } => {
+                metadata.status = status.clone();
+                metadata.exit_code = exit_code;
+                metadata.finished_at = Some(finished_at);
+
+                let _ = self.persist_metadata(&execution.metadata_path, &metadata);
+
+                match status {
+                    JobStatus::Success if execution.cleanup_successful_workdirs => {
+                        let _ = fs::remove_dir_all(&execution.work_dir);
+                    }
+                    JobStatus::Failed | JobStatus::TimedOut if !execution.keep_failed_workdirs => {
+                        let _ = fs::remove_dir_all(&execution.work_dir);
+                    }
+                    _ => {}
+                }
+            }
+            ExecutionOutcome::FailedToStart(error) => {
+                metadata.status = JobStatus::Failed;
+                metadata.exit_code = None;
+                metadata.finished_at = Some(finished_at);
+                let _ = self.persist_metadata(&execution.metadata_path, &metadata);
+                let _ = fs::write(&execution.stderr_path, format!("{error}\n"));
+            }
+        }
+
+        let mut running_jobs = self.running_jobs.lock().expect("job mutex poisoned");
+        running_jobs.remove(&execution.job_id);
+    }
+
+    fn persist_metadata(&self, path: &Path, metadata: &JobMetadata) -> Result<(), JobError> {
+        let metadata_json = serde_json::to_vec_pretty(metadata)
+            .map_err(|source| JobError::SerializeMetadata { source })?;
+        fs::write(path, metadata_json).map_err(|source| JobError::WriteFile {
+            path: path.display().to_string(),
+            source,
+        })
+    }
+}
+
+#[derive(Debug)]
+enum ExecutionOutcome {
+    Completed {
+        status: JobStatus,
+        exit_code: Option<i32>,
+    },
+    FailedToStart(JobError),
+}
+
+fn build_job_env(metadata: &JobMetadata, execution: &JobExecution) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::from([
+        ("JOB_ID".to_string(), metadata.job_id.clone()),
+        ("JOB_NAME".to_string(), metadata.name.clone()),
+        (
+            "JOB_WORKDIR".to_string(),
+            execution.work_dir.display().to_string(),
+        ),
+        (
+            "JOB_OUTPUT_DIR".to_string(),
+            execution.output_dir.display().to_string(),
+        ),
+        (
+            "JOB_METADATA_PATH".to_string(),
+            execution.metadata_path.display().to_string(),
+        ),
+    ]);
+
+    for (name, value) in &metadata.params {
+        let env_name = normalize_param_env(name);
+        let env_value = if let Some(path) = metadata.resolved_artifacts.get(name) {
+            path.clone()
+        } else if let Some(raw) = value.as_str() {
+            raw.to_string()
+        } else {
+            value.to_string()
+        };
+        env.insert(env_name, env_value);
+    }
+
+    env
+}
+
+fn normalize_param_env(name: &str) -> String {
+    format!("JOB_{}", name.replace('-', "_").to_ascii_uppercase())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -427,6 +661,7 @@ mod tests {
     };
     use serde_json::json;
     use sha2::Digest;
+    use tokio::time::{Duration, sleep};
     use tower::util::ServiceExt;
 
     use super::{JobMetadata, JobStore, create_job};
@@ -475,7 +710,6 @@ mod tests {
                 .expect("metadata should parse");
 
         assert_eq!(metadata.name, "build-app");
-        assert_eq!(metadata.status, super::JobStatus::Running);
         assert_eq!(metadata.params["commit"], "abc123");
     }
 
@@ -568,21 +802,130 @@ mod tests {
         assert!(metadata.resolved_artifacts["source"].ends_with("/blob"));
     }
 
-    fn test_state(temp: &Path) -> AppState {
-        let manifests_dir = temp.join("manifests");
-        let scripts_dir = temp.join("scripts");
-        fs::create_dir_all(&manifests_dir).expect("manifests dir should be created");
-        fs::create_dir_all(&scripts_dir).expect("scripts dir should be created");
-        let script = write_executable_script(&scripts_dir, "build.sh");
-        fs::write(
-            manifests_dir.join("build-app.toml"),
-            format!(
-                r#"
-name = "build-app"
-script = "{}"
-timeout_seconds = 600
-concurrency = "parallel"
+    #[tokio::test]
+    async fn executes_successful_script_and_cleans_workdir() {
+        let temp = temp_dir("job_execute_success");
+        let state = test_state_with_script(
+            &temp,
+            "build-app",
+            r#"#!/bin/sh
+printf '%s' "$JOB_COMMIT"
+printf '%s' "$JOB_SOURCE" >&2
+exit 0
+"#,
+            600,
+        );
+        let artifact_id = store_artifact(&state.artifacts, b"src");
+        let app = Router::new()
+            .route("/jobs/{name}", post(create_job))
+            .with_state(state);
 
+        let response = app
+            .oneshot(
+                Request::post("/jobs/build-app")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "commit": "abc123",
+                            "source": artifact_id
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let created = read_created_job(response).await;
+        let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+
+        assert_eq!(metadata.status, super::JobStatus::Success);
+        assert_eq!(metadata.exit_code, Some(0));
+        assert_eq!(
+            fs::read_to_string(temp.join("jobs").join(&created.job_id).join("stdout.log"))
+                .expect("stdout log"),
+            "abc123"
+        );
+        assert!(
+            fs::read_to_string(temp.join("jobs").join(&created.job_id).join("stderr.log"))
+                .expect("stderr log")
+                .ends_with("/blob")
+        );
+        assert!(
+            !temp
+                .join("jobs")
+                .join(&created.job_id)
+                .join("work")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn marks_failed_script_as_failed() {
+        let temp = temp_dir("job_execute_failed");
+        let state = test_state_with_script(
+            &temp,
+            "build-app",
+            "#!/bin/sh\nprintf 'boom' >&2\nexit 7\n",
+            600,
+        );
+        let app = Router::new()
+            .route("/jobs/{name}", post(create_job))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/jobs/build-app")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "abc123" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let created = read_created_job(response).await;
+        let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+
+        assert_eq!(metadata.status, super::JobStatus::Failed);
+        assert_eq!(metadata.exit_code, Some(7));
+        assert!(
+            temp.join("jobs")
+                .join(&created.job_id)
+                .join("work")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn times_out_long_running_script() {
+        let temp = temp_dir("job_execute_timeout");
+        let state = test_state_with_script(&temp, "build-app", "#!/bin/sh\nsleep 2\n", 1);
+        let app = Router::new()
+            .route("/jobs/{name}", post(create_job))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::post("/jobs/build-app")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "abc123" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        let created = read_created_job(response).await;
+        let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+
+        assert_eq!(metadata.status, super::JobStatus::TimedOut);
+        assert_eq!(metadata.exit_code, None);
+    }
+
+    fn test_state(temp: &Path) -> AppState {
+        test_state_from_manifest(
+            temp,
+            "build-app",
+            r#"
 [params.commit]
 type = "string"
 required = true
@@ -591,55 +934,70 @@ required = true
 type = "string"
 required = true
 "#,
-                script.display()
-            ),
+            "#!/bin/sh\nexit 0\n",
+            600,
         )
-        .expect("manifest should be written");
-
-        let config = Config {
-            data_dir: temp.display().to_string(),
-            manifests_dir: manifests_dir.display().to_string(),
-            server: ServerConfig {
-                listen: "127.0.0.1:0".to_string(),
-            },
-            auth: AuthConfig {
-                mode: "bearer".to_string(),
-                tokens: Vec::new(),
-            },
-            artifacts: ArtifactsConfig {
-                max_size_mb: 1,
-                ttl_seconds: 3600,
-                cleanup_interval_seconds: 600,
-                require_checksum_on_upload: true,
-            },
-            jobs: JobsConfig {
-                default_log_limit_mb: 50,
-                cleanup_successful_workdirs: true,
-                keep_failed_workdirs: true,
-            },
-        };
-
-        build_state(config)
     }
 
     fn test_state_with_artifact_manifest(temp: &Path) -> AppState {
+        test_state_from_manifest(
+            temp,
+            "build-with-artifact",
+            r#"
+[params.source]
+type = "artifact"
+required = true
+"#,
+            "#!/bin/sh\nexit 0\n",
+            600,
+        )
+    }
+
+    fn test_state_with_script(
+        temp: &Path,
+        job_name: &str,
+        script_body: &str,
+        timeout_seconds: u64,
+    ) -> AppState {
+        test_state_from_manifest(
+            temp,
+            job_name,
+            r#"
+[params.commit]
+type = "string"
+required = false
+
+[params.source]
+type = "artifact"
+required = false
+"#,
+            script_body,
+            timeout_seconds,
+        )
+    }
+
+    fn test_state_from_manifest(
+        temp: &Path,
+        job_name: &str,
+        params_toml: &str,
+        script_body: &str,
+        timeout_seconds: u64,
+    ) -> AppState {
         let manifests_dir = temp.join("manifests");
         let scripts_dir = temp.join("scripts");
         fs::create_dir_all(&manifests_dir).expect("manifests dir should be created");
         fs::create_dir_all(&scripts_dir).expect("scripts dir should be created");
-        let script = write_executable_script(&scripts_dir, "build.sh");
+        let script = write_executable_script(&scripts_dir, "build.sh", script_body);
         fs::write(
-            manifests_dir.join("build-with-artifact.toml"),
+            manifests_dir.join(format!("{job_name}.toml")),
             format!(
                 r#"
-name = "build-with-artifact"
+name = "{job_name}"
 script = "{}"
-timeout_seconds = 600
+timeout_seconds = {timeout_seconds}
 concurrency = "parallel"
 
-[params.source]
-type = "artifact"
-required = true
+{params_toml}
 "#,
                 script.display()
             ),
@@ -691,6 +1049,33 @@ required = true
         }
     }
 
+    async fn read_created_job(response: axum::response::Response) -> super::JobCreated {
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        serde_json::from_slice(&body).expect("created job body")
+    }
+
+    async fn wait_for_terminal_metadata(temp: &Path, job_id: &str) -> JobMetadata {
+        let metadata_path = temp.join("jobs").join(job_id).join("metadata.json");
+
+        for _ in 0..100 {
+            let metadata: JobMetadata = serde_json::from_slice(
+                &fs::read(&metadata_path).expect("metadata should be readable"),
+            )
+            .expect("metadata should parse");
+
+            if metadata.finished_at.is_some() {
+                return metadata;
+            }
+
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        panic!("job did not reach a terminal state");
+    }
+
     fn store_artifact(store: &ArtifactStore, bytes: &[u8]) -> String {
         let checksum = hex::encode(sha2::Sha256::digest(bytes));
         store
@@ -699,9 +1084,9 @@ required = true
             .artifact_id
     }
 
-    fn write_executable_script(dir: &Path, name: &str) -> PathBuf {
+    fn write_executable_script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("script should be written");
+        fs::write(&path, body).expect("script should be written");
 
         #[cfg(unix)]
         {
