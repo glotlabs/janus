@@ -138,6 +138,7 @@ impl ArtifactStore {
     }
 
     pub fn load(&self, artifact_id: &str) -> Result<StoredArtifact, ArtifactError> {
+        validate_artifact_id(artifact_id)?;
         let artifact_dir = self.root_dir.join(artifact_id);
         let blob_path = artifact_dir.join("blob");
 
@@ -149,6 +150,7 @@ impl ArtifactStore {
     }
 
     pub fn load_metadata(&self, artifact_id: &str) -> Result<ArtifactMetadata, ArtifactError> {
+        validate_artifact_id(artifact_id)?;
         let artifact_dir = self.root_dir.join(artifact_id);
         let metadata_path = artifact_dir.join("metadata.json");
         let metadata_raw = fs::read(&metadata_path)
@@ -345,6 +347,7 @@ pub enum ArtifactError {
         max: usize,
     },
     NotFound(String),
+    InvalidArtifactId(String),
     InvalidBody(axum::Error),
     InvalidHeader {
         name: &'static str,
@@ -397,6 +400,7 @@ impl fmt::Display for ArtifactError {
                 )
             }
             Self::NotFound(artifact_id) => write!(f, "artifact not found: {artifact_id}"),
+            Self::InvalidArtifactId(artifact_id) => write!(f, "invalid artifact id: {artifact_id}"),
             Self::InvalidBody(source) => write!(f, "failed to read request body: {source}"),
             Self::InvalidHeader { name, message } => {
                 write!(f, "invalid header {name}: {message}")
@@ -414,6 +418,7 @@ impl IntoResponse for ArtifactError {
             Self::MissingChecksum
             | Self::ChecksumMismatch { .. }
             | Self::TooLarge { .. }
+            | Self::InvalidArtifactId(_)
             | Self::InvalidBody(_)
             | Self::InvalidHeader { .. } => StatusCode::BAD_REQUEST,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
@@ -450,6 +455,7 @@ fn artifact_error_code(error: &ArtifactError) -> &'static str {
         ArtifactError::ChecksumMismatch { .. } => "artifact_checksum_mismatch",
         ArtifactError::TooLarge { .. } => "artifact_too_large",
         ArtifactError::NotFound(_) => "artifact_not_found",
+        ArtifactError::InvalidArtifactId(_) => "artifact_invalid_id",
         ArtifactError::InvalidBody(_) => "artifact_invalid_body",
         ArtifactError::InvalidHeader { .. } => "artifact_invalid_header",
         ArtifactError::TimeOverflow => "artifact_time_overflow",
@@ -516,6 +522,20 @@ fn checksum_from_headers(
         None if checksum_required => Err(ArtifactError::MissingChecksum),
         None => Ok(None),
     }
+}
+
+fn validate_artifact_id(artifact_id: &str) -> Result<(), ArtifactError> {
+    validate_prefixed_hex_id(artifact_id, "art_")
+        .then_some(())
+        .ok_or_else(|| ArtifactError::InvalidArtifactId(artifact_id.to_string()))
+}
+
+fn validate_prefixed_hex_id(value: &str, prefix: &str) -> bool {
+    let Some(suffix) = value.strip_prefix(prefix) else {
+        return false;
+    };
+
+    suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn iso8601_now_plus(ttl_seconds: u64) -> Result<String, ArtifactError> {
@@ -641,6 +661,28 @@ mod tests {
             .await
             .expect("download body");
         assert_eq!(body.as_ref(), payload);
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_artifact_id_over_http() {
+        let temp = temp_dir("artifact_http_invalid_id");
+        let state = test_state(&temp);
+        let app = Router::new()
+            .route("/artifacts", post(upload_artifact))
+            .route("/artifacts/{artifact_id}", get(download_artifact))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::get("/artifacts/not-an-artifact-id")
+                    .header("authorization", "Bearer artifacts-read-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

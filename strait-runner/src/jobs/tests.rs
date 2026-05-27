@@ -478,6 +478,48 @@ async fn reads_job_logs_over_http() {
 }
 
 #[tokio::test]
+async fn rejects_invalid_job_id_in_status_route() {
+    let temp = temp_dir("job_status_invalid_id");
+    let state = test_state(&temp);
+    let app = Router::new()
+        .route("/runs/{job_id}", get(get_job))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::get("/runs/not-a-job-id")
+                .header("authorization", "Bearer runner-token")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn rejects_invalid_job_id_in_logs_route() {
+    let temp = temp_dir("job_logs_invalid_id");
+    let state = test_state(&temp);
+    let app = Router::new()
+        .route("/runs/{job_id}/logs", get(get_job_logs))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::get("/runs/not-a-job-id/logs")
+                .header("authorization", "Bearer runner-token")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn lists_job_definitions_over_http() {
     let temp = temp_dir("job_list_http");
     let state = test_state(&temp);
@@ -547,6 +589,27 @@ async fn cancels_running_job_over_http() {
     let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
     assert_eq!(metadata.status, JobStatus::Canceled);
     assert_eq!(metadata.exit_code, None);
+}
+
+#[tokio::test]
+async fn rejects_invalid_job_id_in_cancel_route() {
+    let temp = temp_dir("job_cancel_invalid_id");
+    let state = test_state(&temp);
+    let app = Router::new()
+        .route("/runs/{job_id}", get(get_job).delete(cancel_job))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::delete("/runs/not-a-job-id")
+                .header("authorization", "Bearer runner-token")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[cfg(unix)]
@@ -732,13 +795,14 @@ async fn rejects_new_jobs_after_shutdown_starts() {
 #[test]
 fn recovers_running_jobs_on_startup() {
     let temp = temp_dir("job_recovery_startup");
-    let jobs_dir = temp.join("jobs").join("job_recover");
+    let job_id = "job_00000000000000000000000000000001";
+    let jobs_dir = temp.join("jobs").join(job_id);
     fs::create_dir_all(&jobs_dir).expect("job dir should be created");
     fs::write(jobs_dir.join("stderr.log"), "").expect("stderr should exist");
     fs::write(
         jobs_dir.join("metadata.json"),
         serde_json::to_vec_pretty(&JobMetadata {
-            job_id: "job_recover".to_string(),
+            job_id: job_id.to_string(),
             name: "build-app".to_string(),
             status: JobStatus::Running,
             started_at: "2026-01-01T00:00:00Z".to_string(),
@@ -758,7 +822,7 @@ fn recovers_running_jobs_on_startup() {
         .expect("recovery should succeed");
 
     assert_eq!(recovered, 1);
-    let metadata = store.read_job("job_recover").expect("job should load");
+    let metadata = store.read_job(job_id).expect("job should load");
     assert_eq!(metadata.status, JobStatus::Failed);
     assert!(metadata.finished_at.is_some());
     assert!(

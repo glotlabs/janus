@@ -191,6 +191,7 @@ impl JobStore {
     }
 
     pub fn read_job(&self, job_id: &str) -> Result<JobMetadata, JobError> {
+        validate_job_id(job_id)?;
         info!(job_id = %job_id, "reading job metadata");
         let metadata_path = self.root_dir.join(job_id).join("metadata.json");
         let bytes = fs::read(&metadata_path).map_err(|source| {
@@ -211,6 +212,7 @@ impl JobStore {
     }
 
     pub fn read_logs(&self, job_id: &str) -> Result<JobLogs, JobError> {
+        validate_job_id(job_id)?;
         info!(job_id = %job_id, "reading job logs");
         let job_dir = self.root_dir.join(job_id);
         let stdout_path = job_dir.join("stdout.log");
@@ -241,6 +243,7 @@ impl JobStore {
     }
 
     pub fn cancel_job(&self, job_id: &str) -> Result<(), JobError> {
+        validate_job_id(job_id)?;
         let running_jobs = self.running_jobs.lock().expect("job mutex poisoned");
         let running_job = running_jobs
             .get(job_id)
@@ -512,6 +515,20 @@ fn enforce_concurrency(
 
 pub(super) fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn validate_job_id(job_id: &str) -> Result<(), JobError> {
+    validate_prefixed_hex_id(job_id, "job_")
+        .then_some(())
+        .ok_or_else(|| JobError::InvalidJobId(job_id.to_string()))
+}
+
+fn validate_prefixed_hex_id(value: &str, prefix: &str) -> bool {
+    let Some(suffix) = value.strip_prefix(prefix) else {
+        return false;
+    };
+
+    suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn append_recovery_message(path: &Path) -> Result<(), JobError> {

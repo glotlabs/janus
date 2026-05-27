@@ -64,6 +64,7 @@ pub enum JobError {
         reason: String,
     },
     InvalidBody(&'static str),
+    InvalidJobId(String),
 }
 
 impl fmt::Display for JobError {
@@ -114,6 +115,7 @@ impl fmt::Display for JobError {
             }
             Self::ConcurrencyConflict { reason } => write!(f, "{reason}"),
             Self::InvalidBody(message) => write!(f, "invalid job request body: {message}"),
+            Self::InvalidJobId(job_id) => write!(f, "invalid job id: {job_id}"),
         }
     }
 }
@@ -140,11 +142,13 @@ impl IntoResponse for JobError {
             | Self::Artifact(ArtifactError::MissingChecksum)
             | Self::Artifact(ArtifactError::ChecksumMismatch { .. })
             | Self::Artifact(ArtifactError::TooLarge { .. })
+            | Self::Artifact(ArtifactError::InvalidArtifactId(_))
             | Self::Artifact(ArtifactError::InvalidHeader { .. })
             | Self::Artifact(ArtifactError::ParseExpiry { .. })
             | Self::MissingOutput { .. }
             | Self::ExpiredArtifact { .. }
-            | Self::InvalidBody(_) => StatusCode::BAD_REQUEST,
+            | Self::InvalidBody(_)
+            | Self::InvalidJobId(_) => StatusCode::BAD_REQUEST,
             Self::ConcurrencyConflict { .. } => StatusCode::CONFLICT,
             Self::Artifact(ArtifactError::ParseMetadata { .. })
             | Self::Artifact(ArtifactError::CreateDir { .. })
@@ -198,6 +202,7 @@ impl JobErrorResponse {
             JobError::MissingOutput { .. } => "job_missing_output",
             JobError::ConcurrencyConflict { .. } => "job_concurrency_conflict",
             JobError::InvalidBody(_) => "job_invalid_body",
+            JobError::InvalidJobId(_) => "job_invalid_id",
         };
 
         Self {
