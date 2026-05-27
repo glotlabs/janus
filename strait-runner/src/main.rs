@@ -53,12 +53,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?);
     let artifacts_cleanup = Arc::clone(&artifacts);
     let cleanup_interval_seconds = config.artifacts.cleanup_interval_seconds;
+    let jobs = Arc::new(JobStore::new(&config.data_dir)?);
+    let recovered_jobs = jobs.recover_interrupted_jobs()?;
     let state = AppState {
         config: Arc::clone(&config),
         auth,
         manifests: Arc::clone(&manifests),
         artifacts,
-        jobs: Arc::new(JobStore::new(&config.data_dir)?),
+        jobs,
     };
     tokio::spawn(async move {
         artifacts_cleanup
@@ -74,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         listen = %config.server.listen,
         config_path = %config_path,
         manifest_count = manifests.len(),
+        recovered_jobs,
         "strait-runner listening"
     );
 
@@ -107,7 +110,12 @@ fn build_app(state: AppState) -> Router {
             "/artifacts/{artifact_id}",
             get(artifacts::download_artifact),
         )
-        .route("/jobs/{id}", get(jobs::get_job).post(jobs::create_job))
+        .route(
+            "/jobs/{id}",
+            get(jobs::get_job)
+                .post(jobs::create_job)
+                .delete(jobs::cancel_job),
+        )
         .route("/jobs/{job_id}/logs", get(jobs::get_job_logs))
         .with_state(state)
 }

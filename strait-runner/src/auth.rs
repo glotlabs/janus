@@ -144,13 +144,7 @@ impl IntoResponse for AuthRejection {
             }
         };
 
-        let mut response = (
-            status,
-            Json(AuthErrorResponse {
-                error: self.to_string(),
-            }),
-        )
-            .into_response();
+        let mut response = (status, Json(AuthErrorResponse::from_rejection(&self))).into_response();
 
         if status == StatusCode::UNAUTHORIZED {
             response.headers_mut().insert(
@@ -182,7 +176,24 @@ impl fmt::Display for AuthRejection {
 
 #[derive(Debug, Serialize)]
 struct AuthErrorResponse {
-    error: String,
+    code: &'static str,
+    message: String,
+}
+
+impl AuthErrorResponse {
+    fn from_rejection(rejection: &AuthRejection) -> Self {
+        let code = match rejection {
+            AuthRejection::MissingAuthorization => "auth_missing_authorization",
+            AuthRejection::InvalidAuthorizationHeader => "auth_invalid_authorization_header",
+            AuthRejection::InvalidToken => "auth_invalid_token",
+            AuthRejection::MissingPermission { .. } => "auth_missing_permission",
+        };
+
+        Self {
+            code,
+            message: rejection.to_string(),
+        }
+    }
 }
 
 fn parse_bearer_token(header_value: Option<&str>) -> Result<&str, AuthRejection> {

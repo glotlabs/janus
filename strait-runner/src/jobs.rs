@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::{
     process::Command,
+    sync::watch,
     time::{Duration, timeout},
 };
 use uuid::Uuid;
@@ -55,7 +56,7 @@ impl JobStore {
         artifacts: &ArtifactStore,
         cleanup_successful_workdirs: bool,
         keep_failed_workdirs: bool,
-    ) -> Result<JobCreated, JobError> {
+    ) -> Result<JobCreatedResponse, JobError> {
         let manifest = manifests
             .get(name)
             .cloned()
@@ -77,6 +78,8 @@ impl JobStore {
             outputs: BTreeMap::new(),
         };
 
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+
         {
             let mut running_jobs = self.running_jobs.lock().expect("job mutex poisoned");
             enforce_concurrency(&manifest, &running_jobs)?;
@@ -86,6 +89,7 @@ impl JobStore {
                     job_id: job_id.clone(),
                     name: manifest.name.clone(),
                     concurrency: manifest.concurrency.clone(),
+                    cancel_tx,
                 },
             );
         }
@@ -141,6 +145,7 @@ impl JobStore {
             cleanup_successful_workdirs,
             keep_failed_workdirs,
             metadata: job,
+            cancel_rx,
         };
 
         let store = Arc::clone(self);
@@ -148,11 +153,11 @@ impl JobStore {
             store.run_job(execution).await;
         });
 
-        Ok(JobCreated {
+        Ok(JobCreatedResponse::from(JobCreated {
             job_id,
             status: JobStatus::Running,
             started_at,
-        })
+        }))
     }
 
     pub fn read_job(&self, job_id: &str) -> Result<JobMetadata, JobError> {
@@ -202,10 +207,82 @@ impl JobStore {
 
         Ok(JobLogs { stdout, stderr })
     }
+
+    pub fn cancel_job(&self, job_id: &str) -> Result<(), JobError> {
+        let running_jobs = self.running_jobs.lock().expect("job mutex poisoned");
+        let running_job = running_jobs
+            .get(job_id)
+            .ok_or_else(|| match self.read_job(job_id) {
+                Ok(_) => JobError::JobNotRunning(job_id.to_string()),
+                Err(JobError::JobNotFound(_)) => JobError::JobNotFound(job_id.to_string()),
+                Err(error) => error,
+            })?;
+
+        running_job
+            .cancel_tx
+            .send(true)
+            .map_err(|_| JobError::JobNotRunning(job_id.to_string()))?;
+        Ok(())
+    }
+
+    pub fn recover_interrupted_jobs(&self) -> Result<usize, JobError> {
+        let mut recovered = 0;
+        let entries = fs::read_dir(&self.root_dir).map_err(|source| JobError::ReadFile {
+            path: self.root_dir.display().to_string(),
+            source,
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|source| JobError::ReadFile {
+                path: self.root_dir.display().to_string(),
+                source,
+            })?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let metadata_path = path.join("metadata.json");
+            let stderr_path = path.join("stderr.log");
+            let mut metadata = match fs::read(&metadata_path) {
+                Ok(bytes) => serde_json::from_slice::<JobMetadata>(&bytes).map_err(|source| {
+                    JobError::ParseMetadata {
+                        path: metadata_path.display().to_string(),
+                        source,
+                    }
+                })?,
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(source) => {
+                    return Err(JobError::ReadFile {
+                        path: metadata_path.display().to_string(),
+                        source,
+                    });
+                }
+            };
+
+            if metadata.status == JobStatus::Running {
+                metadata.status = JobStatus::Failed;
+                metadata.finished_at = Some(now_rfc3339());
+                metadata.exit_code = None;
+                self.persist_metadata(&metadata_path, &metadata)?;
+                append_recovery_message(&stderr_path)?;
+                recovered += 1;
+            }
+        }
+
+        Ok(recovered)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobCreated {
+    pub job_id: String,
+    pub status: JobStatus,
+    pub started_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobCreatedResponse {
     pub job_id: String,
     pub status: JobStatus,
     pub started_at: String,
@@ -232,10 +309,34 @@ pub struct JobLogs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobLogsResponse {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobOutputArtifact {
     pub artifact_id: String,
     pub sha256: String,
     pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobOutputResponse {
+    pub artifact_id: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobStatusResponse {
+    pub job_id: String,
+    pub name: String,
+    pub status: JobStatus,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub exit_code: Option<i32>,
+    pub outputs: BTreeMap<String, JobOutputResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -254,6 +355,7 @@ struct RunningJob {
     job_id: String,
     name: String,
     concurrency: Concurrency,
+    cancel_tx: watch::Sender<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +371,7 @@ struct JobExecution {
     cleanup_successful_workdirs: bool,
     keep_failed_workdirs: bool,
     metadata: JobMetadata,
+    cancel_rx: watch::Receiver<bool>,
 }
 
 #[derive(Debug)]
@@ -301,6 +404,7 @@ pub enum JobError {
         source: std::io::Error,
     },
     JobNotFound(String),
+    JobNotRunning(String),
     UnknownJob(String),
     MissingParam(String),
     UnknownParam(String),
@@ -348,6 +452,7 @@ impl fmt::Display for JobError {
                 write!(f, "failed while waiting for job script {script}: {source}")
             }
             Self::JobNotFound(job_id) => write!(f, "job not found: {job_id}"),
+            Self::JobNotRunning(job_id) => write!(f, "job is not running: {job_id}"),
             Self::UnknownJob(name) => write!(f, "job not found: {name}"),
             Self::MissingParam(name) => write!(f, "missing required param: {name}"),
             Self::UnknownParam(name) => write!(f, "unknown param: {name}"),
@@ -382,6 +487,7 @@ impl IntoResponse for JobError {
     fn into_response(self) -> Response {
         let status = match self {
             Self::UnknownJob(_) | Self::JobNotFound(_) => StatusCode::NOT_FOUND,
+            Self::JobNotRunning(_) => StatusCode::CONFLICT,
             Self::MissingParam(_)
             | Self::UnknownParam(_)
             | Self::InvalidParamType { .. }
@@ -414,19 +520,44 @@ impl IntoResponse for JobError {
             | Self::SerializeMetadata { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
-        (
-            status,
-            Json(JobErrorResponse {
-                error: self.to_string(),
-            }),
-        )
-            .into_response()
+        (status, Json(JobErrorResponse::from_job_error(&self))).into_response()
     }
 }
 
 #[derive(Debug, Serialize)]
 struct JobErrorResponse {
-    error: String,
+    code: &'static str,
+    message: String,
+}
+
+impl JobErrorResponse {
+    fn from_job_error(error: &JobError) -> Self {
+        let code = match error {
+            JobError::CreateDir { .. } => "job_create_dir_failed",
+            JobError::ReadFile { .. } => "job_read_failed",
+            JobError::WriteFile { .. } => "job_write_failed",
+            JobError::ParseMetadata { .. } => "job_metadata_parse_failed",
+            JobError::SerializeMetadata { .. } => "job_metadata_serialize_failed",
+            JobError::SpawnProcess { .. } => "job_spawn_failed",
+            JobError::WaitProcess { .. } => "job_wait_failed",
+            JobError::JobNotFound(_) => "job_not_found",
+            JobError::JobNotRunning(_) => "job_not_running",
+            JobError::UnknownJob(_) => "job_name_not_found",
+            JobError::MissingParam(_) => "job_missing_param",
+            JobError::UnknownParam(_) => "job_unknown_param",
+            JobError::InvalidParamType { .. } => "job_invalid_param_type",
+            JobError::Artifact(_) => "artifact_error",
+            JobError::ExpiredArtifact { .. } => "artifact_expired",
+            JobError::MissingOutput { .. } => "job_missing_output",
+            JobError::ConcurrencyConflict { .. } => "job_concurrency_conflict",
+            JobError::InvalidBody(_) => "job_invalid_body",
+        };
+
+        Self {
+            code,
+            message: error.to_string(),
+        }
+    }
 }
 
 pub async fn create_job(
@@ -434,7 +565,7 @@ pub async fn create_job(
     State(state): State<crate::AppState>,
     AxumPath(name): AxumPath<String>,
     Json(body): Json<Value>,
-) -> Result<(StatusCode, Json<JobCreated>), JobError> {
+) -> Result<(StatusCode, Json<JobCreatedResponse>), JobError> {
     let params = body
         .as_object()
         .cloned()
@@ -455,16 +586,25 @@ pub async fn get_job(
     _: Authorized<JobsRead>,
     State(state): State<crate::AppState>,
     AxumPath(job_id): AxumPath<String>,
-) -> Result<Json<JobMetadata>, JobError> {
-    Ok(Json(state.jobs.read_job(&job_id)?))
+) -> Result<Json<JobStatusResponse>, JobError> {
+    Ok(Json(JobStatusResponse::from(state.jobs.read_job(&job_id)?)))
 }
 
 pub async fn get_job_logs(
     _: Authorized<LogsRead>,
     State(state): State<crate::AppState>,
     AxumPath(job_id): AxumPath<String>,
-) -> Result<Json<JobLogs>, JobError> {
-    Ok(Json(state.jobs.read_logs(&job_id)?))
+) -> Result<Json<JobLogsResponse>, JobError> {
+    Ok(Json(JobLogsResponse::from(state.jobs.read_logs(&job_id)?)))
+}
+
+pub async fn cancel_job(
+    _: Authorized<JobsRun>,
+    State(state): State<crate::AppState>,
+    AxumPath(job_id): AxumPath<String>,
+) -> Result<StatusCode, JobError> {
+    state.jobs.cancel_job(&job_id)?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 fn validate_params(
@@ -643,36 +783,52 @@ impl JobStore {
             }
         };
 
-        let wait_result = timeout(
-            Duration::from_secs(execution.manifest.timeout_seconds),
-            child.wait(),
-        )
-        .await;
+        let cancel_wait = async {
+            let mut cancel_rx = execution.cancel_rx.clone();
+            if *cancel_rx.borrow() {
+                Ok(())
+            } else {
+                cancel_rx.changed().await.map_err(|_| ())
+            }
+        };
 
-        match wait_result {
-            Ok(Ok(status)) => {
-                let code = status.code();
-                if status.success() {
-                    ExecutionOutcome::Completed {
-                        status: JobStatus::Success,
-                        exit_code: code,
-                    }
-                } else {
-                    ExecutionOutcome::Completed {
-                        status: JobStatus::Failed,
-                        exit_code: code,
+        tokio::select! {
+            result = timeout(
+                Duration::from_secs(execution.manifest.timeout_seconds),
+                child.wait(),
+            ) => match result {
+                Ok(Ok(status)) => {
+                    let code = status.code();
+                    if status.success() {
+                        ExecutionOutcome::Completed {
+                            status: JobStatus::Success,
+                            exit_code: code,
+                        }
+                    } else {
+                        ExecutionOutcome::Completed {
+                            status: JobStatus::Failed,
+                            exit_code: code,
+                        }
                     }
                 }
-            }
-            Ok(Err(source)) => ExecutionOutcome::FailedToStart(JobError::WaitProcess {
-                script: execution.manifest.script.clone(),
-                source,
-            }),
-            Err(_) => {
+                Ok(Err(source)) => ExecutionOutcome::FailedToStart(JobError::WaitProcess {
+                    script: execution.manifest.script.clone(),
+                    source,
+                }),
+                Err(_) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    ExecutionOutcome::Completed {
+                        status: JobStatus::TimedOut,
+                        exit_code: None,
+                    }
+                }
+            },
+            _ = cancel_wait => {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 ExecutionOutcome::Completed {
-                    status: JobStatus::TimedOut,
+                    status: JobStatus::Canceled,
                     exit_code: None,
                 }
             }
@@ -847,9 +1003,71 @@ fn append_error(path: &Path, error: &JobError) -> Result<(), JobError> {
     })
 }
 
+fn append_recovery_message(path: &Path) -> Result<(), JobError> {
+    let message = "runner restarted before job completion; marking job as failed";
+    let mut stderr = fs::read_to_string(path).unwrap_or_default();
+    if !stderr.is_empty() && !stderr.ends_with('\n') {
+        stderr.push('\n');
+    }
+    stderr.push_str(message);
+    stderr.push('\n');
+
+    fs::write(path, stderr).map_err(|source| JobError::WriteFile {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
+impl From<JobCreated> for JobCreatedResponse {
+    fn from(value: JobCreated) -> Self {
+        Self {
+            job_id: value.job_id,
+            status: value.status,
+            started_at: value.started_at,
+        }
+    }
+}
+
+impl From<JobLogs> for JobLogsResponse {
+    fn from(value: JobLogs) -> Self {
+        Self {
+            stdout: value.stdout,
+            stderr: value.stderr,
+        }
+    }
+}
+
+impl From<JobMetadata> for JobStatusResponse {
+    fn from(value: JobMetadata) -> Self {
+        Self {
+            job_id: value.job_id,
+            name: value.name,
+            status: value.status,
+            started_at: value.started_at,
+            finished_at: value.finished_at,
+            exit_code: value.exit_code,
+            outputs: value
+                .outputs
+                .into_iter()
+                .map(|(name, output)| {
+                    (
+                        name,
+                        JobOutputResponse {
+                            artifact_id: output.artifact_id,
+                            sha256: output.sha256,
+                            size: output.size,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         fs,
         path::{Path, PathBuf},
         sync::Arc,
@@ -862,12 +1080,15 @@ mod tests {
         http::{Request, StatusCode},
         routing::{get, post},
     };
-    use serde_json::json;
+    use serde_json::{Map, json};
     use sha2::Digest;
     use tokio::time::{Duration, sleep};
     use tower::util::ServiceExt;
 
-    use super::{JobLogs, JobMetadata, JobStore, create_job, get_job, get_job_logs};
+    use super::{
+        JobCreatedResponse, JobLogsResponse, JobMetadata, JobStatusResponse, JobStore, cancel_job,
+        create_job, get_job, get_job_logs,
+    };
     use crate::{
         AppState,
         artifacts::ArtifactStore,
@@ -905,7 +1126,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body");
-        let created: super::JobCreated = serde_json::from_slice(&body).expect("created job body");
+        let created: JobCreatedResponse = serde_json::from_slice(&body).expect("created job body");
         let metadata_path = temp
             .join("jobs")
             .join(&created.job_id)
@@ -998,7 +1219,7 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body");
-        let created: super::JobCreated = serde_json::from_slice(&body).expect("created job body");
+        let created: JobCreatedResponse = serde_json::from_slice(&body).expect("created job body");
         let metadata_path = temp
             .join("jobs")
             .join(&created.job_id)
@@ -1264,7 +1485,7 @@ required = true
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body");
-        let fetched: JobMetadata = serde_json::from_slice(&body).expect("job metadata body");
+        let fetched: JobStatusResponse = serde_json::from_slice(&body).expect("job metadata body");
 
         assert_eq!(fetched.job_id, created.job_id);
         assert_eq!(fetched.status, metadata.status);
@@ -1315,10 +1536,91 @@ required = true
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body");
-        let logs: JobLogs = serde_json::from_slice(&body).expect("job logs body");
+        let logs: JobLogsResponse = serde_json::from_slice(&body).expect("job logs body");
 
         assert_eq!(logs.stdout, "out");
         assert_eq!(logs.stderr, "err");
+    }
+
+    #[tokio::test]
+    async fn cancels_running_job_over_http() {
+        let temp = temp_dir("job_cancel_http");
+        let state = test_state_with_script(&temp, "build-app", "#!/bin/sh\nsleep 5\n", 600);
+        let app = Router::new()
+            .route(
+                "/jobs/{id}",
+                get(get_job).post(create_job).delete(cancel_job),
+            )
+            .with_state(state);
+
+        let created = read_created_job(
+            app.clone()
+                .oneshot(
+                    Request::post("/jobs/build-app")
+                        .header("authorization", "Bearer runner-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(json!({ "commit": "abc123" }).to_string()))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("request should succeed"),
+        )
+        .await;
+
+        let cancel = app
+            .oneshot(
+                Request::delete(format!("/jobs/{}", created.job_id))
+                    .header("authorization", "Bearer runner-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(cancel.status(), StatusCode::ACCEPTED);
+
+        let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+        assert_eq!(metadata.status, super::JobStatus::Canceled);
+        assert_eq!(metadata.exit_code, None);
+    }
+
+    #[test]
+    fn recovers_running_jobs_on_startup() {
+        let temp = temp_dir("job_recovery_startup");
+        let jobs_dir = temp.join("jobs").join("job_recover");
+        fs::create_dir_all(&jobs_dir).expect("job dir should be created");
+        fs::write(jobs_dir.join("stderr.log"), "").expect("stderr should exist");
+        fs::write(
+            jobs_dir.join("metadata.json"),
+            serde_json::to_vec_pretty(&JobMetadata {
+                job_id: "job_recover".to_string(),
+                name: "build-app".to_string(),
+                status: super::JobStatus::Running,
+                started_at: "2026-01-01T00:00:00Z".to_string(),
+                finished_at: None,
+                exit_code: None,
+                params: Map::new(),
+                resolved_artifacts: BTreeMap::new(),
+                outputs: BTreeMap::new(),
+            })
+            .expect("metadata"),
+        )
+        .expect("metadata written");
+
+        let store = JobStore::new(&temp).expect("job store should init");
+        let recovered = store
+            .recover_interrupted_jobs()
+            .expect("recovery should succeed");
+
+        assert_eq!(recovered, 1);
+        let metadata = store.read_job("job_recover").expect("job should load");
+        assert_eq!(metadata.status, super::JobStatus::Failed);
+        assert!(metadata.finished_at.is_some());
+        assert!(
+            fs::read_to_string(jobs_dir.join("stderr.log"))
+                .expect("stderr should read")
+                .contains("runner restarted before job completion")
+        );
     }
 
     #[tokio::test]
@@ -1719,7 +2021,7 @@ concurrency = "{}"
         }
     }
 
-    async fn read_created_job(response: axum::response::Response) -> super::JobCreated {
+    async fn read_created_job(response: axum::response::Response) -> JobCreatedResponse {
         assert_eq!(response.status(), StatusCode::CREATED);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await

@@ -365,7 +365,8 @@ impl IntoResponse for ArtifactError {
         };
 
         let payload = Json(ErrorResponse {
-            error: self.to_string(),
+            code: artifact_error_code(&self),
+            message: self.to_string(),
         });
 
         (status, payload).into_response()
@@ -374,7 +375,29 @@ impl IntoResponse for ArtifactError {
 
 #[derive(Serialize)]
 struct ErrorResponse {
-    error: String,
+    code: &'static str,
+    message: String,
+}
+
+fn artifact_error_code(error: &ArtifactError) -> &'static str {
+    match error {
+        ArtifactError::InvalidMaxSize { .. } => "artifact_invalid_max_size",
+        ArtifactError::CreateDir { .. } => "artifact_create_dir_failed",
+        ArtifactError::ReadDir { .. } => "artifact_read_dir_failed",
+        ArtifactError::RemoveDir { .. } => "artifact_remove_dir_failed",
+        ArtifactError::WriteFile { .. } => "artifact_write_failed",
+        ArtifactError::ReadFile { .. } => "artifact_read_failed",
+        ArtifactError::SerializeMetadata { .. } => "artifact_metadata_serialize_failed",
+        ArtifactError::ParseMetadata { .. } => "artifact_metadata_parse_failed",
+        ArtifactError::ParseExpiry { .. } => "artifact_expiry_parse_failed",
+        ArtifactError::MissingChecksum => "artifact_missing_checksum",
+        ArtifactError::ChecksumMismatch { .. } => "artifact_checksum_mismatch",
+        ArtifactError::TooLarge { .. } => "artifact_too_large",
+        ArtifactError::NotFound(_) => "artifact_not_found",
+        ArtifactError::InvalidBody(_) => "artifact_invalid_body",
+        ArtifactError::InvalidHeader { .. } => "artifact_invalid_header",
+        ArtifactError::TimeOverflow => "artifact_time_overflow",
+    }
 }
 
 pub async fn upload_artifact(
