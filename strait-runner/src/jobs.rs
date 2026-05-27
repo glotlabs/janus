@@ -89,31 +89,44 @@ impl JobStore {
             );
         }
 
-        let job_dir = self.root_dir.join(&job_id);
-        fs::create_dir_all(job_dir.join("work")).map_err(|source| JobError::CreateDir {
-            path: job_dir.join("work").display().to_string(),
-            source,
-        })?;
-        fs::create_dir_all(job_dir.join("output")).map_err(|source| JobError::CreateDir {
-            path: job_dir.join("output").display().to_string(),
-            source,
-        })?;
-        fs::write(job_dir.join("stdout.log"), []).map_err(|source| JobError::WriteFile {
-            path: job_dir.join("stdout.log").display().to_string(),
-            source,
-        })?;
-        fs::write(job_dir.join("stderr.log"), []).map_err(|source| JobError::WriteFile {
-            path: job_dir.join("stderr.log").display().to_string(),
-            source,
-        })?;
-        let metadata_json = serde_json::to_vec_pretty(&job)
-            .map_err(|source| JobError::SerializeMetadata { source })?;
-        fs::write(job_dir.join("metadata.json"), metadata_json).map_err(|source| {
-            JobError::WriteFile {
-                path: job_dir.join("metadata.json").display().to_string(),
+        let setup_result: Result<PathBuf, JobError> = (|| {
+            let job_dir = self.root_dir.join(&job_id);
+            fs::create_dir_all(job_dir.join("work")).map_err(|source| JobError::CreateDir {
+                path: job_dir.join("work").display().to_string(),
                 source,
+            })?;
+            fs::create_dir_all(job_dir.join("output")).map_err(|source| JobError::CreateDir {
+                path: job_dir.join("output").display().to_string(),
+                source,
+            })?;
+            fs::write(job_dir.join("stdout.log"), []).map_err(|source| JobError::WriteFile {
+                path: job_dir.join("stdout.log").display().to_string(),
+                source,
+            })?;
+            fs::write(job_dir.join("stderr.log"), []).map_err(|source| JobError::WriteFile {
+                path: job_dir.join("stderr.log").display().to_string(),
+                source,
+            })?;
+            let metadata_json = serde_json::to_vec_pretty(&job)
+                .map_err(|source| JobError::SerializeMetadata { source })?;
+            fs::write(job_dir.join("metadata.json"), metadata_json).map_err(|source| {
+                JobError::WriteFile {
+                    path: job_dir.join("metadata.json").display().to_string(),
+                    source,
+                }
+            })?;
+
+            Ok(job_dir)
+        })();
+
+        let job_dir = match setup_result {
+            Ok(job_dir) => job_dir,
+            Err(error) => {
+                let mut running_jobs = self.running_jobs.lock().expect("job mutex poisoned");
+                running_jobs.remove(&job_id);
+                return Err(error);
             }
-        })?;
+        };
 
         let execution = JobExecution {
             artifacts: Arc::new(artifacts.clone()),
@@ -1288,19 +1301,203 @@ required = true
         assert_eq!(logs.stderr, "err");
     }
 
+    #[tokio::test]
+    async fn parallel_jobs_can_run_together() {
+        let temp = temp_dir("job_parallel_concurrency");
+        let state = test_state_with_manifests(
+            &temp,
+            vec![
+                TestManifest {
+                    job_name: "job-a",
+                    concurrency: "parallel",
+                    params_toml: OPTIONAL_COMMIT_PARAM,
+                    outputs_toml: "",
+                },
+                TestManifest {
+                    job_name: "job-b",
+                    concurrency: "parallel",
+                    params_toml: OPTIONAL_COMMIT_PARAM,
+                    outputs_toml: "",
+                },
+            ],
+            "#!/bin/sh\nsleep 1\n",
+            600,
+        );
+        let app = Router::new()
+            .route("/jobs/{id}", post(create_job))
+            .with_state(state);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::post("/jobs/job-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "a" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        let second = app
+            .oneshot(
+                Request::post("/jobs/job-b")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "b" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(second.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn job_exclusive_rejects_second_instance_while_running() {
+        let temp = temp_dir("job_exclusive_concurrency");
+        let state = test_state_with_manifests(
+            &temp,
+            vec![TestManifest {
+                job_name: "build-app",
+                concurrency: "job_exclusive",
+                params_toml: OPTIONAL_COMMIT_PARAM,
+                outputs_toml: "",
+            }],
+            "#!/bin/sh\nsleep 1\n",
+            600,
+        );
+        let app = Router::new()
+            .route("/jobs/{id}", post(create_job))
+            .with_state(state);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::post("/jobs/build-app")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "a" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        let second = app
+            .oneshot(
+                Request::post("/jobs/build-app")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "b" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn global_exclusive_rejects_when_other_job_is_running() {
+        let temp = temp_dir("job_global_exclusive_conflict");
+        let state = test_state_with_manifests(
+            &temp,
+            vec![
+                TestManifest {
+                    job_name: "job-a",
+                    concurrency: "parallel",
+                    params_toml: OPTIONAL_COMMIT_PARAM,
+                    outputs_toml: "",
+                },
+                TestManifest {
+                    job_name: "job-b",
+                    concurrency: "global_exclusive",
+                    params_toml: OPTIONAL_COMMIT_PARAM,
+                    outputs_toml: "",
+                },
+            ],
+            "#!/bin/sh\nsleep 1\n",
+            600,
+        );
+        let app = Router::new()
+            .route("/jobs/{id}", post(create_job))
+            .with_state(state);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::post("/jobs/job-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "a" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        let second = app
+            .oneshot(
+                Request::post("/jobs/job-b")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "b" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn parallel_job_rejects_while_global_exclusive_is_running() {
+        let temp = temp_dir("job_global_exclusive_running");
+        let state = test_state_with_manifests(
+            &temp,
+            vec![
+                TestManifest {
+                    job_name: "job-a",
+                    concurrency: "global_exclusive",
+                    params_toml: OPTIONAL_COMMIT_PARAM,
+                    outputs_toml: "",
+                },
+                TestManifest {
+                    job_name: "job-b",
+                    concurrency: "parallel",
+                    params_toml: OPTIONAL_COMMIT_PARAM,
+                    outputs_toml: "",
+                },
+            ],
+            "#!/bin/sh\nsleep 1\n",
+            600,
+        );
+        let app = Router::new()
+            .route("/jobs/{id}", post(create_job))
+            .with_state(state);
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::post("/jobs/job-a")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "a" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+        let second = app
+            .oneshot(
+                Request::post("/jobs/job-b")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "commit": "b" }).to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(first.status(), StatusCode::CREATED);
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
     fn test_state(temp: &Path) -> AppState {
         test_state_from_manifest(
             temp,
             "build-app",
-            r#"
-[params.commit]
-type = "string"
-required = true
-
-[params.branch]
-type = "string"
-required = true
-"#,
+            REQUIRED_COMMIT_AND_BRANCH_PARAMS,
             "",
             "#!/bin/sh\nexit 0\n",
             600,
@@ -1311,11 +1508,7 @@ required = true
         test_state_from_manifest(
             temp,
             "build-with-artifact",
-            r#"
-[params.source]
-type = "artifact"
-required = true
-"#,
+            REQUIRED_SOURCE_PARAM,
             "",
             "#!/bin/sh\nexit 0\n",
             600,
@@ -1331,15 +1524,7 @@ required = true
         test_state_from_manifest(
             temp,
             job_name,
-            r#"
-[params.commit]
-type = "string"
-required = false
-
-[params.source]
-type = "artifact"
-required = false
-"#,
+            OPTIONAL_COMMIT_AND_SOURCE_PARAMS,
             "",
             script_body,
             timeout_seconds,
@@ -1375,6 +1560,68 @@ concurrency = "parallel"
             ),
         )
         .expect("manifest should be written");
+
+        let config = Config {
+            data_dir: temp.display().to_string(),
+            manifests_dir: manifests_dir.display().to_string(),
+            server: ServerConfig {
+                listen: "127.0.0.1:0".to_string(),
+            },
+            auth: AuthConfig {
+                mode: "bearer".to_string(),
+                tokens: Vec::new(),
+            },
+            artifacts: ArtifactsConfig {
+                max_size_mb: 1,
+                ttl_seconds: 3600,
+                cleanup_interval_seconds: 600,
+                require_checksum_on_upload: true,
+            },
+            jobs: JobsConfig {
+                default_log_limit_mb: 50,
+                cleanup_successful_workdirs: true,
+                keep_failed_workdirs: true,
+            },
+        };
+
+        build_state(config)
+    }
+
+    fn test_state_with_manifests(
+        temp: &Path,
+        manifests: Vec<TestManifest<'_>>,
+        script_body: &str,
+        timeout_seconds: u64,
+    ) -> AppState {
+        let manifests_dir = temp.join("manifests");
+        let scripts_dir = temp.join("scripts");
+        fs::create_dir_all(&manifests_dir).expect("manifests dir should be created");
+        fs::create_dir_all(&scripts_dir).expect("scripts dir should be created");
+        let script = write_executable_script(&scripts_dir, "build.sh", script_body);
+
+        for manifest in manifests {
+            fs::write(
+                manifests_dir.join(format!("{}.toml", manifest.job_name)),
+                format!(
+                    r#"
+name = "{}"
+script = "{}"
+timeout_seconds = {}
+concurrency = "{}"
+
+{}
+{}
+"#,
+                    manifest.job_name,
+                    script.display(),
+                    timeout_seconds,
+                    manifest.concurrency,
+                    manifest.params_toml,
+                    manifest.outputs_toml
+                ),
+            )
+            .expect("manifest should be written");
+        }
 
         let config = Config {
             data_dir: temp.display().to_string(),
@@ -1480,5 +1727,44 @@ concurrency = "parallel"
         let path = std::env::temp_dir().join(format!("strait-runner-{label}-{unique}"));
         fs::create_dir_all(&path).expect("temp dir should be created");
         path
+    }
+
+    const REQUIRED_COMMIT_AND_BRANCH_PARAMS: &str = r#"
+[params.commit]
+type = "string"
+required = true
+
+[params.branch]
+type = "string"
+required = true
+"#;
+
+    const REQUIRED_SOURCE_PARAM: &str = r#"
+[params.source]
+type = "artifact"
+required = true
+"#;
+
+    const OPTIONAL_COMMIT_AND_SOURCE_PARAMS: &str = r#"
+[params.commit]
+type = "string"
+required = false
+
+[params.source]
+type = "artifact"
+required = false
+"#;
+
+    const OPTIONAL_COMMIT_PARAM: &str = r#"
+[params.commit]
+type = "string"
+required = false
+"#;
+
+    struct TestManifest<'a> {
+        job_name: &'a str,
+        concurrency: &'a str,
+        params_toml: &'a str,
+        outputs_toml: &'a str,
     }
 }
