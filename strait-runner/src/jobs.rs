@@ -340,6 +340,28 @@ pub struct JobStatusResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobDefinitionResponse {
+    pub name: String,
+    pub concurrency: Concurrency,
+    pub timeout_seconds: u64,
+    pub params: BTreeMap<String, JobParamDefinitionResponse>,
+    pub outputs: BTreeMap<String, JobOutputDefinitionResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobParamDefinitionResponse {
+    #[serde(rename = "type")]
+    pub kind: ParamType,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct JobOutputDefinitionResponse {
+    pub path: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Running,
@@ -580,6 +602,20 @@ pub async fn create_job(
     )?;
 
     Ok((StatusCode::CREATED, Json(created)))
+}
+
+pub async fn list_jobs(
+    _: Authorized<JobsRead>,
+    State(state): State<crate::AppState>,
+) -> Json<Vec<JobDefinitionResponse>> {
+    let jobs = state
+        .manifests
+        .all()
+        .cloned()
+        .map(JobDefinitionResponse::from)
+        .collect();
+
+    Json(jobs)
 }
 
 pub async fn get_job(
@@ -1064,6 +1100,42 @@ impl From<JobMetadata> for JobStatusResponse {
     }
 }
 
+impl From<JobManifest> for JobDefinitionResponse {
+    fn from(value: JobManifest) -> Self {
+        Self {
+            name: value.name,
+            concurrency: value.concurrency,
+            timeout_seconds: value.timeout_seconds,
+            params: value
+                .params
+                .into_iter()
+                .map(|(name, spec)| {
+                    (
+                        name,
+                        JobParamDefinitionResponse {
+                            kind: spec.kind,
+                            required: spec.required,
+                        },
+                    )
+                })
+                .collect(),
+            outputs: value
+                .outputs
+                .into_iter()
+                .map(|(name, output)| {
+                    (
+                        name,
+                        JobOutputDefinitionResponse {
+                            path: output.path,
+                            required: output.required,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1086,8 +1158,8 @@ mod tests {
     use tower::util::ServiceExt;
 
     use super::{
-        JobCreatedResponse, JobLogsResponse, JobMetadata, JobStatusResponse, JobStore, cancel_job,
-        create_job, get_job, get_job_logs,
+        JobCreatedResponse, JobDefinitionResponse, JobLogsResponse, JobMetadata, JobStatusResponse,
+        JobStore, cancel_job, create_job, get_job, get_job_logs, list_jobs,
     };
     use crate::{
         AppState,
@@ -1102,12 +1174,12 @@ mod tests {
         let temp = temp_dir("job_create");
         let state = test_state(&temp);
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let response = app
             .oneshot(
-                Request::post("/jobs/build-app")
+                Request::post("/jobs/build-app/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -1144,12 +1216,12 @@ mod tests {
         let temp = temp_dir("job_missing_param");
         let state = test_state(&temp);
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let response = app
             .oneshot(
-                Request::post("/jobs/build-app")
+                Request::post("/jobs/build-app/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
@@ -1166,12 +1238,12 @@ mod tests {
         let temp = temp_dir("job_unknown_param");
         let state = test_state(&temp);
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let response = app
             .oneshot(
-                Request::post("/jobs/build-app")
+                Request::post("/jobs/build-app/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -1196,12 +1268,12 @@ mod tests {
         let state = test_state_with_artifact_manifest(&temp);
         let artifact_id = store_artifact(&state.artifacts, b"src");
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let response = app
             .oneshot(
-                Request::post("/jobs/build-with-artifact")
+                Request::post("/jobs/build-with-artifact/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -1246,12 +1318,12 @@ exit 0
         );
         let artifact_id = store_artifact(&state.artifacts, b"src");
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let response = app
             .oneshot(
-                Request::post("/jobs/build-app")
+                Request::post("/jobs/build-app/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -1300,12 +1372,12 @@ exit 0
             600,
         );
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let response = app
             .oneshot(
-                Request::post("/jobs/build-app")
+                Request::post("/jobs/build-app/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
@@ -1332,12 +1404,12 @@ exit 0
         let temp = temp_dir("job_execute_timeout");
         let state = test_state_with_script(&temp, "build-app", "#!/bin/sh\nsleep 2\n", 1);
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let response = app
             .oneshot(
-                Request::post("/jobs/build-app")
+                Request::post("/jobs/build-app/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
@@ -1373,12 +1445,12 @@ required = true
             600,
         );
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let created = read_created_job(
             app.oneshot(
-                Request::post("/jobs/build-app")
+                Request::post("/jobs/build-app/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
@@ -1422,12 +1494,12 @@ required = true
             600,
         );
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let created = read_created_job(
             app.oneshot(
-                Request::post("/jobs/build-app")
+                Request::post("/jobs/build-app/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
@@ -1452,13 +1524,14 @@ required = true
         let temp = temp_dir("job_status_http");
         let state = test_state_with_script(&temp, "build-app", "#!/bin/sh\nexit 0\n", 600);
         let app = Router::new()
-            .route("/jobs/{id}", get(get_job).post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
+            .route("/runs/{job_id}", get(get_job))
             .with_state(state);
 
         let created = read_created_job(
             app.clone()
                 .oneshot(
-                    Request::post("/jobs/build-app")
+                    Request::post("/jobs/build-app/runs")
                         .header("authorization", "Bearer runner-token")
                         .header("content-type", "application/json")
                         .body(Body::from(json!({ "commit": "abc123" }).to_string()))
@@ -1473,7 +1546,7 @@ required = true
 
         let response = app
             .oneshot(
-                Request::get(format!("/jobs/{}", created.job_id))
+                Request::get(format!("/runs/{}", created.job_id))
                     .header("authorization", "Bearer runner-token")
                     .body(Body::empty())
                     .expect("request should build"),
@@ -1502,14 +1575,14 @@ required = true
             600,
         );
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
-            .route("/jobs/{job_id}/logs", get(get_job_logs))
+            .route("/jobs/{name}/runs", post(create_job))
+            .route("/runs/{job_id}/logs", get(get_job_logs))
             .with_state(state);
 
         let created = read_created_job(
             app.clone()
                 .oneshot(
-                    Request::post("/jobs/build-app")
+                    Request::post("/jobs/build-app/runs")
                         .header("authorization", "Bearer runner-token")
                         .header("content-type", "application/json")
                         .body(Body::from(json!({ "commit": "abc123" }).to_string()))
@@ -1524,7 +1597,7 @@ required = true
 
         let response = app
             .oneshot(
-                Request::get(format!("/jobs/{}/logs", created.job_id))
+                Request::get(format!("/runs/{}/logs", created.job_id))
                     .header("authorization", "Bearer runner-token")
                     .body(Body::empty())
                     .expect("request should build"),
@@ -1543,20 +1616,50 @@ required = true
     }
 
     #[tokio::test]
+    async fn lists_job_definitions_over_http() {
+        let temp = temp_dir("job_list_http");
+        let state = test_state(&temp);
+        let app = Router::new()
+            .route("/jobs", get(list_jobs))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::get("/jobs")
+                    .header("authorization", "Bearer runner-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let jobs: Vec<JobDefinitionResponse> =
+            serde_json::from_slice(&body).expect("job definitions body");
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].name, "build-app");
+        assert_eq!(jobs[0].timeout_seconds, 600);
+        assert!(jobs[0].params.contains_key("commit"));
+        assert!(jobs[0].params["commit"].required);
+    }
+
+    #[tokio::test]
     async fn cancels_running_job_over_http() {
         let temp = temp_dir("job_cancel_http");
         let state = test_state_with_script(&temp, "build-app", "#!/bin/sh\nsleep 5\n", 600);
         let app = Router::new()
-            .route(
-                "/jobs/{id}",
-                get(get_job).post(create_job).delete(cancel_job),
-            )
+            .route("/jobs/{name}/runs", post(create_job))
+            .route("/runs/{job_id}", get(get_job).delete(cancel_job))
             .with_state(state);
 
         let created = read_created_job(
             app.clone()
                 .oneshot(
-                    Request::post("/jobs/build-app")
+                    Request::post("/jobs/build-app/runs")
                         .header("authorization", "Bearer runner-token")
                         .header("content-type", "application/json")
                         .body(Body::from(json!({ "commit": "abc123" }).to_string()))
@@ -1569,7 +1672,7 @@ required = true
 
         let cancel = app
             .oneshot(
-                Request::delete(format!("/jobs/{}", created.job_id))
+                Request::delete(format!("/runs/{}", created.job_id))
                     .header("authorization", "Bearer runner-token")
                     .body(Body::empty())
                     .expect("request should build"),
@@ -1646,13 +1749,13 @@ required = true
             600,
         );
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let first = app
             .clone()
             .oneshot(
-                Request::post("/jobs/job-a")
+                Request::post("/jobs/job-a/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "a" }).to_string()))
@@ -1662,7 +1765,7 @@ required = true
             .expect("request should succeed");
         let second = app
             .oneshot(
-                Request::post("/jobs/job-b")
+                Request::post("/jobs/job-b/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "b" }).to_string()))
@@ -1690,13 +1793,13 @@ required = true
             600,
         );
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let first = app
             .clone()
             .oneshot(
-                Request::post("/jobs/build-app")
+                Request::post("/jobs/build-app/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "a" }).to_string()))
@@ -1706,7 +1809,7 @@ required = true
             .expect("request should succeed");
         let second = app
             .oneshot(
-                Request::post("/jobs/build-app")
+                Request::post("/jobs/build-app/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "b" }).to_string()))
@@ -1742,13 +1845,13 @@ required = true
             600,
         );
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let first = app
             .clone()
             .oneshot(
-                Request::post("/jobs/job-a")
+                Request::post("/jobs/job-a/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "a" }).to_string()))
@@ -1758,7 +1861,7 @@ required = true
             .expect("request should succeed");
         let second = app
             .oneshot(
-                Request::post("/jobs/job-b")
+                Request::post("/jobs/job-b/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "b" }).to_string()))
@@ -1794,13 +1897,13 @@ required = true
             600,
         );
         let app = Router::new()
-            .route("/jobs/{id}", post(create_job))
+            .route("/jobs/{name}/runs", post(create_job))
             .with_state(state);
 
         let first = app
             .clone()
             .oneshot(
-                Request::post("/jobs/job-a")
+                Request::post("/jobs/job-a/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "a" }).to_string()))
@@ -1810,7 +1913,7 @@ required = true
             .expect("request should succeed");
         let second = app
             .oneshot(
-                Request::post("/jobs/job-b")
+                Request::post("/jobs/job-b/runs")
                     .header("authorization", "Bearer runner-token")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "b" }).to_string()))

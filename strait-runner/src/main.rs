@@ -105,18 +105,18 @@ fn config_path() -> String {
 fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/jobs", get(jobs::list_jobs))
         .route("/artifacts", post(artifacts::upload_artifact))
         .route(
             "/artifacts/{artifact_id}",
             get(artifacts::download_artifact),
         )
+        .route("/jobs/{name}/runs", post(jobs::create_job))
         .route(
-            "/jobs/{id}",
-            get(jobs::get_job)
-                .post(jobs::create_job)
-                .delete(jobs::cancel_job),
+            "/runs/{job_id}",
+            get(jobs::get_job).delete(jobs::cancel_job),
         )
-        .route("/jobs/{job_id}/logs", get(jobs::get_job_logs))
+        .route("/runs/{job_id}/logs", get(jobs::get_job_logs))
         .with_state(state)
 }
 

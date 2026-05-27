@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const RESERVED_PARAM_NAMES: &[&str] = &["id", "name", "workdir", "output_dir", "metadata_path"];
 
@@ -68,6 +68,10 @@ impl ManifestStore {
     pub fn get(&self, name: &str) -> Option<&JobManifest> {
         self.manifests.get(name)
     }
+
+    pub fn all(&self) -> impl Iterator<Item = &JobManifest> {
+        self.manifests.values()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -123,7 +127,7 @@ impl JobManifest {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ParamType {
     String,
@@ -146,7 +150,7 @@ pub struct OutputSpec {
     pub required: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Concurrency {
     Parallel,
