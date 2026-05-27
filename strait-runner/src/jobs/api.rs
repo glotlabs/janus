@@ -4,6 +4,7 @@ use axum::{
     http::StatusCode,
 };
 use serde_json::Value;
+use tracing::{info, warn};
 
 use crate::auth::{Authorized, JobsRead, JobsRun, LogsRead};
 
@@ -17,6 +18,7 @@ pub async fn create_job(
     AxumPath(name): AxumPath<String>,
     Json(body): Json<Value>,
 ) -> Result<(StatusCode, Json<JobCreatedResponse>), JobError> {
+    info!(job_name = %name, "job run requested");
     let params = body
         .as_object()
         .cloned()
@@ -30,6 +32,7 @@ pub async fn create_job(
         state.config.jobs.cleanup_successful_workdirs,
         state.config.jobs.keep_failed_workdirs,
     )?;
+    info!(job_id = %created.job_id, job_name = %name, "job created");
 
     Ok((StatusCode::CREATED, Json(created)))
 }
@@ -53,6 +56,7 @@ pub async fn get_job(
     State(state): State<crate::AppState>,
     AxumPath(job_id): AxumPath<String>,
 ) -> Result<Json<JobStatusResponse>, JobError> {
+    info!(job_id = %job_id, "job status requested");
     Ok(Json(JobStatusResponse::from(state.jobs.read_job(&job_id)?)))
 }
 
@@ -61,6 +65,7 @@ pub async fn get_job_logs(
     State(state): State<crate::AppState>,
     AxumPath(job_id): AxumPath<String>,
 ) -> Result<Json<JobLogsResponse>, JobError> {
+    info!(job_id = %job_id, "job logs requested");
     Ok(Json(JobLogsResponse::from(state.jobs.read_logs(&job_id)?)))
 }
 
@@ -69,6 +74,7 @@ pub async fn cancel_job(
     State(state): State<crate::AppState>,
     AxumPath(job_id): AxumPath<String>,
 ) -> Result<StatusCode, JobError> {
+    warn!(job_id = %job_id, "job cancellation requested");
     state.jobs.cancel_job(&job_id)?;
     Ok(StatusCode::ACCEPTED)
 }

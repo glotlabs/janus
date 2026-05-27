@@ -14,6 +14,7 @@ use tokio::{
     task::JoinHandle,
     time::{Duration, Instant},
 };
+use tracing::{error, info, warn};
 
 use crate::{artifacts::ArtifactStore, manifest::OutputSpec};
 
@@ -27,6 +28,12 @@ const DEFAULT_JOB_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
 impl JobStore {
     pub(super) async fn run_job(self: Arc<Self>, execution: JobExecution) {
+        info!(
+            job_id = %execution.job_id,
+            job_name = %execution.metadata.name,
+            script = %execution.manifest.script,
+            "job execution started"
+        );
         let outcome = self.execute_process(&execution).await;
         self.finish_job(execution, outcome);
     }
@@ -52,6 +59,11 @@ impl JobStore {
             script: execution.manifest.script.clone(),
             source,
         })?;
+        info!(
+            job_id = %execution.job_id,
+            job_name = %execution.metadata.name,
+            "job process spawned"
+        );
 
         let stdout = child.stdout.take().ok_or_else(|| JobError::SpawnProcess {
             script: execution.manifest.script.clone(),
@@ -91,6 +103,12 @@ impl JobStore {
 
         loop {
             if Instant::now() >= deadline {
+                warn!(
+                    job_id = %execution.job_id,
+                    job_name = %execution.metadata.name,
+                    timeout_seconds = execution.manifest.timeout_seconds,
+                    "job timed out"
+                );
                 terminate_job(&mut child).await;
                 abort_capture_tasks(&mut stdout_task, &mut stderr_task).await;
                 return Ok(ExecutionOutcome {
@@ -102,6 +120,11 @@ impl JobStore {
 
             tokio::select! {
                 _ = &mut cancel_wait => {
+                    warn!(
+                        job_id = %execution.job_id,
+                        job_name = %execution.metadata.name,
+                        "job canceled"
+                    );
                     terminate_job(&mut child).await;
                     abort_capture_tasks(&mut stdout_task, &mut stderr_task).await;
                     return Ok(ExecutionOutcome {
@@ -111,6 +134,12 @@ impl JobStore {
                     });
                 },
                 Some(message) = log_limit_rx.recv() => {
+                    warn!(
+                        job_id = %execution.job_id,
+                        job_name = %execution.metadata.name,
+                        message = %message,
+                        "job log limit reached"
+                    );
                     terminate_job(&mut child).await;
                     abort_capture_tasks(&mut stdout_task, &mut stderr_task).await;
                     return Ok(ExecutionOutcome {
@@ -129,6 +158,13 @@ impl JobStore {
                 Some(status) => {
                     await_capture_result(&mut stdout_task).await?;
                     await_capture_result(&mut stderr_task).await?;
+                    info!(
+                        job_id = %execution.job_id,
+                        job_name = %execution.metadata.name,
+                        exit_code = status.code(),
+                        success = status.success(),
+                        "job process exited"
+                    );
 
                     return Ok(ExecutionOutcome {
                         status: if status.success() {
@@ -162,8 +198,22 @@ impl JobStore {
                         &execution.output_dir,
                         &mut metadata,
                     ) {
-                        Ok(()) => JobStatus::Success,
+                        Ok(()) => {
+                            info!(
+                                job_id = %execution.job_id,
+                                job_name = %metadata.name,
+                                output_count = metadata.outputs.len(),
+                                "job outputs registered"
+                            );
+                            JobStatus::Success
+                        }
                         Err(error) => {
+                            error!(
+                                job_id = %execution.job_id,
+                                job_name = %metadata.name,
+                                error = %error,
+                                "job output registration failed"
+                            );
                             let _ = append_error(&execution.stderr_path, &error);
                             JobStatus::Failed
                         }
@@ -177,13 +227,48 @@ impl JobStore {
                 metadata.finished_at = Some(finished_at);
 
                 let _ = self.persist_metadata(&execution.metadata_path, &metadata);
+                info!(
+                    job_id = %execution.job_id,
+                    job_name = %metadata.name,
+                    status = ?metadata.status,
+                    exit_code = metadata.exit_code,
+                    "job execution finished"
+                );
 
                 match final_status {
                     JobStatus::Success if execution.cleanup_successful_workdirs => {
-                        let _ = fs::remove_dir_all(&execution.work_dir);
+                        match fs::remove_dir_all(&execution.work_dir) {
+                            Ok(()) => info!(
+                                job_id = %execution.job_id,
+                                job_name = %metadata.name,
+                                path = %execution.work_dir.display(),
+                                "job workdir removed after success"
+                            ),
+                            Err(error) => warn!(
+                                job_id = %execution.job_id,
+                                job_name = %metadata.name,
+                                path = %execution.work_dir.display(),
+                                error = %error,
+                                "failed to remove successful job workdir"
+                            ),
+                        }
                     }
                     JobStatus::Failed | JobStatus::TimedOut if !execution.keep_failed_workdirs => {
-                        let _ = fs::remove_dir_all(&execution.work_dir);
+                        match fs::remove_dir_all(&execution.work_dir) {
+                            Ok(()) => info!(
+                                job_id = %execution.job_id,
+                                job_name = %metadata.name,
+                                path = %execution.work_dir.display(),
+                                "job workdir removed after terminal failure"
+                            ),
+                            Err(error) => warn!(
+                                job_id = %execution.job_id,
+                                job_name = %metadata.name,
+                                path = %execution.work_dir.display(),
+                                error = %error,
+                                "failed to remove failed job workdir"
+                            ),
+                        }
                     }
                     _ => {}
                 }
@@ -194,6 +279,12 @@ impl JobStore {
                 metadata.finished_at = Some(finished_at);
                 let _ = self.persist_metadata(&execution.metadata_path, &metadata);
                 let _ = fs::write(&execution.stderr_path, format!("{error}\n"));
+                error!(
+                    job_id = %execution.job_id,
+                    job_name = %metadata.name,
+                    error = %error,
+                    "job execution failed"
+                );
             }
         }
 

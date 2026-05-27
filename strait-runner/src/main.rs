@@ -117,7 +117,8 @@ fn init_tracing() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "strait_runner=info,axum=info".into()),
         )
-        .compact()
+        .json()
+        .flatten_event(true)
         .init();
 }
 

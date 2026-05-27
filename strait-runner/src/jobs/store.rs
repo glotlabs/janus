@@ -11,6 +11,7 @@ use std::{
 use chrono::{SecondsFormat, Utc};
 use serde_json::{Map, Value};
 use tokio::sync::watch;
+use tracing::{Instrument, error, info, info_span, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -94,6 +95,14 @@ impl JobStore {
             outputs: BTreeMap::new(),
         };
 
+        info!(
+            job_id = %job_id,
+            job_name = %manifest.name,
+            concurrency = ?manifest.concurrency,
+            timeout_seconds = manifest.timeout_seconds,
+            "job accepted"
+        );
+
         let (cancel_tx, cancel_rx) = watch::channel(false);
 
         {
@@ -136,11 +145,18 @@ impl JobStore {
         let job_dir = match setup_result {
             Ok(job_dir) => job_dir,
             Err(error) => {
+                error!(
+                    job_id = %job_id,
+                    job_name = %job.name,
+                    error = %error,
+                    "job setup failed"
+                );
                 let mut running_jobs = self.running_jobs.lock().expect("job mutex poisoned");
                 running_jobs.remove(&job_id);
                 return Err(error);
             }
         };
+        let job_name = job.name.clone();
 
         let execution = JobExecution {
             artifacts: Arc::new(artifacts.clone()),
@@ -159,9 +175,13 @@ impl JobStore {
         };
 
         let store = Arc::clone(self);
-        tokio::spawn(async move {
-            store.run_job(execution).await;
-        });
+        let span = info_span!("job_execution", job_id = %job_id, job_name = %job_name);
+        tokio::spawn(
+            async move {
+                store.run_job(execution).await;
+            }
+            .instrument(span),
+        );
 
         Ok(JobCreatedResponse::from(JobCreated {
             job_id,
@@ -171,6 +191,7 @@ impl JobStore {
     }
 
     pub fn read_job(&self, job_id: &str) -> Result<JobMetadata, JobError> {
+        info!(job_id = %job_id, "reading job metadata");
         let metadata_path = self.root_dir.join(job_id).join("metadata.json");
         let bytes = fs::read(&metadata_path).map_err(|source| {
             if source.kind() == std::io::ErrorKind::NotFound {
@@ -190,6 +211,7 @@ impl JobStore {
     }
 
     pub fn read_logs(&self, job_id: &str) -> Result<JobLogs, JobError> {
+        info!(job_id = %job_id, "reading job logs");
         let job_dir = self.root_dir.join(job_id);
         let stdout_path = job_dir.join("stdout.log");
         let stderr_path = job_dir.join("stderr.log");
@@ -232,6 +254,7 @@ impl JobStore {
             .cancel_tx
             .send(true)
             .map_err(|_| JobError::JobNotRunning(job_id.to_string()))?;
+        warn!(job_id = %job_id, job_name = %running_job.name, "job cancel signal sent");
         Ok(())
     }
 
@@ -263,6 +286,7 @@ impl JobStore {
                 }) {
                     Ok(metadata) => metadata,
                     Err(JobError::ParseMetadata { .. }) => {
+                        warn!(path = %path.display(), "removing job directory with invalid metadata");
                         fs::remove_dir_all(&path).map_err(|source| JobError::CreateDir {
                             path: path.display().to_string(),
                             source,
@@ -273,6 +297,7 @@ impl JobStore {
                     Err(error) => return Err(error),
                 },
                 Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                    warn!(path = %path.display(), "removing job directory missing metadata");
                     fs::remove_dir_all(&path).map_err(|source| JobError::CreateDir {
                         path: path.display().to_string(),
                         source,
@@ -294,6 +319,11 @@ impl JobStore {
                 metadata.exit_code = None;
                 self.persist_metadata(&metadata_path, &metadata)?;
                 append_recovery_message(&stderr_path)?;
+                warn!(
+                    job_id = %metadata.job_id,
+                    job_name = %metadata.name,
+                    "recovered interrupted running job as failed"
+                );
                 recovered += 1;
             }
         }
@@ -306,6 +336,11 @@ impl JobStore {
         let running_jobs = self.running_jobs.lock().expect("job mutex poisoned");
         for running_job in running_jobs.values() {
             let _ = running_job.cancel_tx.send(true);
+            warn!(
+                job_id = %running_job.job_id,
+                job_name = %running_job.name,
+                "shutdown cancel signal sent"
+            );
         }
         running_jobs.len()
     }
