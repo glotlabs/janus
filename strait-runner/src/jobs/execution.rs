@@ -1,4 +1,11 @@
-use std::{collections::BTreeMap, fs, io::Write, path::Path, process::Stdio, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::Write,
+    path::{Component, Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+};
 
 use tokio::{
     io::AsyncReadExt,
@@ -16,6 +23,8 @@ use super::{
     store::now_rfc3339,
 };
 
+const DEFAULT_JOB_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
+
 impl JobStore {
     pub(super) async fn run_job(self: Arc<Self>, execution: JobExecution) {
         let outcome = self.execute_process(&execution).await;
@@ -29,9 +38,11 @@ impl JobStore {
         let mut command = Command::new(&execution.manifest.script);
         command
             .current_dir(&execution.work_dir)
+            .env_clear()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         configure_process_group(&mut command);
+        command.env("PATH", DEFAULT_JOB_PATH);
 
         for (key, value) in build_job_env(&execution.metadata, execution) {
             command.env(key, value);
@@ -235,7 +246,11 @@ fn register_outputs(
     metadata: &mut JobMetadata,
 ) -> Result<(), JobError> {
     for (name, spec) in specs {
-        let path = output_dir.join(&spec.path);
+        let path =
+            safe_output_path(output_dir, &spec.path).ok_or_else(|| JobError::MissingOutput {
+                name: name.clone(),
+                path: spec.path.clone(),
+            })?;
 
         match fs::metadata(&path) {
             Ok(file_type) if file_type.is_file() => {}
@@ -272,6 +287,24 @@ fn register_outputs(
     }
 
     Ok(())
+}
+
+fn safe_output_path(output_dir: &Path, relative_path: &str) -> Option<PathBuf> {
+    let path = Path::new(relative_path);
+    if relative_path.is_empty() || path.is_absolute() {
+        return None;
+    }
+
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return None;
+    }
+
+    Some(output_dir.join(path))
 }
 
 async fn capture_output<R: tokio::io::AsyncRead + Unpin>(

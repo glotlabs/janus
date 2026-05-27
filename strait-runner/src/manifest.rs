@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fmt, fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -123,6 +123,10 @@ impl JobManifest {
             validate_output_name(output_name, path)?;
         }
 
+        for output in self.outputs.values() {
+            validate_output_path(&output.path, path)?;
+        }
+
         Ok(())
     }
 }
@@ -195,7 +199,15 @@ pub enum ManifestError {
         name: String,
         path: String,
     },
+    InvalidOutputPath {
+        output: String,
+        path: String,
+    },
     InvalidTimeout {
+        path: String,
+    },
+    ScriptNotAbsolute {
+        script: String,
         path: String,
     },
     ScriptNotFound {
@@ -239,8 +251,17 @@ impl fmt::Display for ManifestError {
             Self::InvalidOutputName { name, path } => {
                 write!(f, "invalid output name {name} in manifest {path}")
             }
+            Self::InvalidOutputPath { output, path } => {
+                write!(f, "invalid output path {output} in manifest {path}")
+            }
             Self::InvalidTimeout { path } => {
                 write!(f, "timeout_seconds must be positive in manifest {path}")
+            }
+            Self::ScriptNotAbsolute { script, path } => {
+                write!(
+                    f,
+                    "script {script} must be an absolute path in manifest {path}"
+                )
             }
             Self::ScriptNotFound { script, path } => {
                 write!(f, "script {script} does not exist for manifest {path}")
@@ -306,6 +327,12 @@ fn is_safe_name(name: &str) -> bool {
 
 fn validate_script_path(script: &str, path: &Path) -> Result<(), ManifestError> {
     let script_path = PathBuf::from(script);
+    if !script_path.is_absolute() {
+        return Err(ManifestError::ScriptNotAbsolute {
+            script: script.to_string(),
+            path: path.display().to_string(),
+        });
+    }
     let metadata = fs::metadata(&script_path).map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
             ManifestError::ScriptNotFound {
@@ -330,6 +357,30 @@ fn validate_script_path(script: &str, path: &Path) -> Result<(), ManifestError> 
                 path: path.display().to_string(),
             });
         }
+    }
+
+    Ok(())
+}
+
+fn validate_output_path(output: &str, path: &Path) -> Result<(), ManifestError> {
+    let output_path = Path::new(output);
+    if output.is_empty() || output_path.is_absolute() {
+        return Err(ManifestError::InvalidOutputPath {
+            output: output.to_string(),
+            path: path.display().to_string(),
+        });
+    }
+
+    if output_path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(ManifestError::InvalidOutputPath {
+            output: output.to_string(),
+            path: path.display().to_string(),
+        });
     }
 
     Ok(())
@@ -487,6 +538,65 @@ required = true
             JobManifest::load_from_path(&manifest_path).expect_err("non-executable script fails");
 
         assert!(matches!(error, ManifestError::ScriptNotExecutable { .. }));
+    }
+
+    #[test]
+    fn rejects_relative_script_path() {
+        let temp = temp_dir("relative_script_path");
+        let manifest_path = temp.join("bad.toml");
+
+        fs::write(
+            &manifest_path,
+            r#"
+name = "build-app"
+script = "build.sh"
+timeout_seconds = 600
+concurrency = "parallel"
+
+[params.commit]
+type = "string"
+required = true
+"#,
+        )
+        .expect("manifest should be written");
+
+        let error =
+            JobManifest::load_from_path(&manifest_path).expect_err("relative script path fails");
+
+        assert!(matches!(error, ManifestError::ScriptNotAbsolute { .. }));
+    }
+
+    #[test]
+    fn rejects_output_path_traversal() {
+        let temp = temp_dir("invalid_output_path");
+        let script = write_executable_script(&temp, "build.sh");
+        let manifest_path = temp.join("bad.toml");
+
+        fs::write(
+            &manifest_path,
+            format!(
+                r#"
+name = "build-app"
+script = "{}"
+timeout_seconds = 600
+concurrency = "parallel"
+
+[params.commit]
+type = "string"
+required = true
+
+[outputs.app]
+path = "../escape.txt"
+required = true
+"#,
+                script.display()
+            ),
+        )
+        .expect("manifest should be written");
+
+        let error = JobManifest::load_from_path(&manifest_path).expect_err("bad output path fails");
+
+        assert!(matches!(error, ManifestError::InvalidOutputPath { .. }));
     }
 
     fn write_manifest(path: &Path, name: &str, script: &Path, concurrency: &str, param_name: &str) {

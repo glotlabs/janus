@@ -643,6 +643,37 @@ async fn fails_job_when_log_limit_is_exceeded() {
 }
 
 #[tokio::test]
+async fn job_process_sees_only_deliberate_environment() {
+    let temp = temp_dir("job_env_isolation");
+    let state = test_state_with_script(&temp, "build-app", "#!/bin/sh\nenv | sort\n", 600);
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let created = read_created_job(
+        app.oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "commit": "abc123" }).to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed"),
+    )
+    .await;
+    let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+
+    assert_eq!(metadata.status, JobStatus::Success);
+    let stdout = fs::read_to_string(temp.join("jobs").join(&created.job_id).join("stdout.log"))
+        .expect("stdout log");
+    assert!(stdout.contains("JOB_NAME=build-app"));
+    assert!(stdout.contains("JOB_COMMIT=abc123"));
+    assert!(stdout.contains("PATH=/usr/local/bin:/usr/bin:/bin"));
+    assert!(!stdout.contains("HOME="));
+}
+
+#[tokio::test]
 async fn begin_shutdown_cancels_active_jobs() {
     let temp = temp_dir("job_begin_shutdown");
     let state = test_state_with_script(&temp, "build-app", "#!/bin/sh\nsleep 5\n", 600);
