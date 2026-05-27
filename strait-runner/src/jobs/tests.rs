@@ -642,6 +642,62 @@ async fn fails_job_when_log_limit_is_exceeded() {
     );
 }
 
+#[tokio::test]
+async fn begin_shutdown_cancels_active_jobs() {
+    let temp = temp_dir("job_begin_shutdown");
+    let state = test_state_with_script(&temp, "build-app", "#!/bin/sh\nsleep 5\n", 600);
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state.clone());
+
+    let created = read_created_job(
+        app.oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "commit": "abc123" }).to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed"),
+    )
+    .await;
+
+    let canceled = state.jobs.begin_shutdown();
+    assert_eq!(canceled, 1);
+
+    let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+    assert_eq!(metadata.status, JobStatus::Canceled);
+}
+
+#[tokio::test]
+async fn rejects_new_jobs_after_shutdown_starts() {
+    let temp = temp_dir("job_reject_shutdown");
+    let state = test_state(&temp);
+    state.jobs.begin_shutdown();
+
+    let error = state
+        .jobs
+        .create_job(
+            "build-app",
+            json!({
+                "commit": "abc123",
+                "branch": "main"
+            })
+            .as_object()
+            .expect("body should be object")
+            .clone(),
+            &state.manifests,
+            &state.artifacts,
+            state.config.jobs.default_log_limit_mb,
+            state.config.jobs.cleanup_successful_workdirs,
+            state.config.jobs.keep_failed_workdirs,
+        )
+        .expect_err("create_job should reject while shutting down");
+
+    assert!(matches!(error, super::JobError::ShuttingDown));
+}
+
 #[test]
 fn recovers_running_jobs_on_startup() {
     let temp = temp_dir("job_recovery_startup");

@@ -18,7 +18,9 @@ use config::Config;
 use jobs::JobStore;
 use manifest::ManifestStore;
 use serde::Serialize;
-use tracing::info;
+use tracing::{info, warn};
+
+const SHUTDOWN_DRAIN_TIMEOUT_SECONDS: u64 = 10;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -31,7 +33,7 @@ pub(crate) struct AppState {
 
 #[derive(Serialize)]
 struct HealthResponse {
-    status: &'static str,
+    status: String,
     listen: String,
     manifest_count: usize,
 }
@@ -64,11 +66,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         artifacts,
         jobs,
     };
-    tokio::spawn(async move {
+    let artifacts_cleanup_task = tokio::spawn(async move {
         artifacts_cleanup
             .run_cleanup_loop(cleanup_interval_seconds)
             .await;
     });
+    let jobs_for_shutdown = Arc::clone(&state.jobs);
     let app = build_app(state);
 
     let address: SocketAddr = config.server.listen.parse()?;
@@ -83,7 +86,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "strait-runner listening"
     );
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+
+            let canceled = jobs_for_shutdown.begin_shutdown();
+            info!(canceled, "shutdown started; canceling active jobs");
+
+            let drained = jobs_for_shutdown
+                .wait_for_drain(std::time::Duration::from_secs(
+                    SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+                ))
+                .await;
+            if !drained {
+                warn!(
+                    timeout_seconds = SHUTDOWN_DRAIN_TIMEOUT_SECONDS,
+                    "shutdown drain timed out with jobs still active"
+                );
+            }
+        })
+        .await?;
+    artifacts_cleanup_task.abort();
 
     Ok(())
 }
@@ -125,8 +148,31 @@ fn build_app(state: AppState) -> Router {
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
-        status: "ok",
+        status: if state.jobs.is_shutting_down() {
+            "shutting_down".to_string()
+        } else {
+            "ok".to_string()
+        },
         listen: state.config.server.listen.clone(),
         manifest_count: state.manifests.len(),
     })
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

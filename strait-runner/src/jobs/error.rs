@@ -50,6 +50,7 @@ pub enum JobError {
     InvalidLogLimit {
         max_size_mb: u64,
     },
+    ShuttingDown,
     Artifact(ArtifactError),
     ExpiredArtifact {
         name: String,
@@ -100,6 +101,7 @@ impl fmt::Display for JobError {
             Self::InvalidLogLimit { max_size_mb } => {
                 write!(f, "invalid job log limit in mb: {max_size_mb}")
             }
+            Self::ShuttingDown => write!(f, "runner is shutting down and not accepting new jobs"),
             Self::Artifact(source) => write!(f, "{source}"),
             Self::ExpiredArtifact { name, artifact_id } => {
                 write!(
@@ -129,6 +131,7 @@ impl IntoResponse for JobError {
         let status = match self {
             Self::UnknownJob(_) | Self::JobNotFound(_) => StatusCode::NOT_FOUND,
             Self::JobNotRunning(_) => StatusCode::CONFLICT,
+            Self::ShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
             Self::MissingParam(_)
             | Self::UnknownParam(_)
             | Self::InvalidParamType { .. }
@@ -189,6 +192,7 @@ impl JobErrorResponse {
             JobError::UnknownParam(_) => "job_unknown_param",
             JobError::InvalidParamType { .. } => "job_invalid_param_type",
             JobError::InvalidLogLimit { .. } => "job_invalid_log_limit",
+            JobError::ShuttingDown => "job_runner_shutting_down",
             JobError::Artifact(_) => "artifact_error",
             JobError::ExpiredArtifact { .. } => "artifact_expired",
             JobError::MissingOutput { .. } => "job_missing_output",

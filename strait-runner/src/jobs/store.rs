@@ -2,7 +2,10 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use chrono::{SecondsFormat, Utc};
@@ -25,6 +28,7 @@ use super::{
 pub struct JobStore {
     pub(super) root_dir: PathBuf,
     pub(super) running_jobs: Mutex<BTreeMap<String, RunningJob>>,
+    pub(super) shutting_down: AtomicBool,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +50,7 @@ impl JobStore {
         Ok(Self {
             root_dir,
             running_jobs: Mutex::new(BTreeMap::new()),
+            shutting_down: AtomicBool::new(false),
         })
     }
 
@@ -59,6 +64,10 @@ impl JobStore {
         cleanup_successful_workdirs: bool,
         keep_failed_workdirs: bool,
     ) -> Result<JobCreatedResponse, JobError> {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(JobError::ShuttingDown);
+        }
+
         let manifest = manifests
             .get(name)
             .cloned()
@@ -290,6 +299,40 @@ impl JobStore {
         }
 
         Ok(recovered)
+    }
+
+    pub fn begin_shutdown(&self) -> usize {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        let running_jobs = self.running_jobs.lock().expect("job mutex poisoned");
+        for running_job in running_jobs.values() {
+            let _ = running_job.cancel_tx.send(true);
+        }
+        running_jobs.len()
+    }
+
+    pub async fn wait_for_drain(&self, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            if self
+                .running_jobs
+                .lock()
+                .expect("job mutex poisoned")
+                .is_empty()
+            {
+                return true;
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::SeqCst)
     }
 
     pub(super) fn persist_metadata(
