@@ -335,6 +335,44 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn rejects_invalid_authorization_header_shape() {
+        let app = Router::new()
+            .route("/protected", get(protected_jobs_run))
+            .with_state(test_state());
+
+        let response = app
+            .oneshot(
+                Request::get("/protected")
+                    .header(header::AUTHORIZATION, "Bearer")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_token() {
+        let app = Router::new()
+            .route("/protected", get(protected_jobs_run))
+            .with_state(test_state());
+
+        let response = app
+            .oneshot(
+                Request::get("/protected")
+                    .header(header::AUTHORIZATION, "Bearer wrong-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
     async fn protected_jobs_run(_: Authorized<JobsRun>) -> &'static str {
         "ok"
     }

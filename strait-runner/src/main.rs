@@ -176,3 +176,282 @@ async fn shutdown_signal() {
         let _ = tokio::signal::ctrl_c().await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        sync::Arc,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use sha2::{Digest, Sha256};
+    use tower::util::ServiceExt;
+
+    use super::{AppState, build_app};
+    use crate::{
+        artifacts::ArtifactStore,
+        auth::AuthStore,
+        config::{ArtifactsConfig, AuthConfig, AuthTokenConfig, Config, JobsConfig, ServerConfig},
+        jobs::JobStore,
+        manifest::ManifestStore,
+    };
+
+    #[tokio::test]
+    async fn health_reports_shutting_down_state() {
+        let temp = temp_dir("health_shutdown");
+        let state = test_state(&temp);
+        state.jobs.begin_shutdown();
+        let app = build_app(state);
+
+        let response = app
+            .oneshot(
+                Request::get("/health")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("health json");
+        assert_eq!(payload["status"], "shutting_down");
+    }
+
+    #[tokio::test]
+    async fn protected_routes_enforce_permissions() {
+        let temp = temp_dir("route_auth_matrix");
+        let state = test_state(&temp);
+        let artifact_id = store_artifact(&state.artifacts, b"artifact-body");
+        let app = build_app(state);
+
+        let cases = vec![
+            (
+                Request::get("/jobs")
+                    .header("authorization", "Bearer jobs-run-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::post("/jobs/build-app/runs")
+                    .header("authorization", "Bearer jobs-read-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "commit": "abc123",
+                            "branch": "main"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request should build"),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::get("/runs/job_missing")
+                    .header("authorization", "Bearer logs-read-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::delete("/runs/job_missing")
+                    .header("authorization", "Bearer jobs-read-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::get("/runs/job_missing/logs")
+                    .header("authorization", "Bearer jobs-read-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::post("/artifacts")
+                    .header("authorization", "Bearer artifacts-read-token")
+                    .body(Body::from("body"))
+                    .expect("request should build"),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::get(format!("/artifacts/{artifact_id}"))
+                    .header("authorization", "Bearer jobs-read-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                Request::get("/jobs")
+                    .header("authorization", "Bearer wrong-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+                StatusCode::UNAUTHORIZED,
+            ),
+        ];
+
+        for (request, expected_status) in cases {
+            let response = app
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("request should succeed");
+            assert_eq!(response.status(), expected_status);
+        }
+    }
+
+    fn test_state(temp: &Path) -> AppState {
+        let manifests_dir = temp.join("manifests");
+        let scripts_dir = temp.join("scripts");
+        fs::create_dir_all(&manifests_dir).expect("manifests dir should be created");
+        fs::create_dir_all(&scripts_dir).expect("scripts dir should be created");
+        let script = write_executable_script(&scripts_dir, "build.sh");
+        fs::write(
+            manifests_dir.join("build-app.toml"),
+            format!(
+                r#"
+name = "build-app"
+script = "{}"
+timeout_seconds = 600
+concurrency = "parallel"
+
+[params.commit]
+type = "string"
+required = true
+
+[params.branch]
+type = "string"
+required = true
+"#,
+                script.display()
+            ),
+        )
+        .expect("manifest should be written");
+
+        let config = Config {
+            data_dir: temp.display().to_string(),
+            manifests_dir: manifests_dir.display().to_string(),
+            server: ServerConfig {
+                listen: "127.0.0.1:0".to_string(),
+            },
+            auth: AuthConfig {
+                mode: "bearer".to_string(),
+                tokens: Vec::new(),
+            },
+            artifacts: ArtifactsConfig {
+                max_size_mb: 1,
+                ttl_seconds: 3600,
+                cleanup_interval_seconds: 600,
+                require_checksum_on_upload: true,
+            },
+            jobs: JobsConfig {
+                default_log_limit_mb: 50,
+                cleanup_successful_workdirs: true,
+                keep_failed_workdirs: true,
+            },
+        };
+
+        AppState {
+            config: Arc::new(config.clone()),
+            auth: Arc::new(
+                AuthStore::load_from_config(
+                    &AuthConfig {
+                        mode: "bearer".to_string(),
+                        tokens: vec![
+                            AuthTokenConfig {
+                                name: "jobs-run".to_string(),
+                                token_env: "TOKEN_JOBS_RUN".to_string(),
+                                permissions: vec!["jobs:run".to_string()],
+                            },
+                            AuthTokenConfig {
+                                name: "jobs-read".to_string(),
+                                token_env: "TOKEN_JOBS_READ".to_string(),
+                                permissions: vec!["jobs:read".to_string()],
+                            },
+                            AuthTokenConfig {
+                                name: "logs-read".to_string(),
+                                token_env: "TOKEN_LOGS_READ".to_string(),
+                                permissions: vec!["logs:read".to_string()],
+                            },
+                            AuthTokenConfig {
+                                name: "artifacts-write".to_string(),
+                                token_env: "TOKEN_ARTIFACTS_WRITE".to_string(),
+                                permissions: vec!["artifacts:write".to_string()],
+                            },
+                            AuthTokenConfig {
+                                name: "artifacts-read".to_string(),
+                                token_env: "TOKEN_ARTIFACTS_READ".to_string(),
+                                permissions: vec!["artifacts:read".to_string()],
+                            },
+                        ],
+                    },
+                    |name| match name {
+                        "TOKEN_JOBS_RUN" => Some("jobs-run-token".to_string()),
+                        "TOKEN_JOBS_READ" => Some("jobs-read-token".to_string()),
+                        "TOKEN_LOGS_READ" => Some("logs-read-token".to_string()),
+                        "TOKEN_ARTIFACTS_WRITE" => Some("artifacts-write-token".to_string()),
+                        "TOKEN_ARTIFACTS_READ" => Some("artifacts-read-token".to_string()),
+                        _ => None,
+                    },
+                )
+                .expect("auth should load"),
+            ),
+            manifests: Arc::new(
+                ManifestStore::load_from_dir(&config.manifests_dir).expect("manifests should load"),
+            ),
+            artifacts: Arc::new(
+                ArtifactStore::new(
+                    &config.data_dir,
+                    config.artifacts.ttl_seconds,
+                    config.artifacts.max_size_mb,
+                    config.artifacts.require_checksum_on_upload,
+                )
+                .expect("artifact store should init"),
+            ),
+            jobs: Arc::new(JobStore::new(&config.data_dir).expect("job store should init")),
+        }
+    }
+
+    fn store_artifact(store: &ArtifactStore, bytes: &[u8]) -> String {
+        let checksum = hex::encode(Sha256::digest(bytes));
+        store
+            .store_bytes(bytes, Some(&checksum))
+            .expect("artifact should store")
+            .artifact_id
+    }
+
+    fn write_executable_script(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("script should be written");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&path).expect("metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&path, permissions).expect("permissions should be set");
+        }
+
+        path
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should work")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("strait-runner-main-{label}-{unique}"));
+        fs::create_dir_all(&path).expect("temp dir should be created");
+        path
+    }
+}
