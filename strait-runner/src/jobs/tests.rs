@@ -72,6 +72,57 @@ async fn creates_job_metadata_for_valid_request() {
 }
 
 #[tokio::test]
+async fn redacts_sensitive_params_in_persisted_metadata() {
+    let temp = temp_dir("job_sensitive_redaction");
+    let state = test_state_from_manifest(
+        &temp,
+        "build-app",
+        r#"
+[params.token]
+type = "string"
+required = true
+sensitive = true
+"#,
+        "",
+        "#!/bin/sh\nexit 0\n",
+        600,
+        50,
+        64,
+    );
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "token": "super-secret-value" }).to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let created: JobCreatedResponse = serde_json::from_slice(&body).expect("created job body");
+    let metadata_path = temp
+        .join("jobs")
+        .join(&created.job_id)
+        .join("metadata.json");
+    let metadata: JobMetadata =
+        serde_json::from_slice(&fs::read(metadata_path).expect("metadata should be written"))
+            .expect("metadata should parse");
+
+    assert_eq!(metadata.params["token"], "[REDACTED]");
+}
+
+#[tokio::test]
 async fn rejects_missing_required_param() {
     let temp = temp_dir("job_missing_param");
     let state = test_state(&temp);
@@ -722,6 +773,48 @@ async fn lists_job_definitions_over_http() {
 }
 
 #[tokio::test]
+async fn lists_sensitive_param_metadata_over_http() {
+    let temp = temp_dir("job_list_sensitive_param");
+    let state = test_state_from_manifest(
+        &temp,
+        "build-app",
+        r#"
+[params.token]
+type = "string"
+required = true
+sensitive = true
+"#,
+        "",
+        "#!/bin/sh\nexit 0\n",
+        600,
+        50,
+        64,
+    );
+    let app = Router::new()
+        .route("/jobs", get(list_jobs))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::get("/jobs")
+                .header("authorization", "Bearer runner-token")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let jobs: Vec<JobDefinitionResponse> =
+        serde_json::from_slice(&body).expect("job definitions body");
+
+    assert!(jobs[0].params["token"].sensitive);
+}
+
+#[tokio::test]
 async fn cancels_running_job_over_http() {
     let temp = temp_dir("job_cancel_http");
     let state = test_state_with_script(&temp, "build-app", "#!/bin/sh\nsleep 5\n", 600);
@@ -910,6 +1003,53 @@ async fn job_process_sees_only_deliberate_environment() {
     assert!(stdout.contains("JOB_COMMIT=abc123"));
     assert!(stdout.contains("PATH=/usr/local/bin:/usr/bin:/bin"));
     assert!(!stdout.contains("HOME="));
+}
+
+#[tokio::test]
+async fn sensitive_param_is_available_to_job_env_but_redacted_on_disk() {
+    let temp = temp_dir("job_sensitive_env");
+    let state = test_state_from_manifest(
+        &temp,
+        "build-app",
+        r#"
+[params.token]
+type = "string"
+required = true
+sensitive = true
+"#,
+        "",
+        "#!/bin/sh\nprintf '%s' \"$JOB_TOKEN\"\n",
+        600,
+        50,
+        64,
+    );
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let created = read_created_job(
+        app.oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "token": "super-secret-value" }).to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed"),
+    )
+    .await;
+    let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+
+    assert_eq!(metadata.status, JobStatus::Success);
+    assert_eq!(metadata.params["token"], "[REDACTED]");
+    assert_eq!(
+        fs::read_to_string(temp.join("jobs").join(&created.job_id).join("stdout.log"))
+            .expect("stdout should read"),
+        "super-secret-value"
+    );
 }
 
 #[tokio::test]

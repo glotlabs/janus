@@ -84,6 +84,8 @@ pub struct JobParamDefinitionResponse {
     #[serde(rename = "type")]
     pub kind: ParamType,
     pub required: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sensitive: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_length: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -122,6 +124,7 @@ pub(super) struct JobExecution {
     pub(super) cleanup_successful_workdirs: bool,
     pub(super) keep_failed_workdirs: bool,
     pub(super) metadata: JobMetadata,
+    pub(super) raw_params: Map<String, Value>,
     pub(super) cancel_rx: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -192,6 +195,7 @@ impl From<JobManifest> for JobDefinitionResponse {
                         JobParamDefinitionResponse {
                             kind: spec.kind,
                             required: spec.required,
+                            sensitive: spec.sensitive,
                             max_length: spec.max_length,
                             pattern: spec.pattern,
                             max_json_bytes: spec.max_json_bytes,
@@ -214,4 +218,8 @@ impl From<JobManifest> for JobDefinitionResponse {
                 .collect(),
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }

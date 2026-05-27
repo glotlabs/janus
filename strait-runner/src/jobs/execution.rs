@@ -51,7 +51,7 @@ impl JobStore {
         configure_process_group(&mut command);
         command.env("PATH", DEFAULT_JOB_PATH);
 
-        for (key, value) in build_job_env(&execution.metadata, execution) {
+        for (key, value) in build_job_env(execution) {
             command.env(key, value);
         }
 
@@ -293,7 +293,8 @@ impl JobStore {
     }
 }
 
-fn build_job_env(metadata: &JobMetadata, execution: &JobExecution) -> BTreeMap<String, String> {
+fn build_job_env(execution: &JobExecution) -> BTreeMap<String, String> {
+    let metadata = &execution.metadata;
     let mut env = BTreeMap::from([
         ("JOB_ID".to_string(), metadata.job_id.clone()),
         ("JOB_NAME".to_string(), metadata.name.clone()),
@@ -311,7 +312,7 @@ fn build_job_env(metadata: &JobMetadata, execution: &JobExecution) -> BTreeMap<S
         ),
     ]);
 
-    for (name, value) in &metadata.params {
+    for (name, value) in &execution.raw_params {
         let env_name = normalize_param_env(name);
         let env_value = if let Some(path) = metadata.resolved_artifacts.get(name) {
             path.clone()

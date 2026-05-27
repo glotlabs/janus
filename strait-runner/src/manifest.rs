@@ -151,6 +151,8 @@ pub struct ParamSpec {
     #[serde(rename = "type")]
     pub kind: ParamType,
     pub required: bool,
+    #[serde(default)]
+    pub sensitive: bool,
     pub max_length: Option<usize>,
     pub pattern: Option<String>,
     pub max_json_bytes: Option<usize>,
@@ -509,7 +511,38 @@ required = true
         assert_eq!(manifest.timeout_seconds, 600);
         assert_eq!(manifest.concurrency, Concurrency::JobExclusive);
         assert_eq!(manifest.params["commit"].kind, ParamType::String);
+        assert!(!manifest.params["commit"].sensitive);
         assert!(manifest.outputs["app"].required);
+    }
+
+    #[test]
+    fn parses_sensitive_param_flag() {
+        let temp = temp_dir("parse_sensitive_param");
+        let script = write_executable_script(&temp, "build.sh");
+        let manifest_path = temp.join("build-app.toml");
+
+        fs::write(
+            &manifest_path,
+            format!(
+                r#"
+name = "build-app"
+script = "{}"
+timeout_seconds = 600
+concurrency = "parallel"
+
+[params.token]
+type = "string"
+required = true
+sensitive = true
+"#,
+                script.display()
+            ),
+        )
+        .expect("manifest should be written");
+
+        let manifest = JobManifest::load_from_path(&manifest_path).expect("manifest should load");
+
+        assert!(manifest.params["token"].sensitive);
     }
 
     #[test]

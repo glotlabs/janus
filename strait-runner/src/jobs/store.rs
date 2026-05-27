@@ -26,6 +26,8 @@ use super::{
     models::{JobCreated, JobExecution, JobLogs},
 };
 
+const REDACTED_PARAM_VALUE: &str = "[REDACTED]";
+
 #[derive(Debug)]
 pub struct JobStore {
     pub(super) root_dir: PathBuf,
@@ -76,6 +78,7 @@ impl JobStore {
             .ok_or_else(|| JobError::UnknownJob(name.to_string()))?;
 
         let resolved = validate_params(&manifest, &params, artifacts)?;
+        let metadata_params = redact_sensitive_params(&manifest, &params);
         let log_limit_bytes = default_log_limit_mb
             .checked_mul(1024_u64 * 1024_u64)
             .ok_or(JobError::InvalidLogLimit {
@@ -91,7 +94,7 @@ impl JobStore {
             started_at: started_at.clone(),
             finished_at: None,
             exit_code: None,
-            params,
+            params: metadata_params,
             resolved_artifacts: resolved,
             outputs: BTreeMap::new(),
         };
@@ -172,6 +175,7 @@ impl JobStore {
             cleanup_successful_workdirs,
             keep_failed_workdirs,
             metadata: job,
+            raw_params: params,
             cancel_rx,
         };
 
@@ -496,6 +500,23 @@ fn validate_params(
     }
 
     Ok(resolved)
+}
+
+fn redact_sensitive_params(
+    manifest: &JobManifest,
+    params: &Map<String, Value>,
+) -> Map<String, Value> {
+    params
+        .iter()
+        .map(|(name, value)| {
+            let value = if manifest.params[name].sensitive {
+                Value::String(REDACTED_PARAM_VALUE.to_string())
+            } else {
+                value.clone()
+            };
+            (name.clone(), value)
+        })
+        .collect()
 }
 
 fn enforce_concurrency(
