@@ -14,8 +14,6 @@ use axum::{
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::time::{self, MissedTickBehavior};
-use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::{
@@ -230,25 +228,6 @@ impl ArtifactStore {
 
         Ok(removed)
     }
-
-    pub async fn run_cleanup_loop(self: std::sync::Arc<Self>, cleanup_interval_seconds: u64) {
-        let mut interval = time::interval(Duration::from_secs(cleanup_interval_seconds.max(1)));
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        loop {
-            interval.tick().await;
-            match self.cleanup_expired() {
-                Ok(removed) if removed > 0 => {
-                    info!(removed, "cleaned expired artifacts");
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    error!(%error, "artifact cleanup failed");
-                }
-            }
-        }
-    }
-
     fn artifact_dir_is_recoverable(&self, path: &Path) -> Result<bool, ArtifactError> {
         let artifact_id = path
             .file_name()
@@ -803,6 +782,7 @@ mod tests {
             jobs: std::sync::Arc::new(
                 JobStore::new(&config.data_dir).expect("job store should init"),
             ),
+            runtime_status: std::sync::Arc::new(crate::RuntimeStatus::new(0, 0)),
         }
     }
 

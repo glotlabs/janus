@@ -12,12 +12,15 @@ use auth::AuthStore;
 use axum::{
     Json, Router,
     extract::State,
+    http::StatusCode,
     routing::{get, post},
 };
+use chrono::{SecondsFormat, Utc};
 use config::Config;
 use jobs::JobStore;
 use manifest::ManifestStore;
 use serde::Serialize;
+use tokio::time::{self, MissedTickBehavior};
 use tracing::{info, warn};
 
 const SHUTDOWN_DRAIN_TIMEOUT_SECONDS: u64 = 10;
@@ -29,6 +32,7 @@ pub(crate) struct AppState {
     manifests: Arc<ManifestStore>,
     artifacts: Arc<ArtifactStore>,
     jobs: Arc<JobStore>,
+    runtime_status: Arc<RuntimeStatus>,
 }
 
 #[derive(Serialize)]
@@ -36,6 +40,104 @@ struct HealthResponse {
     status: String,
     listen: String,
     manifest_count: usize,
+}
+
+#[derive(Clone, Serialize)]
+struct StartupValidationStatus {
+    completed: bool,
+    recovered_artifacts: usize,
+    recovered_jobs: usize,
+}
+
+#[derive(Clone, Serialize)]
+struct BackgroundTaskStatus {
+    name: &'static str,
+    running: bool,
+    last_success_at: Option<String>,
+    last_error: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct ReadinessResponse {
+    status: String,
+    listen: String,
+    manifest_count: usize,
+    startup: StartupValidationStatus,
+    background_tasks: Vec<BackgroundTaskStatus>,
+}
+
+struct RuntimeStatus {
+    startup: StartupValidationStatus,
+    artifact_cleanup: std::sync::Mutex<BackgroundTaskHealth>,
+}
+
+struct BackgroundTaskHealth {
+    running: bool,
+    last_success_at: Option<String>,
+    last_error: Option<String>,
+}
+
+impl RuntimeStatus {
+    fn new(recovered_artifacts: usize, recovered_jobs: usize) -> Self {
+        Self {
+            startup: StartupValidationStatus {
+                completed: true,
+                recovered_artifacts,
+                recovered_jobs,
+            },
+            artifact_cleanup: std::sync::Mutex::new(BackgroundTaskHealth {
+                running: true,
+                last_success_at: None,
+                last_error: None,
+            }),
+        }
+    }
+
+    fn record_artifact_cleanup_success(&self) {
+        let mut status = self
+            .artifact_cleanup
+            .lock()
+            .expect("artifact cleanup mutex poisoned");
+        status.last_success_at = Some(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
+        status.last_error = None;
+    }
+
+    fn record_artifact_cleanup_error(&self, error: &str) {
+        let mut status = self
+            .artifact_cleanup
+            .lock()
+            .expect("artifact cleanup mutex poisoned");
+        status.last_error = Some(error.to_string());
+    }
+
+    fn mark_artifact_cleanup_stopped(&self) {
+        let mut status = self
+            .artifact_cleanup
+            .lock()
+            .expect("artifact cleanup mutex poisoned");
+        status.running = false;
+    }
+
+    fn artifact_cleanup_status(&self) -> BackgroundTaskStatus {
+        let status = self
+            .artifact_cleanup
+            .lock()
+            .expect("artifact cleanup mutex poisoned");
+        BackgroundTaskStatus {
+            name: "artifact_cleanup",
+            running: status.running,
+            last_success_at: status.last_success_at.clone(),
+            last_error: status.last_error.clone(),
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        let artifact_cleanup = self
+            .artifact_cleanup
+            .lock()
+            .expect("artifact cleanup mutex poisoned");
+        self.startup.completed && artifact_cleanup.running && artifact_cleanup.last_error.is_none()
+    }
 }
 
 #[tokio::main]
@@ -59,17 +161,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cleanup_interval_seconds = config.artifacts.cleanup_interval_seconds;
     let jobs = Arc::new(JobStore::new(&config.data_dir)?);
     let recovered_jobs = jobs.recover_interrupted_jobs()?;
+    let runtime_status = Arc::new(RuntimeStatus::new(recovered_artifacts, recovered_jobs));
     let state = AppState {
         config: Arc::clone(&config),
         auth,
         manifests: Arc::clone(&manifests),
         artifacts,
         jobs,
+        runtime_status: Arc::clone(&runtime_status),
     };
+    let cleanup_runtime_status = Arc::clone(&runtime_status);
     let artifacts_cleanup_task = tokio::spawn(async move {
-        artifacts_cleanup
-            .run_cleanup_loop(cleanup_interval_seconds)
-            .await;
+        run_artifact_cleanup_loop(
+            artifacts_cleanup,
+            cleanup_interval_seconds,
+            cleanup_runtime_status,
+        )
+        .await;
     });
     let jobs_for_shutdown = Arc::clone(&state.jobs);
     let app = build_app(state);
@@ -106,6 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .await?;
+    runtime_status.mark_artifact_cleanup_stopped();
     artifacts_cleanup_task.abort();
 
     Ok(())
@@ -132,6 +241,8 @@ fn config_path() -> String {
 fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(readiness))
+        .route("/readiness", get(readiness))
         .route("/jobs", get(jobs::list_jobs))
         .route("/artifacts", post(artifacts::upload_artifact))
         .route(
@@ -157,6 +268,53 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         listen: state.config.server.listen.clone(),
         manifest_count: state.manifests.len(),
     })
+}
+
+async fn readiness(State(state): State<AppState>) -> (StatusCode, Json<ReadinessResponse>) {
+    let ready = !state.jobs.is_shutting_down() && state.runtime_status.is_ready();
+    let status = if ready { "ready" } else { "not_ready" };
+
+    (
+        if ready {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(ReadinessResponse {
+            status: status.to_string(),
+            listen: state.config.server.listen.clone(),
+            manifest_count: state.manifests.len(),
+            startup: state.runtime_status.startup.clone(),
+            background_tasks: vec![state.runtime_status.artifact_cleanup_status()],
+        }),
+    )
+}
+
+async fn run_artifact_cleanup_loop(
+    artifacts: Arc<ArtifactStore>,
+    cleanup_interval_seconds: u64,
+    runtime_status: Arc<RuntimeStatus>,
+) {
+    let mut interval = time::interval(std::time::Duration::from_secs(
+        cleanup_interval_seconds.max(1),
+    ));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+        match artifacts.cleanup_expired() {
+            Ok(removed) => {
+                runtime_status.record_artifact_cleanup_success();
+                if removed > 0 {
+                    info!(removed, "cleaned expired artifacts");
+                }
+            }
+            Err(error) => {
+                runtime_status.record_artifact_cleanup_error(&error.to_string());
+                warn!(%error, "artifact cleanup failed");
+            }
+        }
+    }
 }
 
 async fn shutdown_signal() {
@@ -194,7 +352,7 @@ mod tests {
     use sha2::{Digest, Sha256};
     use tower::util::ServiceExt;
 
-    use super::{AppState, build_app};
+    use super::{AppState, RuntimeStatus, build_app};
     use crate::{
         artifacts::ArtifactStore,
         auth::AuthStore,
@@ -225,6 +383,90 @@ mod tests {
             .expect("response body");
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("health json");
         assert_eq!(payload["status"], "shutting_down");
+    }
+
+    #[tokio::test]
+    async fn readiness_reports_ready_after_startup_validation() {
+        let temp = temp_dir("readiness_ready");
+        let state = test_state(&temp);
+        state.runtime_status.record_artifact_cleanup_success();
+        let app = build_app(state);
+
+        let response = app
+            .oneshot(
+                Request::get("/ready")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("readiness json");
+        assert_eq!(payload["status"], "ready");
+        assert_eq!(payload["startup"]["completed"], true);
+        assert_eq!(payload["background_tasks"][0]["name"], "artifact_cleanup");
+        assert_eq!(payload["background_tasks"][0]["running"], true);
+        assert!(payload["background_tasks"][0]["last_success_at"].is_string());
+        assert!(payload["background_tasks"][0]["last_error"].is_null());
+    }
+
+    #[tokio::test]
+    async fn readiness_reports_background_task_failure() {
+        let temp = temp_dir("readiness_background_failure");
+        let state = test_state(&temp);
+        state
+            .runtime_status
+            .record_artifact_cleanup_error("disk unavailable");
+        let app = build_app(state);
+
+        let response = app
+            .oneshot(
+                Request::get("/readiness")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("readiness json");
+        assert_eq!(payload["status"], "not_ready");
+        assert_eq!(
+            payload["background_tasks"][0]["last_error"],
+            "disk unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_reports_not_ready_while_shutting_down() {
+        let temp = temp_dir("readiness_shutdown");
+        let state = test_state(&temp);
+        state.runtime_status.record_artifact_cleanup_success();
+        state.jobs.begin_shutdown();
+        let app = build_app(state);
+
+        let response = app
+            .oneshot(
+                Request::get("/ready")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("readiness json");
+        assert_eq!(payload["status"], "not_ready");
     }
 
     #[tokio::test]
@@ -419,6 +661,7 @@ required = true
                 .expect("artifact store should init"),
             ),
             jobs: Arc::new(JobStore::new(&config.data_dir).expect("job store should init")),
+            runtime_status: Arc::new(RuntimeStatus::new(0, 0)),
         }
     }
 

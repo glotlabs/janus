@@ -447,6 +447,7 @@ mod tests {
                 .expect("artifact store should init"),
             ),
             jobs: Arc::new(JobStore::new(&config.data_dir).expect("job store should init")),
+            runtime_status: Arc::new(crate::RuntimeStatus::new(0, 0)),
         }
     }
 }
