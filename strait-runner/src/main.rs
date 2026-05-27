@@ -1,18 +1,25 @@
+mod artifacts;
 mod config;
 mod manifest;
 
 use std::{env, net::SocketAddr, sync::Arc};
 
-use axum::{Json, Router, extract::State, routing::get};
+use artifacts::ArtifactStore;
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
 use config::Config;
 use manifest::ManifestStore;
 use serde::Serialize;
 use tracing::info;
 
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     config: Arc<Config>,
     manifests: Arc<ManifestStore>,
+    artifacts: Arc<ArtifactStore>,
 }
 
 #[derive(Serialize)]
@@ -29,9 +36,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = config_path();
     let config = Arc::new(Config::load_from_path(&config_path)?);
     let manifests = Arc::new(ManifestStore::load_from_dir(&config.manifests_dir)?);
+    let artifacts = Arc::new(ArtifactStore::new(
+        &config.data_dir,
+        config.artifacts.ttl_seconds,
+        config.artifacts.max_size_mb,
+        config.artifacts.require_checksum_on_upload,
+    )?);
     let state = AppState {
         config: Arc::clone(&config),
         manifests: Arc::clone(&manifests),
+        artifacts,
     };
     let app = build_app(state);
 
@@ -70,6 +84,11 @@ fn config_path() -> String {
 fn build_app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/artifacts", post(artifacts::upload_artifact))
+        .route(
+            "/artifacts/{artifact_id}",
+            get(artifacts::download_artifact),
+        )
         .with_state(state)
 }
 
