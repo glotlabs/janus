@@ -25,6 +25,7 @@ use super::{
     JobCreatedResponse, JobDefinitionResponse, JobLogsResponse, JobMetadata, JobStatus,
     JobStatusResponse, JobStore, cancel_job, create_job as create_job_impl, get_job,
     get_job_logs, list_jobs,
+    models::{FailureCategory, TerminalReason},
 };
 use crate::{
     AppState,
@@ -697,7 +698,12 @@ exit 0
     let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
 
     assert_eq!(metadata.status, JobStatus::Success);
+    assert_eq!(metadata.terminal_reason, Some(TerminalReason::Success));
+    assert_eq!(metadata.failure_category, None);
     assert_eq!(metadata.exit_code, Some(0));
+    assert!(metadata.duration_ms.is_some());
+    assert_eq!(metadata.output_metadata.stdout.bytes, 6);
+    assert!(!metadata.output_metadata.stdout.truncated);
     assert_eq!(
         fs::read_to_string(temp.join("jobs").join(&created.job_id).join("stdout.log"))
             .expect("stdout log"),
@@ -745,6 +751,8 @@ async fn marks_failed_script_as_failed() {
     let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
 
     assert_eq!(metadata.status, JobStatus::Failed);
+    assert_eq!(metadata.terminal_reason, Some(TerminalReason::ExitCode));
+    assert_eq!(metadata.failure_category, Some(FailureCategory::Job));
     assert_eq!(metadata.exit_code, Some(7));
     assert!(
         temp.join("jobs")
@@ -777,6 +785,11 @@ async fn times_out_long_running_script() {
     let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
 
     assert_eq!(metadata.status, JobStatus::TimedOut);
+    assert_eq!(metadata.terminal_reason, Some(TerminalReason::Timeout));
+    assert_eq!(
+        metadata.failure_category,
+        Some(FailureCategory::Timeout)
+    );
     assert_eq!(metadata.exit_code, None);
 }
 
@@ -1408,10 +1421,14 @@ fn recovers_running_jobs_on_startup() {
             status: JobStatus::Running,
             started_at: "2026-01-01T00:00:00Z".to_string(),
             finished_at: None,
+            duration_ms: None,
             exit_code: None,
+            terminal_reason: None,
+            failure_category: None,
             inputs: Map::new(),
             resolved_artifacts: BTreeMap::new(),
             outputs: BTreeMap::new(),
+            output_metadata: Default::default(),
         })
         .expect("metadata"),
     )
@@ -1450,10 +1467,14 @@ fn recovers_cancel_requested_jobs_on_startup_as_canceled() {
             status: JobStatus::CancelRequested,
             started_at: "2026-01-01T00:00:00Z".to_string(),
             finished_at: None,
+            duration_ms: None,
             exit_code: None,
+            terminal_reason: None,
+            failure_category: None,
             inputs: Map::new(),
             resolved_artifacts: BTreeMap::new(),
             outputs: BTreeMap::new(),
+            output_metadata: Default::default(),
         })
         .expect("metadata"),
     )
@@ -1492,10 +1513,14 @@ fn recovers_canceling_jobs_on_startup_as_canceled() {
             status: JobStatus::Canceling,
             started_at: "2026-01-01T00:00:00Z".to_string(),
             finished_at: None,
+            duration_ms: None,
             exit_code: None,
+            terminal_reason: None,
+            failure_category: None,
             inputs: Map::new(),
             resolved_artifacts: BTreeMap::new(),
             outputs: BTreeMap::new(),
+            output_metadata: Default::default(),
         })
         .expect("metadata"),
     )

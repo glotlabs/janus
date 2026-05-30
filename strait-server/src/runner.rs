@@ -194,9 +194,14 @@ pub struct JobStatusResponse {
     pub status: String,
     pub started_at: String,
     pub finished_at: Option<String>,
+    pub duration_ms: Option<u64>,
     pub exit_code: Option<i32>,
+    pub terminal_reason: Option<TerminalReason>,
+    pub failure_category: Option<FailureCategory>,
     #[serde(default)]
     pub outputs: std::collections::BTreeMap<String, JobOutputResponse>,
+    #[serde(default)]
+    pub output_metadata: JobOutputMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,4 +215,81 @@ pub struct JobOutputResponse {
 pub struct JobLogsResponse {
     pub stdout: String,
     pub stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalReason {
+    Success,
+    ExitCode,
+    Timeout,
+    Canceled,
+    Shutdown,
+    SpawnError,
+    WaitError,
+    CaptureError,
+    LogLimitExceeded,
+    MissingRequiredOutput,
+    OutputRegistrationFailed,
+}
+
+impl TerminalReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::ExitCode => "exit_code",
+            Self::Timeout => "timeout",
+            Self::Canceled => "canceled",
+            Self::Shutdown => "shutdown",
+            Self::SpawnError => "spawn_error",
+            Self::WaitError => "wait_error",
+            Self::CaptureError => "capture_error",
+            Self::LogLimitExceeded => "log_limit_exceeded",
+            Self::MissingRequiredOutput => "missing_required_output",
+            Self::OutputRegistrationFailed => "output_registration_failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCategory {
+    Job,
+    Infra,
+    Timeout,
+    Canceled,
+}
+
+impl FailureCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Job => "job",
+            Self::Infra => "infra",
+            Self::Timeout => "timeout",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JobOutputMetadata {
+    #[serde(default)]
+    pub stdout: JobStreamMetadata,
+    #[serde(default)]
+    pub stderr: JobStreamMetadata,
+    #[serde(default)]
+    pub artifacts: JobArtifactMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JobStreamMetadata {
+    pub bytes: u64,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JobArtifactMetadata {
+    pub count: u64,
+    pub bytes: u64,
 }

@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::runner::JobOutputMetadata;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: String,
@@ -95,12 +97,17 @@ pub struct JobRun {
     pub status: String,
     pub allow_failure: bool,
     pub started_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub exit_code: Option<i32>,
+    pub terminal_reason: Option<String>,
+    pub failure_category: Option<String>,
     pub cancel_reason: Option<String>,
     pub cancel_requested_at: Option<String>,
     pub cancel_started_at: Option<String>,
     pub cancel_retry_count: i64,
     pub last_cancel_retry_at: Option<String>,
     pub finished_at: Option<String>,
+    pub output_metadata: JobOutputMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -157,6 +157,10 @@ async fn scheduler_persists_terminal_runner_state() {
         .unwrap();
     assert_eq!(snapshot.pipeline.status, "success");
     assert_eq!(snapshot.jobs[0].run.status, "success");
+    assert_eq!(snapshot.jobs[0].run.exit_code, Some(0));
+    assert_eq!(snapshot.jobs[0].run.terminal_reason.as_deref(), Some("success"));
+    assert_eq!(snapshot.jobs[0].run.failure_category, None);
+    assert_eq!(snapshot.jobs[0].run.output_metadata.artifacts.count, 0);
     assert!(snapshot.jobs[0].stdout.contains("ok"));
 }
 
@@ -734,8 +738,16 @@ async fn mock_get_run(
                 "status": "running",
                 "started_at": Utc::now().to_rfc3339(),
                 "finished_at": null,
+                "duration_ms": null,
                 "exit_code": null,
-                "outputs": {}
+                "terminal_reason": null,
+                "failure_category": null,
+                "outputs": {},
+                "output_metadata": {
+                    "stdout": {"bytes": 0, "truncated": false},
+                    "stderr": {"bytes": 0, "truncated": false},
+                    "artifacts": {"count": 0, "bytes": 0}
+                }
             }));
         }
         run.cancel_stage = Some(stage.saturating_add(1));
@@ -750,8 +762,16 @@ async fn mock_get_run(
             "status": status,
             "started_at": Utc::now().to_rfc3339(),
             "finished_at": if status == "canceled" { json!(Utc::now().to_rfc3339()) } else { JsonValue::Null },
+            "duration_ms": if status == "canceled" { json!(1000) } else { JsonValue::Null },
             "exit_code": null,
-            "outputs": {}
+            "terminal_reason": if status == "canceled" { json!("canceled") } else { JsonValue::Null },
+            "failure_category": if status == "canceled" { json!("canceled") } else { JsonValue::Null },
+            "outputs": {},
+            "output_metadata": {
+                "stdout": {"bytes": 0, "truncated": false},
+                "stderr": {"bytes": 0, "truncated": false},
+                "artifacts": {"count": 0, "bytes": 0}
+            }
         }));
     }
     run.polls += 1;
@@ -762,8 +782,16 @@ async fn mock_get_run(
             "status": "success",
             "started_at": Utc::now().to_rfc3339(),
             "finished_at": Utc::now().to_rfc3339(),
+            "duration_ms": 1000,
             "exit_code": 0,
-            "outputs": {}
+            "terminal_reason": "success",
+            "failure_category": null,
+            "outputs": {},
+            "output_metadata": {
+                "stdout": {"bytes": 3, "truncated": false},
+                "stderr": {"bytes": 0, "truncated": false},
+                "artifacts": {"count": 0, "bytes": 0}
+            }
         }))
     } else {
         Json(json!({
@@ -772,8 +800,16 @@ async fn mock_get_run(
             "status": "running",
             "started_at": Utc::now().to_rfc3339(),
             "finished_at": null,
+            "duration_ms": null,
             "exit_code": null,
-            "outputs": {}
+            "terminal_reason": null,
+            "failure_category": null,
+            "outputs": {},
+            "output_metadata": {
+                "stdout": {"bytes": 0, "truncated": false},
+                "stderr": {"bytes": 0, "truncated": false},
+                "artifacts": {"count": 0, "bytes": 0}
+            }
         }))
     }
 }

@@ -352,8 +352,16 @@ async fn mock_get_run(
             "status": "success",
             "started_at": "2026-01-01T00:00:00Z",
             "finished_at": "2026-01-01T00:00:01Z",
+            "duration_ms": 1000,
             "exit_code": 0,
-            "outputs": {}
+            "terminal_reason": "success",
+            "failure_category": null,
+            "outputs": {},
+            "output_metadata": {
+                "stdout": {"bytes": 3, "truncated": false},
+                "stderr": {"bytes": 0, "truncated": false},
+                "artifacts": {"count": 0, "bytes": 0}
+            }
         }))
     } else {
         Json(json!({
@@ -362,8 +370,16 @@ async fn mock_get_run(
             "status": "running",
             "started_at": "2026-01-01T00:00:00Z",
             "finished_at": null,
+            "duration_ms": null,
             "exit_code": null,
-            "outputs": {}
+            "terminal_reason": null,
+            "failure_category": null,
+            "outputs": {},
+            "output_metadata": {
+                "stdout": {"bytes": 0, "truncated": false},
+                "stderr": {"bytes": 0, "truncated": false},
+                "artifacts": {"count": 0, "bytes": 0}
+            }
         }))
     }
 }

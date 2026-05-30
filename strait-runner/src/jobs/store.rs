@@ -23,7 +23,9 @@ use crate::{
 
 use super::{
     JobCreatedResponse, JobError, JobMetadata, JobStatus,
-    models::{JobCreated, JobExecution, JobLogs},
+    models::{
+        FailureCategory, JobCreated, JobExecution, JobLogs, JobOutputMetadata, TerminalReason,
+    },
 };
 
 const REDACTED_INPUT_VALUE: &str = "[REDACTED]";
@@ -119,10 +121,14 @@ impl JobStore {
             status: JobStatus::Running,
             started_at: started_at.clone(),
             finished_at: None,
+            duration_ms: None,
             exit_code: None,
+            terminal_reason: None,
+            failure_category: None,
             inputs: metadata_inputs,
             resolved_artifacts: resolved,
             outputs: BTreeMap::new(),
+            output_metadata: JobOutputMetadata::default(),
         };
 
         info!(
@@ -369,7 +375,11 @@ impl JobStore {
                 JobStatus::Running => {
                     metadata.status = JobStatus::Failed;
                     metadata.finished_at = Some(now_rfc3339());
+                    metadata.duration_ms =
+                        calculate_duration_ms(&metadata.started_at, metadata.finished_at.as_deref());
                     metadata.exit_code = None;
+                    metadata.terminal_reason = Some(TerminalReason::Shutdown);
+                    metadata.failure_category = Some(FailureCategory::Infra);
                     self.persist_metadata(&metadata_path, &metadata)?;
                     append_recovery_message(&stderr_path, RECOVERY_RUNNING_MESSAGE)?;
                     warn!(
@@ -382,7 +392,11 @@ impl JobStore {
                 JobStatus::CancelRequested | JobStatus::Canceling => {
                     metadata.status = JobStatus::Canceled;
                     metadata.finished_at = Some(now_rfc3339());
+                    metadata.duration_ms =
+                        calculate_duration_ms(&metadata.started_at, metadata.finished_at.as_deref());
                     metadata.exit_code = None;
+                    metadata.terminal_reason = Some(TerminalReason::Shutdown);
+                    metadata.failure_category = Some(FailureCategory::Canceled);
                     self.persist_metadata(&metadata_path, &metadata)?;
                     append_recovery_message(&stderr_path, RECOVERY_CANCEL_MESSAGE)?;
                     warn!(
@@ -698,6 +712,14 @@ fn enforce_concurrency(
 
 pub(super) fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn calculate_duration_ms(started_at: &str, finished_at: Option<&str>) -> Option<u64> {
+    let finished_at = finished_at?;
+    let started = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
+    let finished = chrono::DateTime::parse_from_rfc3339(finished_at).ok()?;
+    let millis = finished.signed_duration_since(started).num_milliseconds();
+    u64::try_from(millis).ok()
 }
 
 fn hash_request(name: &str, request_body: &[u8]) -> String {

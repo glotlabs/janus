@@ -20,7 +20,10 @@ use crate::{artifacts::ArtifactStore, manifest::OutputSpec};
 
 use super::{
     JobError, JobMetadata, JobStatus, JobStore,
-    models::{ExecutionOutcome, JobExecution, JobOutputArtifact},
+    models::{
+        ExecutionOutcome, FailureCategory, JobArtifactMetadata, JobExecution, JobOutputArtifact,
+        JobOutputMetadata, JobStreamMetadata, TerminalReason,
+    },
     store::now_rfc3339,
 };
 
@@ -115,6 +118,10 @@ impl JobStore {
                     status: JobStatus::TimedOut,
                     exit_code: None,
                     message: None,
+                    terminal_reason: TerminalReason::Timeout,
+                    failure_category: Some(FailureCategory::Timeout),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
                 });
             }
 
@@ -136,13 +143,17 @@ impl JobStore {
                         status: JobStatus::Canceled,
                         exit_code: None,
                         message: None,
+                        terminal_reason: TerminalReason::Canceled,
+                        failure_category: Some(FailureCategory::Canceled),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
                     });
                 },
-                Some(message) = log_limit_rx.recv() => {
+                Some(event) = log_limit_rx.recv() => {
                     warn!(
                         job_id = %execution.job_id,
                         job_name = %execution.metadata.name,
-                        message = %message,
+                        message = %event.message,
                         "job log limit reached"
                     );
                     terminate_job(&mut child).await;
@@ -150,7 +161,11 @@ impl JobStore {
                     return Ok(ExecutionOutcome {
                         status: JobStatus::Failed,
                         exit_code: None,
-                        message: Some(message),
+                        message: Some(event.message),
+                        terminal_reason: TerminalReason::LogLimitExceeded,
+                        failure_category: Some(FailureCategory::Infra),
+                        stdout_truncated: event.stream_name == "stdout",
+                        stderr_truncated: event.stream_name == "stderr",
                     });
                 },
                 _ = tokio::time::sleep(Duration::from_millis(25)) => {}
@@ -179,6 +194,18 @@ impl JobStore {
                         },
                         exit_code: status.code(),
                         message: None,
+                        terminal_reason: if status.success() {
+                            TerminalReason::Success
+                        } else {
+                            TerminalReason::ExitCode
+                        },
+                        failure_category: if status.success() {
+                            None
+                        } else {
+                            Some(FailureCategory::Job)
+                        },
+                        stdout_truncated: false,
+                        stderr_truncated: false,
                     });
                 }
                 None => {}
@@ -196,6 +223,8 @@ impl JobStore {
                     let _ = append_runtime_message(&execution.stderr_path, message);
                 }
 
+                let mut terminal_reason = outcome.terminal_reason.clone();
+                let mut failure_category = outcome.failure_category.clone();
                 let final_status = if matches!(outcome.status, JobStatus::Success) {
                     match register_outputs(
                         &execution.artifacts,
@@ -220,6 +249,11 @@ impl JobStore {
                                 "job output registration failed"
                             );
                             let _ = append_error(&execution.stderr_path, &error);
+                            terminal_reason = match error {
+                                JobError::MissingOutput { .. } => TerminalReason::MissingRequiredOutput,
+                                _ => TerminalReason::OutputRegistrationFailed,
+                            };
+                            failure_category = Some(FailureCategory::Infra);
                             JobStatus::Failed
                         }
                     }
@@ -230,6 +264,23 @@ impl JobStore {
                 metadata.status = final_status.clone();
                 metadata.exit_code = outcome.exit_code;
                 metadata.finished_at = Some(finished_at);
+                metadata.duration_ms = calculate_duration_ms(&metadata.started_at, metadata.finished_at.as_deref());
+                metadata.terminal_reason = Some(if matches!(final_status, JobStatus::Success) {
+                    TerminalReason::Success
+                } else {
+                    classify_terminal_reason(&terminal_reason, &final_status)
+                });
+                metadata.failure_category = classify_failure_category(
+                    failure_category,
+                    &final_status,
+                );
+                metadata.output_metadata = build_output_metadata(
+                    &execution.stdout_path,
+                    outcome.stdout_truncated,
+                    &execution.stderr_path,
+                    outcome.stderr_truncated,
+                    &metadata.outputs,
+                );
 
                 let _ = self.persist_metadata(&execution.metadata_path, &metadata);
                 info!(
@@ -282,6 +333,17 @@ impl JobStore {
                 metadata.status = JobStatus::Failed;
                 metadata.exit_code = None;
                 metadata.finished_at = Some(finished_at);
+                metadata.duration_ms =
+                    calculate_duration_ms(&metadata.started_at, metadata.finished_at.as_deref());
+                metadata.terminal_reason = Some(classify_job_error_reason(&error));
+                metadata.failure_category = Some(FailureCategory::Infra);
+                metadata.output_metadata = build_output_metadata(
+                    &execution.stdout_path,
+                    false,
+                    &execution.stderr_path,
+                    false,
+                    &metadata.outputs,
+                );
                 let _ = self.persist_metadata(&execution.metadata_path, &metadata);
                 let _ = fs::write(&execution.stderr_path, format!("{error}\n"));
                 error!(
@@ -409,7 +471,7 @@ async fn capture_output<R: tokio::io::AsyncRead + Unpin>(
     path: std::path::PathBuf,
     limit_bytes: u64,
     stream_name: &'static str,
-    log_limit_tx: mpsc::UnboundedSender<String>,
+    log_limit_tx: mpsc::UnboundedSender<LogLimitEvent>,
 ) -> Result<(), JobError> {
     let mut file = fs::File::create(&path).map_err(|source| JobError::WriteFile {
         path: path.display().to_string(),
@@ -432,7 +494,10 @@ async fn capture_output<R: tokio::io::AsyncRead + Unpin>(
 
         let remaining = limit_bytes.saturating_sub(written) as usize;
         if remaining == 0 {
-            let _ = log_limit_tx.send(log_limit_message(stream_name, limit_bytes));
+            let _ = log_limit_tx.send(LogLimitEvent {
+                stream_name,
+                message: log_limit_message(stream_name, limit_bytes),
+            });
             return Ok(());
         }
 
@@ -445,7 +510,10 @@ async fn capture_output<R: tokio::io::AsyncRead + Unpin>(
         written += to_write as u64;
 
         if to_write < read {
-            let _ = log_limit_tx.send(log_limit_message(stream_name, limit_bytes));
+            let _ = log_limit_tx.send(LogLimitEvent {
+                stream_name,
+                message: log_limit_message(stream_name, limit_bytes),
+            });
             return Ok(());
         }
     }
@@ -474,6 +542,84 @@ async fn abort_capture_tasks(
 
 fn log_limit_message(stream_name: &str, limit_bytes: u64) -> String {
     format!("job {stream_name} log exceeded configured limit of {limit_bytes} bytes")
+}
+
+#[derive(Debug)]
+struct LogLimitEvent {
+    stream_name: &'static str,
+    message: String,
+}
+
+fn build_output_metadata(
+    stdout_path: &Path,
+    stdout_truncated: bool,
+    stderr_path: &Path,
+    stderr_truncated: bool,
+    outputs: &BTreeMap<String, JobOutputArtifact>,
+) -> JobOutputMetadata {
+    let stdout = JobStreamMetadata {
+        bytes: file_size(stdout_path),
+        truncated: stdout_truncated,
+    };
+    let stderr = JobStreamMetadata {
+        bytes: file_size(stderr_path),
+        truncated: stderr_truncated,
+    };
+    let artifacts = JobArtifactMetadata {
+        count: outputs.len() as u64,
+        bytes: outputs.values().map(|output| output.size).sum(),
+    };
+    JobOutputMetadata {
+        stdout,
+        stderr,
+        artifacts,
+    }
+}
+
+fn file_size(path: &Path) -> u64 {
+    fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
+fn classify_terminal_reason(reason: &TerminalReason, final_status: &JobStatus) -> TerminalReason {
+    match final_status {
+        JobStatus::Success => TerminalReason::Success,
+        JobStatus::Failed => reason.clone(),
+        JobStatus::TimedOut => TerminalReason::Timeout,
+        JobStatus::Canceled => TerminalReason::Canceled,
+        JobStatus::Rejected => TerminalReason::OutputRegistrationFailed,
+        JobStatus::Running | JobStatus::CancelRequested | JobStatus::Canceling => reason.clone(),
+    }
+}
+
+fn classify_failure_category(
+    category: Option<FailureCategory>,
+    final_status: &JobStatus,
+) -> Option<FailureCategory> {
+    match final_status {
+        JobStatus::Success => None,
+        JobStatus::TimedOut => Some(FailureCategory::Timeout),
+        JobStatus::Canceled => Some(FailureCategory::Canceled),
+        JobStatus::Failed | JobStatus::Rejected => category.or(Some(FailureCategory::Infra)),
+        JobStatus::Running | JobStatus::CancelRequested | JobStatus::Canceling => category,
+    }
+}
+
+fn classify_job_error_reason(error: &JobError) -> TerminalReason {
+    match error {
+        JobError::SpawnProcess { .. } => TerminalReason::SpawnError,
+        JobError::WaitProcess { .. } => TerminalReason::WaitError,
+        JobError::ReadFile { .. } | JobError::WriteFile { .. } => TerminalReason::CaptureError,
+        JobError::MissingOutput { .. } => TerminalReason::MissingRequiredOutput,
+        _ => TerminalReason::OutputRegistrationFailed,
+    }
+}
+
+fn calculate_duration_ms(started_at: &str, finished_at: Option<&str>) -> Option<u64> {
+    let finished_at = finished_at?;
+    let started = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
+    let finished = chrono::DateTime::parse_from_rfc3339(finished_at).ok()?;
+    let millis = finished.signed_duration_since(started).num_milliseconds();
+    u64::try_from(millis).ok()
 }
 
 async fn terminate_job(child: &mut Child) {

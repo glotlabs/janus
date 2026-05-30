@@ -299,6 +299,14 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
                     state.db.finish_job_run(
                         &job.id,
                         terminal.as_str(),
+                        status.duration_ms,
+                        status.exit_code,
+                        status.terminal_reason.as_ref().map(|reason| reason.as_str()),
+                        status
+                            .failure_category
+                            .as_ref()
+                            .map(|category| category.as_str()),
+                        &status.output_metadata,
                         &logs.stdout,
                         &logs.stderr,
                         &outputs,

@@ -28,11 +28,19 @@ pub struct JobMetadata {
     pub status: JobStatus,
     pub started_at: String,
     pub finished_at: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub terminal_reason: Option<TerminalReason>,
+    #[serde(default)]
+    pub failure_category: Option<FailureCategory>,
     pub inputs: Map<String, Value>,
     pub resolved_artifacts: BTreeMap<String, String>,
     #[serde(default)]
     pub outputs: BTreeMap<String, JobOutputArtifact>,
+    #[serde(default)]
+    pub output_metadata: JobOutputMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,8 +76,64 @@ pub struct JobStatusResponse {
     pub status: JobStatus,
     pub started_at: String,
     pub finished_at: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
     pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub terminal_reason: Option<TerminalReason>,
+    #[serde(default)]
+    pub failure_category: Option<FailureCategory>,
     pub outputs: BTreeMap<String, JobOutputResponse>,
+    #[serde(default)]
+    pub output_metadata: JobOutputMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalReason {
+    Success,
+    ExitCode,
+    Timeout,
+    Canceled,
+    Shutdown,
+    SpawnError,
+    WaitError,
+    CaptureError,
+    LogLimitExceeded,
+    MissingRequiredOutput,
+    OutputRegistrationFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCategory {
+    Job,
+    Infra,
+    Timeout,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct JobOutputMetadata {
+    #[serde(default)]
+    pub stdout: JobStreamMetadata,
+    #[serde(default)]
+    pub stderr: JobStreamMetadata,
+    #[serde(default)]
+    pub artifacts: JobArtifactMetadata,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct JobStreamMetadata {
+    pub bytes: u64,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct JobArtifactMetadata {
+    pub count: u64,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,6 +209,10 @@ pub(super) struct ExecutionOutcome {
     pub(super) status: JobStatus,
     pub(super) exit_code: Option<i32>,
     pub(super) message: Option<String>,
+    pub(super) terminal_reason: TerminalReason,
+    pub(super) failure_category: Option<FailureCategory>,
+    pub(super) stdout_truncated: bool,
+    pub(super) stderr_truncated: bool,
 }
 
 impl From<JobCreated> for JobCreatedResponse {
@@ -174,7 +242,10 @@ impl From<JobMetadata> for JobStatusResponse {
             status: value.status,
             started_at: value.started_at,
             finished_at: value.finished_at,
+            duration_ms: value.duration_ms,
             exit_code: value.exit_code,
+            terminal_reason: value.terminal_reason,
+            failure_category: value.failure_category,
             outputs: value
                 .outputs
                 .into_iter()
@@ -189,6 +260,7 @@ impl From<JobMetadata> for JobStatusResponse {
                     )
                 })
                 .collect(),
+            output_metadata: value.output_metadata,
         }
     }
 }
