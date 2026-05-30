@@ -197,10 +197,17 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
         let payload = resolve_job_inputs(Arc::clone(&state), &pipeline, &job.id, job_definition).await?;
         let created = state
             .runner_client
-            .create_job_run(&runner, &job.runner_job_name, Value::Object(payload))
+            .create_job_run(
+                &runner,
+                &job.runner_job_name,
+                &job.dispatch_idempotency_key,
+                Value::Object(payload),
+            )
             .await
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        state.db.set_job_run_started(&job.id, &created.job_id)?;
+        state
+            .db
+            .set_job_run_started(&job.id, &created.job_id, &created.started_at)?;
     }
     Ok(())
 }

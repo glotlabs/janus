@@ -2,14 +2,18 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     Router,
     body::Body,
-    http::{Request, StatusCode},
+    extract::{Path as AxumPath, State},
+    http::{HeaderMap, HeaderValue, Request, StatusCode},
     routing::{get, post},
 };
 use serde_json::{Map, json};
@@ -19,7 +23,8 @@ use tower::util::ServiceExt;
 
 use super::{
     JobCreatedResponse, JobDefinitionResponse, JobLogsResponse, JobMetadata, JobStatus,
-    JobStatusResponse, JobStore, cancel_job, create_job, get_job, get_job_logs, list_jobs,
+    JobStatusResponse, JobStore, cancel_job, create_job as create_job_impl, get_job,
+    get_job_logs, list_jobs,
 };
 use crate::{
     AppState,
@@ -28,6 +33,23 @@ use crate::{
     config::{ArtifactsConfig, AuthConfig, Config, JobsConfig, ServerConfig},
     manifest::ManifestStore,
 };
+
+static TEST_IDEMPOTENCY_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+async fn create_job(
+    auth: crate::auth::Authorized<crate::auth::JobsRun>,
+    state: State<crate::AppState>,
+    path: AxumPath<String>,
+    mut headers: HeaderMap,
+    body: Body,
+) -> Result<(StatusCode, axum::Json<JobCreatedResponse>), super::JobError> {
+    headers.entry("x-idempotency-key").or_insert_with(|| {
+        let value = TEST_IDEMPOTENCY_COUNTER.fetch_add(1, Ordering::Relaxed);
+        HeaderValue::from_str(&format!("test_dispatch_{value:016x}"))
+            .expect("idempotency header should be valid")
+    });
+    create_job_impl(auth, state, path, headers, body).await
+}
 
 #[tokio::test]
 async fn creates_job_metadata_for_valid_request() {
@@ -120,6 +142,128 @@ sensitive = true
             .expect("metadata should parse");
 
     assert_eq!(metadata.inputs["token"], "[REDACTED]");
+}
+
+#[tokio::test]
+async fn reuses_existing_job_for_same_idempotency_key() {
+    let temp = temp_dir("job_idempotent_replay");
+    let state = test_state(&temp);
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job_impl))
+        .with_state(state);
+
+    let request_body = json!({
+        "commit": "abc123",
+        "branch": "main"
+    })
+    .to_string();
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("x-idempotency-key", "dispatch_replay_1")
+                .header("content-type", "application/json")
+                .body(Body::from(request_body.clone()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    let second = app
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("x-idempotency-key", "dispatch_replay_1")
+                .header("content-type", "application/json")
+                .body(Body::from(request_body))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(first.status(), StatusCode::CREATED);
+    assert_eq!(second.status(), StatusCode::CREATED);
+
+    let first = read_created_job(first).await;
+    let second = read_created_job(second).await;
+    assert_eq!(first.job_id, second.job_id);
+}
+
+#[tokio::test]
+async fn rejects_reusing_idempotency_key_for_different_request() {
+    let temp = temp_dir("job_idempotent_conflict");
+    let state = test_state(&temp);
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job_impl))
+        .with_state(state);
+
+    let first = app
+        .clone()
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("x-idempotency-key", "dispatch_conflict_1")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "commit": "abc123",
+                        "branch": "main"
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    let second = app
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("x-idempotency-key", "dispatch_conflict_1")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "commit": "def456",
+                        "branch": "main"
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(first.status(), StatusCode::CREATED);
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn rejects_missing_idempotency_key() {
+    let temp = temp_dir("job_missing_idempotency_key");
+    let state = test_state(&temp);
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job_impl))
+        .with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "commit": "abc123",
+                        "branch": "main"
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -1222,6 +1366,8 @@ async fn rejects_new_jobs_after_shutdown_starts() {
         .jobs
         .create_job(
             "build-app",
+            "test_shutdown_key",
+            br#"{"commit":"abc123","branch":"main"}"#,
             json!({
                 "commit": "abc123",
                 "branch": "main"
@@ -1252,6 +1398,8 @@ fn recovers_running_jobs_on_startup() {
         serde_json::to_vec_pretty(&JobMetadata {
             job_id: job_id.to_string(),
             name: "build-app".to_string(),
+            idempotency_key: "dispatch_recovery".to_string(),
+            request_hash: "abc123".to_string(),
             status: JobStatus::Running,
             started_at: "2026-01-01T00:00:00Z".to_string(),
             finished_at: None,

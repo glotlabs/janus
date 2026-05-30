@@ -23,6 +23,8 @@ pub struct JobCreatedResponse {
 pub struct JobMetadata {
     pub job_id: String,
     pub name: String,
+    pub idempotency_key: String,
+    pub request_hash: String,
     pub status: JobStatus,
     pub started_at: String,
     pub finished_at: Option<String>,

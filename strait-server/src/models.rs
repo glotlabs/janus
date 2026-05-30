@@ -87,6 +87,7 @@ pub struct JobRun {
     pub job_name: String,
     pub runner_id: String,
     pub runner_job_name: String,
+    pub dispatch_idempotency_key: String,
     pub runner_run_id: Option<String>,
     pub status: String,
     pub allow_failure: bool,

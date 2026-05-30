@@ -59,6 +59,7 @@ impl RunnerClient {
         &self,
         runner: &Runner,
         runner_job_name: &str,
+        idempotency_key: &str,
         body: Value,
     ) -> Result<JobCreatedResponse, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
@@ -69,10 +70,11 @@ impl RunnerClient {
                 runner_job_name
             ))
             .bearer_auth(&runner.token)
+            .header("x-idempotency-key", idempotency_key)
             .json(&body)
             .send()
             .await?;
-        if response.status() != StatusCode::CREATED {
+        if !matches!(response.status(), StatusCode::CREATED | StatusCode::OK) {
             return Err(format!("runner create job failed with {}", response.status()).into());
         }
         Ok(response.json().await?)

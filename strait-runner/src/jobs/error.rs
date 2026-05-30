@@ -84,6 +84,11 @@ pub enum JobError {
         source: serde_json::Error,
     },
     InvalidJobId(String),
+    MissingIdempotencyKey,
+    InvalidIdempotencyKey(String),
+    IdempotencyConflict {
+        key: String,
+    },
 }
 
 impl fmt::Display for JobError {
@@ -160,6 +165,11 @@ impl fmt::Display for JobError {
                 write!(f, "failed to parse job request body as json: {source}")
             }
             Self::InvalidJobId(job_id) => write!(f, "invalid job id: {job_id}"),
+            Self::MissingIdempotencyKey => write!(f, "missing idempotency key"),
+            Self::InvalidIdempotencyKey(key) => write!(f, "invalid idempotency key: {key}"),
+            Self::IdempotencyConflict { key } => {
+                write!(f, "idempotency key {key} does not match the original request")
+            }
         }
     }
 }
@@ -227,13 +237,17 @@ impl IntoResponse for JobError {
             | Self::ExpiredArtifact { .. }
             | Self::InvalidBody(_)
             | Self::ParseRequestBody { .. }
-            | Self::InvalidJobId(_) => StatusCode::BAD_REQUEST,
+            | Self::InvalidJobId(_)
+            | Self::MissingIdempotencyKey
+            | Self::InvalidIdempotencyKey(_) => StatusCode::BAD_REQUEST,
             Self::Artifact(ArtifactError::RateLimitExceeded { .. }) => {
                 StatusCode::TOO_MANY_REQUESTS
             }
             Self::RateLimitExceeded { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::RequestTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::ConcurrencyConflict { .. } => StatusCode::CONFLICT,
+            Self::ConcurrencyConflict { .. } | Self::IdempotencyConflict { .. } => {
+                StatusCode::CONFLICT
+            }
             Self::Artifact(ArtifactError::ParseMetadata { .. })
             | Self::Artifact(ArtifactError::CreateDir { .. })
             | Self::Artifact(ArtifactError::ReadDir { .. })
@@ -301,6 +315,9 @@ impl JobErrorResponse {
             JobError::RequestTooLarge { .. } => "job_request_body_too_large",
             JobError::ParseRequestBody { .. } => "job_request_body_parse_failed",
             JobError::InvalidJobId(_) => "job_invalid_id",
+            JobError::MissingIdempotencyKey => "job_missing_idempotency_key",
+            JobError::InvalidIdempotencyKey(_) => "job_invalid_idempotency_key",
+            JobError::IdempotencyConflict { .. } => "job_idempotency_conflict",
         };
 
         Self {

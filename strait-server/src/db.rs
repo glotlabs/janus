@@ -624,11 +624,21 @@ impl Database {
         allow_failure: bool,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let id = Uuid::now_v7().to_string();
+        let dispatch_idempotency_key = format!("dispatch_{}", Uuid::now_v7().simple());
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
-            "INSERT INTO job_runs (id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, status, allow_failure)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
-            params![id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, allow_failure as i64],
+            "INSERT INTO job_runs (id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, status, allow_failure)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)",
+            params![
+                id,
+                pipeline_run_id,
+                job_id,
+                job_name,
+                runner_id,
+                runner_job_name,
+                dispatch_idempotency_key,
+                allow_failure as i64
+            ],
         )?;
         conn.execute(
             "INSERT INTO job_run_logs (job_run_id, stdout, stderr, updated_at) VALUES (?1, '', '', ?2)",
@@ -729,7 +739,7 @@ impl Database {
             return Ok(None);
         };
         let mut stmt = conn.prepare(
-            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, runner_run_id, status, allow_failure, started_at, finished_at
+            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, finished_at
              FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_name",
         )?;
         let job_rows = stmt
@@ -741,11 +751,12 @@ impl Database {
                     job_name: row.get(3)?,
                     runner_id: row.get(4)?,
                     runner_job_name: row.get(5)?,
-                    runner_run_id: row.get(6)?,
-                    status: row.get(7)?,
-                    allow_failure: row.get::<_, i64>(8)? != 0,
-                    started_at: row.get(9)?,
-                    finished_at: row.get(10)?,
+                    dispatch_idempotency_key: row.get(6)?,
+                    runner_run_id: row.get(7)?,
+                    status: row.get(8)?,
+                    allow_failure: row.get::<_, i64>(9)? != 0,
+                    started_at: row.get(10)?,
+                    finished_at: row.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -795,7 +806,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut query = String::from(
-            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, runner_run_id, status, allow_failure, started_at, finished_at FROM job_runs WHERE status IN (",
+            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, finished_at FROM job_runs WHERE status IN (",
         );
         for idx in 0..statuses.len() {
             if idx > 0 {
@@ -814,11 +825,12 @@ impl Database {
                 job_name: row.get(3)?,
                 runner_id: row.get(4)?,
                 runner_job_name: row.get(5)?,
-                runner_run_id: row.get(6)?,
-                status: row.get(7)?,
-                allow_failure: row.get::<_, i64>(8)? != 0,
-                started_at: row.get(9)?,
-                finished_at: row.get(10)?,
+                dispatch_idempotency_key: row.get(6)?,
+                runner_run_id: row.get(7)?,
+                status: row.get(8)?,
+                allow_failure: row.get::<_, i64>(9)? != 0,
+                started_at: row.get(10)?,
+                finished_at: row.get(11)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -830,7 +842,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT jr.id, jr.pipeline_run_id, jr.job_id, jr.job_name, jr.runner_id, jr.runner_job_name, jr.runner_run_id, jr.status, jr.allow_failure, jr.started_at, jr.finished_at
+            "SELECT jr.id, jr.pipeline_run_id, jr.job_id, jr.job_name, jr.runner_id, jr.runner_job_name, jr.dispatch_idempotency_key, jr.runner_run_id, jr.status, jr.allow_failure, jr.started_at, jr.finished_at
              FROM job_run_dependencies d
              JOIN job_runs jr ON jr.id = d.depends_on_job_run_id
              WHERE d.job_run_id = ?1",
@@ -843,11 +855,12 @@ impl Database {
                 job_name: row.get(3)?,
                 runner_id: row.get(4)?,
                 runner_job_name: row.get(5)?,
-                runner_run_id: row.get(6)?,
-                status: row.get(7)?,
-                allow_failure: row.get::<_, i64>(8)? != 0,
-                started_at: row.get(9)?,
-                finished_at: row.get(10)?,
+                dispatch_idempotency_key: row.get(6)?,
+                runner_run_id: row.get(7)?,
+                status: row.get(8)?,
+                allow_failure: row.get::<_, i64>(9)? != 0,
+                started_at: row.get(10)?,
+                finished_at: row.get(11)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -857,11 +870,12 @@ impl Database {
         &self,
         job_run_id: &str,
         runner_run_id: &str,
+        started_at: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
             "UPDATE job_runs SET status = 'running', runner_run_id = ?2, started_at = ?3 WHERE id = ?1",
-            params![job_run_id, runner_run_id, now()],
+            params![job_run_id, runner_run_id, started_at],
         )?;
         Ok(())
     }
@@ -958,7 +972,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, runner_run_id, status, allow_failure, started_at, finished_at
+            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, finished_at
              FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_name",
         )?;
         let rows = stmt.query_map([pipeline_id], |row| {
@@ -969,11 +983,12 @@ impl Database {
                 job_name: row.get(3)?,
                 runner_id: row.get(4)?,
                 runner_job_name: row.get(5)?,
-                runner_run_id: row.get(6)?,
-                status: row.get(7)?,
-                allow_failure: row.get::<_, i64>(8)? != 0,
-                started_at: row.get(9)?,
-                finished_at: row.get(10)?,
+                dispatch_idempotency_key: row.get(6)?,
+                runner_run_id: row.get(7)?,
+                status: row.get(8)?,
+                allow_failure: row.get::<_, i64>(9)? != 0,
+                started_at: row.get(10)?,
+                finished_at: row.get(11)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1257,6 +1272,7 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             job_name TEXT NOT NULL,
             runner_id TEXT NOT NULL,
             runner_job_name TEXT NOT NULL,
+            dispatch_idempotency_key TEXT NOT NULL,
             runner_run_id TEXT,
             status TEXT NOT NULL,
             allow_failure INTEGER NOT NULL,
@@ -1310,6 +1326,25 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
     if !columns.iter().any(|name| name == "server_artifact_id") {
         tx.execute_batch("ALTER TABLE job_run_artifacts ADD COLUMN server_artifact_id TEXT;")?;
     }
+    let mut stmt = tx.prepare("PRAGMA table_info(job_runs)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    if !columns.iter().any(|name| name == "dispatch_idempotency_key") {
+        tx.execute_batch("ALTER TABLE job_runs ADD COLUMN dispatch_idempotency_key TEXT;")?;
+        tx.execute(
+            "UPDATE job_runs
+             SET dispatch_idempotency_key = 'dispatch_' || replace(id, '-', '')
+             WHERE dispatch_idempotency_key IS NULL OR dispatch_idempotency_key = ''",
+            [],
+        )?;
+    }
+    tx.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_runs_dispatch_idempotency_key
+         ON job_runs(dispatch_idempotency_key)",
+        [],
+    )?;
     tx.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?1)",
         [now()],

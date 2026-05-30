@@ -11,13 +11,13 @@ use std::{
 use chrono::{SecondsFormat, Utc};
 use regex::Regex;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::{Instrument, error, info, info_span, warn};
-use uuid::Uuid;
 
 use crate::{
     artifacts::ArtifactStore,
-    manifest::{Concurrency, JobManifest, ManifestStore, InputType},
+    manifest::{Concurrency, InputType, JobManifest, ManifestStore},
     storage::atomic_write,
 };
 
@@ -31,6 +31,7 @@ const REDACTED_INPUT_VALUE: &str = "[REDACTED]";
 #[derive(Debug)]
 pub struct JobStore {
     pub(super) root_dir: PathBuf,
+    pub(super) create_lock: Mutex<()>,
     pub(super) running_jobs: Mutex<BTreeMap<String, RunningJob>>,
     pub(super) shutting_down: AtomicBool,
 }
@@ -53,6 +54,7 @@ impl JobStore {
 
         Ok(Self {
             root_dir,
+            create_lock: Mutex::new(()),
             running_jobs: Mutex::new(BTreeMap::new()),
             shutting_down: AtomicBool::new(false),
         })
@@ -61,6 +63,8 @@ impl JobStore {
     pub fn create_job(
         self: &Arc<Self>,
         name: &str,
+        idempotency_key: &str,
+        request_body: &[u8],
         inputs: Map<String, Value>,
         manifests: &ManifestStore,
         artifacts: &ArtifactStore,
@@ -71,6 +75,9 @@ impl JobStore {
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err(JobError::ShuttingDown);
         }
+        validate_idempotency_key(idempotency_key)?;
+
+        let _create_lock = self.create_lock.lock().expect("job creation mutex poisoned");
 
         let manifest = manifests
             .get(name)
@@ -84,12 +91,26 @@ impl JobStore {
             .ok_or(JobError::InvalidLogLimit {
                 max_size_mb: default_log_limit_mb,
             })?;
+        let request_hash = hash_request(name, request_body);
+        let job_id = job_id_for_idempotency_key(idempotency_key);
+        let job_dir = self.root_dir.join(&job_id);
 
-        let job_id = format!("job_{}", Uuid::now_v7().simple());
+        if job_dir.exists() {
+            return self.load_existing_job_for_request(
+                &job_dir,
+                &job_id,
+                name,
+                idempotency_key,
+                &request_hash,
+            );
+        }
+
         let started_at = now_rfc3339();
         let job = JobMetadata {
             job_id: job_id.clone(),
             name: manifest.name.clone(),
+            idempotency_key: idempotency_key.to_string(),
+            request_hash,
             status: JobStatus::Running,
             started_at: started_at.clone(),
             finished_at: None,
@@ -124,7 +145,6 @@ impl JobStore {
         }
 
         let setup_result: Result<PathBuf, JobError> = (|| {
-            let job_dir = self.root_dir.join(&job_id);
             fs::create_dir_all(job_dir.join("work")).map_err(|source| JobError::CreateDir {
                 path: job_dir.join("work").display().to_string(),
                 source,
@@ -390,6 +410,42 @@ impl JobStore {
             source,
         })
     }
+
+    fn load_existing_job_for_request(
+        &self,
+        job_dir: &Path,
+        job_id: &str,
+        name: &str,
+        idempotency_key: &str,
+        request_hash: &str,
+    ) -> Result<JobCreatedResponse, JobError> {
+        let metadata_path = job_dir.join("metadata.json");
+        let bytes = fs::read(&metadata_path).map_err(|source| JobError::ReadFile {
+            path: metadata_path.display().to_string(),
+            source,
+        })?;
+        let metadata: JobMetadata =
+            serde_json::from_slice(&bytes).map_err(|source| JobError::ParseMetadata {
+                path: metadata_path.display().to_string(),
+                source,
+            })?;
+
+        if metadata.job_id != job_id
+            || metadata.name != name
+            || metadata.idempotency_key != idempotency_key
+            || metadata.request_hash != request_hash
+        {
+            return Err(JobError::IdempotencyConflict {
+                key: idempotency_key.to_string(),
+            });
+        }
+
+        Ok(JobCreatedResponse {
+            job_id: metadata.job_id,
+            status: metadata.status,
+            started_at: metadata.started_at,
+        })
+    }
 }
 
 fn validate_inputs(
@@ -566,10 +622,35 @@ pub(super) fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+fn hash_request(name: &str, request_body: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(name.as_bytes());
+    hasher.update([0]);
+    hasher.update(request_body);
+    hex::encode(hasher.finalize())
+}
+
+fn job_id_for_idempotency_key(idempotency_key: &str) -> String {
+    format!("job_{}", &hash_request("job", idempotency_key.as_bytes())[..32])
+}
+
 fn validate_job_id(job_id: &str) -> Result<(), JobError> {
     validate_prefixed_hex_id(job_id, "job_")
         .then_some(())
         .ok_or_else(|| JobError::InvalidJobId(job_id.to_string()))
+}
+
+fn validate_idempotency_key(idempotency_key: &str) -> Result<(), JobError> {
+    if idempotency_key.is_empty() || idempotency_key.len() > 128 {
+        return Err(JobError::InvalidIdempotencyKey(idempotency_key.to_string()));
+    }
+    if !idempotency_key
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(JobError::InvalidIdempotencyKey(idempotency_key.to_string()));
+    }
+    Ok(())
 }
 
 fn validate_prefixed_hex_id(value: &str, prefix: &str) -> bool {

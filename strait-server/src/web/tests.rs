@@ -14,7 +14,10 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tower::util::ServiceExt;
@@ -154,6 +157,67 @@ async fn scheduler_persists_terminal_runner_state() {
     assert_eq!(snapshot.pipeline.status, "success");
     assert_eq!(snapshot.jobs[0].run.status, "success");
     assert!(snapshot.jobs[0].stdout.contains("ok"));
+}
+
+#[tokio::test]
+async fn scheduler_reuses_dispatch_key_after_ambiguous_runner_create_failure() {
+    let mock = spawn_mock_runner_with_fail_first_dispatch().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    let workflow = fixture
+        .state
+        .db
+        .workflows_for_repo(&repo.id)
+        .expect("workflows")
+        .remove(0);
+    let commit_sha = "1".repeat(40);
+    let pipeline_id = scheduler::enqueue_workflow_run(
+        Arc::clone(&fixture.state),
+        &workflow,
+        "push",
+        Some("refs/heads/main"),
+        Some(&commit_sha),
+    )
+    .expect("enqueue");
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect_err("first dispatch should fail ambiguously");
+    let pipeline = fixture
+        .state
+        .db
+        .get_pipeline_run(&pipeline_id)
+        .expect("pipeline")
+        .expect("pipeline should exist");
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.jobs[0].run.status, "pending");
+    assert_eq!(mock.dispatch_count(), 1);
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("reconcile2");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("reconcile3");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("reconcile4");
+
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "success");
+    assert_eq!(snapshot.jobs[0].run.status, "success");
+    assert_eq!(mock.dispatch_count(), 1);
 }
 
 struct TestFixture {
@@ -310,15 +374,28 @@ fn session_cookie_value(state: &Arc<crate::app::AppState>, user_id: &str) -> Str
 
 struct MockRunnerState {
     runs: Mutex<BTreeMap<String, usize>>,
+    dispatches: Mutex<BTreeMap<String, String>>,
+    fail_first_dispatch: AtomicBool,
 }
 
 struct MockRunner {
     base_url: String,
+    state: Arc<MockRunnerState>,
 }
 
 async fn spawn_mock_runner() -> MockRunner {
+    spawn_mock_runner_with_options(false).await
+}
+
+async fn spawn_mock_runner_with_fail_first_dispatch() -> MockRunner {
+    spawn_mock_runner_with_options(true).await
+}
+
+async fn spawn_mock_runner_with_options(fail_first_dispatch: bool) -> MockRunner {
     let state = Arc::new(MockRunnerState {
         runs: Mutex::new(BTreeMap::new()),
+        dispatches: Mutex::new(BTreeMap::new()),
+        fail_first_dispatch: AtomicBool::new(fail_first_dispatch),
     });
     let app = Router::new()
         .route("/jobs", get(mock_list_jobs))
@@ -327,7 +404,7 @@ async fn spawn_mock_runner() -> MockRunner {
         .route("/runs/{job_id}/logs", get(mock_logs))
         .route("/artifacts", post(mock_artifact_upload))
         .route("/artifacts/{artifact_id}", get(mock_artifact_download))
-        .with_state(state);
+        .with_state(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -337,6 +414,13 @@ async fn spawn_mock_runner() -> MockRunner {
     });
     MockRunner {
         base_url: format!("http://{}", addr),
+        state,
+    }
+}
+
+impl MockRunner {
+    fn dispatch_count(&self) -> usize {
+        self.state.dispatches.lock().expect("dispatches").len()
     }
 }
 
@@ -347,9 +431,32 @@ async fn mock_list_jobs() -> Json<JsonValue> {
 async fn mock_create_run(
     State(state): State<Arc<MockRunnerState>>,
     AxumPath(_name): AxumPath<String>,
+    headers: axum::http::HeaderMap,
 ) -> (StatusCode, Json<JsonValue>) {
-    let job_id = Uuid::now_v7().to_string();
-    state.runs.lock().expect("runs").insert(job_id.clone(), 0);
+    let key = headers
+        .get("x-idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("missing")
+        .to_string();
+    let job_id = {
+        let mut dispatches = state.dispatches.lock().expect("dispatches");
+        dispatches
+            .entry(key)
+            .or_insert_with(|| Uuid::now_v7().to_string())
+            .clone()
+    };
+    state
+        .runs
+        .lock()
+        .expect("runs")
+        .entry(job_id.clone())
+        .or_insert(0);
+    if state.fail_first_dispatch.swap(false, Ordering::SeqCst) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error":"simulated ambiguous create failure"})),
+        );
+    }
     (
         StatusCode::CREATED,
         Json(json!({"job_id":job_id,"status":"running","started_at":Utc::now().to_rfc3339()})),
