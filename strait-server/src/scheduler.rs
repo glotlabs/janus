@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
+use chrono::{DateTime, Utc};
 use glob::Pattern;
 use serde_json::{Map, Value, json};
 use tokio::time::{self, Duration, MissedTickBehavior};
@@ -107,19 +108,23 @@ pub(crate) async fn cancel_pipeline(
             .db
             .get_runner(&job.runner_id)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-        if job.status == "running"
+        if job.status == JobStatus::Running.as_str()
             && let (Some(runner), Some(runner_run_id)) = (runner, job.runner_run_id.clone())
         {
-            let _ = state
+            state
                 .runner_client
                 .cancel_job_run(&runner, &runner_run_id)
-                .await;
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            state
+                .db
+                .set_job_run_status(&job.id, JobStatus::CancelRequested.as_str())?;
         }
-        if matches!(job.status.as_str(), "pending" | "running") {
+        if job.status == JobStatus::Pending.as_str() {
             state.db.set_job_run_status(&job.id, "canceled")?;
         }
     }
-    state.db.set_pipeline_status(pipeline_id, "canceled")?;
+    state.db.finalize_pipeline_status(pipeline_id)?;
     Ok(())
 }
 
@@ -153,9 +158,12 @@ async fn process_push_events(state: Arc<AppState>) -> Result<(), Box<dyn std::er
 
 fn recover_incomplete_pipelines(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
     for pipeline in state.db.pipelines_requiring_recovery()? {
-        state
-            .db
-            .set_pipeline_status(&pipeline.id, PipelineStatus::Running.as_str())?;
+        let next_status = match pipeline.status.as_str() {
+            "cancel_requested" => PipelineStatus::CancelRequested,
+            "canceling" => PipelineStatus::Canceling,
+            _ => PipelineStatus::Running,
+        };
+        state.db.set_pipeline_status(&pipeline.id, next_status.as_str())?;
     }
     Ok(())
 }
@@ -213,7 +221,11 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
 }
 
 async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
-    let jobs = state.db.list_job_runs_by_status(&["running"])?;
+    let jobs = state.db.list_job_runs_by_status(&[
+        JobStatus::Running.as_str(),
+        JobStatus::CancelRequested.as_str(),
+        JobStatus::Canceling.as_str(),
+    ])?;
     for job in jobs {
         let Some(runner) = state.db.get_runner(&job.runner_id)? else {
             continue;
@@ -221,9 +233,38 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
         let Some(runner_run_id) = &job.runner_run_id else {
             continue;
         };
+        retry_stuck_cancellation(Arc::clone(&state), &job, &runner, runner_run_id).await?;
         match state.runner_client.get_job_run(&runner, runner_run_id).await {
             Ok(status) => {
-                if !matches!(status.status.as_str(), "running") {
+                match status.status.as_str() {
+                    "running" | "cancel_requested" | "canceling" => {
+                        let next_status = match status.status.as_str() {
+                            "canceling" => JobStatus::Canceling,
+                            "cancel_requested" => {
+                                if job.status == JobStatus::Canceling.as_str() {
+                                    JobStatus::Canceling
+                                } else {
+                                    JobStatus::CancelRequested
+                                }
+                            }
+                            "running" => {
+                                if matches!(
+                                    job.status.as_str(),
+                                    "cancel_requested" | "canceling"
+                                ) {
+                                    JobStatus::parse(&job.status).unwrap_or(JobStatus::Running)
+                                } else {
+                                    JobStatus::Running
+                                }
+                            }
+                            _ => unreachable!(),
+                        };
+                        if job.status != next_status.as_str() {
+                            state.db.set_job_run_status(&job.id, next_status.as_str())?;
+                            state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
+                        }
+                    }
+                    _ => {
                     let logs = state.runner_client.get_job_logs(&runner, runner_run_id).await.unwrap_or_else(|error| {
                         error!(%error, "failed to fetch runner logs");
                         crate::runner::JobLogsResponse { stdout: String::new(), stderr: String::new() }
@@ -253,12 +294,54 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
                     )?;
                     state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
                 }
+                }
             }
             Err(error) => {
                 warn!(%error, job_run_id = %job.id, "runner status polling failed");
             }
         }
     }
+    Ok(())
+}
+
+async fn retry_stuck_cancellation(
+    state: Arc<AppState>,
+    job: &crate::models::JobRun,
+    runner: &crate::models::Runner,
+    runner_run_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let local_status = JobStatus::parse(&job.status);
+    if !matches!(
+        local_status,
+        Some(JobStatus::CancelRequested | JobStatus::Canceling)
+    ) {
+        return Ok(());
+    }
+    let Some(started_at) = job
+        .cancel_started_at
+        .as_deref()
+        .or(job.cancel_requested_at.as_deref())
+    else {
+        return Ok(());
+    };
+    let elapsed = Utc::now()
+        .signed_duration_since(DateTime::parse_from_rfc3339(started_at)?.with_timezone(&Utc));
+    if elapsed.num_seconds() < state.config.scheduler.cancel_stuck_timeout_seconds as i64 {
+        return Ok(());
+    }
+
+    warn!(
+        job_run_id = %job.id,
+        runner_run_id = %runner_run_id,
+        local_status = %job.status,
+        elapsed_seconds = elapsed.num_seconds(),
+        "job cancellation appears stuck; retrying cancel request"
+    );
+    state
+        .runner_client
+        .cancel_job_run(runner, runner_run_id)
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(())
 }
 

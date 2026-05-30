@@ -20,6 +20,7 @@ password = "change-me"
 
 [scheduler]
 poll_interval_ms = 2000
+cancel_stuck_timeout_seconds = 30
 
 [runners]
 healthcheck_interval_seconds = 30

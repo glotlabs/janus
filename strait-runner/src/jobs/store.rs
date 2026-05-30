@@ -27,6 +27,10 @@ use super::{
 };
 
 const REDACTED_INPUT_VALUE: &str = "[REDACTED]";
+const RECOVERY_RUNNING_MESSAGE: &str =
+    "runner restarted before job completion; marking job as failed";
+const RECOVERY_CANCEL_MESSAGE: &str =
+    "runner restarted while canceling the job; marking job as canceled";
 
 #[derive(Debug)]
 pub struct JobStore {
@@ -40,6 +44,7 @@ pub struct JobStore {
 pub(super) struct RunningJob {
     pub(super) job_id: String,
     pub(super) name: String,
+    pub(super) metadata_path: PathBuf,
     pub(super) concurrency: Concurrency,
     pub(super) cancel_tx: watch::Sender<bool>,
 }
@@ -138,6 +143,7 @@ impl JobStore {
                 RunningJob {
                     job_id: job_id.clone(),
                     name: manifest.name.clone(),
+                    metadata_path: self.root_dir.join(&job_id).join("metadata.json"),
                     concurrency: manifest.concurrency.clone(),
                     cancel_tx,
                 },
@@ -269,14 +275,32 @@ impl JobStore {
 
     pub fn cancel_job(&self, job_id: &str) -> Result<(), JobError> {
         validate_job_id(job_id)?;
-        let running_jobs = self.running_jobs.lock().expect("job mutex poisoned");
-        let running_job = running_jobs
+        let running_job = self
+            .running_jobs
+            .lock()
+            .expect("job mutex poisoned")
             .get(job_id)
-            .ok_or_else(|| match self.read_job(job_id) {
-                Ok(_) => JobError::JobNotRunning(job_id.to_string()),
-                Err(JobError::JobNotFound(_)) => JobError::JobNotFound(job_id.to_string()),
-                Err(error) => error,
-            })?;
+            .cloned();
+        let Some(running_job) = running_job else {
+            return match self.read_job(job_id) {
+                Ok(metadata) if matches!(
+                    metadata.status,
+                    JobStatus::CancelRequested | JobStatus::Canceling | JobStatus::Canceled
+                ) =>
+                {
+                    Ok(())
+                }
+                Ok(_) => Err(JobError::JobNotRunning(job_id.to_string())),
+                Err(JobError::JobNotFound(_)) => Err(JobError::JobNotFound(job_id.to_string())),
+                Err(error) => Err(error),
+            };
+        };
+
+        self.transition_metadata_status(
+            &running_job.metadata_path,
+            Some(JobStatus::Running),
+            JobStatus::CancelRequested,
+        )?;
 
         running_job
             .cancel_tx
@@ -341,18 +365,34 @@ impl JobStore {
                 }
             };
 
-            if metadata.status == JobStatus::Running {
-                metadata.status = JobStatus::Failed;
-                metadata.finished_at = Some(now_rfc3339());
-                metadata.exit_code = None;
-                self.persist_metadata(&metadata_path, &metadata)?;
-                append_recovery_message(&stderr_path)?;
-                warn!(
-                    job_id = %metadata.job_id,
-                    job_name = %metadata.name,
-                    "recovered interrupted running job as failed"
-                );
-                recovered += 1;
+            match metadata.status {
+                JobStatus::Running => {
+                    metadata.status = JobStatus::Failed;
+                    metadata.finished_at = Some(now_rfc3339());
+                    metadata.exit_code = None;
+                    self.persist_metadata(&metadata_path, &metadata)?;
+                    append_recovery_message(&stderr_path, RECOVERY_RUNNING_MESSAGE)?;
+                    warn!(
+                        job_id = %metadata.job_id,
+                        job_name = %metadata.name,
+                        "recovered interrupted running job as failed"
+                    );
+                    recovered += 1;
+                }
+                JobStatus::CancelRequested | JobStatus::Canceling => {
+                    metadata.status = JobStatus::Canceled;
+                    metadata.finished_at = Some(now_rfc3339());
+                    metadata.exit_code = None;
+                    self.persist_metadata(&metadata_path, &metadata)?;
+                    append_recovery_message(&stderr_path, RECOVERY_CANCEL_MESSAGE)?;
+                    warn!(
+                        job_id = %metadata.job_id,
+                        job_name = %metadata.name,
+                        "recovered interrupted canceling job as canceled"
+                    );
+                    recovered += 1;
+                }
+                _ => {}
             }
         }
 
@@ -363,6 +403,11 @@ impl JobStore {
         self.shutting_down.store(true, Ordering::SeqCst);
         let running_jobs = self.running_jobs.lock().expect("job mutex poisoned");
         for running_job in running_jobs.values() {
+            let _ = self.transition_metadata_status(
+                &running_job.metadata_path,
+                Some(JobStatus::Running),
+                JobStatus::CancelRequested,
+            );
             let _ = running_job.cancel_tx.send(true);
             warn!(
                 job_id = %running_job.job_id,
@@ -406,6 +451,39 @@ impl JobStore {
         let metadata_json = serde_json::to_vec_pretty(metadata)
             .map_err(|source| JobError::SerializeMetadata { source })?;
         atomic_write(path, &metadata_json).map_err(|source| JobError::WriteFile {
+            path: path.display().to_string(),
+            source,
+        })
+    }
+
+    pub(super) fn transition_metadata_status(
+        &self,
+        path: &Path,
+        expected_current: Option<JobStatus>,
+        next: JobStatus,
+    ) -> Result<(), JobError> {
+        let mut metadata = self.read_metadata_from_path(path)?;
+        if metadata.status.is_terminal() {
+            return Ok(());
+        }
+        if let Some(expected_current) = expected_current
+            && metadata.status != expected_current
+        {
+            return Ok(());
+        }
+        if metadata.status == next {
+            return Ok(());
+        }
+        metadata.status = next;
+        self.persist_metadata(path, &metadata)
+    }
+
+    pub(super) fn read_metadata_from_path(&self, path: &Path) -> Result<JobMetadata, JobError> {
+        let bytes = fs::read(path).map_err(|source| JobError::ReadFile {
+            path: path.display().to_string(),
+            source,
+        })?;
+        serde_json::from_slice(&bytes).map_err(|source| JobError::ParseMetadata {
             path: path.display().to_string(),
             source,
         })
@@ -661,8 +739,7 @@ fn validate_prefixed_hex_id(value: &str, prefix: &str) -> bool {
     suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn append_recovery_message(path: &Path) -> Result<(), JobError> {
-    let message = "runner restarted before job completion; marking job as failed";
+fn append_recovery_message(path: &Path, message: &str) -> Result<(), JobError> {
     let mut stderr = fs::read_to_string(path).unwrap_or_default();
     if !stderr.is_empty() && !stderr.ends_with('\n') {
         stderr.push('\n');

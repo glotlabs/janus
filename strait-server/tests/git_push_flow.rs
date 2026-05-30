@@ -213,6 +213,7 @@ password = "password123"
 
 [scheduler]
 poll_interval_ms = 100
+cancel_stuck_timeout_seconds = 1
 
 [runners]
 healthcheck_interval_seconds = 3600

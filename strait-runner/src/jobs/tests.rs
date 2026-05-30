@@ -1124,6 +1124,11 @@ async fn cancels_running_job_over_http() {
         .expect("request should succeed");
 
     assert_eq!(cancel.status(), StatusCode::ACCEPTED);
+    let metadata = read_metadata(&temp, &created.job_id);
+    assert!(matches!(
+        metadata.status,
+        JobStatus::CancelRequested | JobStatus::Canceling | JobStatus::Canceled
+    ));
 
     let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
     assert_eq!(metadata.status, JobStatus::Canceled);
@@ -1425,6 +1430,90 @@ fn recovers_running_jobs_on_startup() {
         fs::read_to_string(jobs_dir.join("stderr.log"))
             .expect("stderr should read")
             .contains("runner restarted before job completion")
+    );
+}
+
+#[test]
+fn recovers_cancel_requested_jobs_on_startup_as_canceled() {
+    let temp = temp_dir("job_recovery_cancel_requested");
+    let job_id = "job_00000000000000000000000000000002";
+    let jobs_dir = temp.join("jobs").join(job_id);
+    fs::create_dir_all(&jobs_dir).expect("job dir should be created");
+    fs::write(jobs_dir.join("stderr.log"), "").expect("stderr should exist");
+    fs::write(
+        jobs_dir.join("metadata.json"),
+        serde_json::to_vec_pretty(&JobMetadata {
+            job_id: job_id.to_string(),
+            name: "build-app".to_string(),
+            idempotency_key: "dispatch_recovery_cancel_requested".to_string(),
+            request_hash: "abc123".to_string(),
+            status: JobStatus::CancelRequested,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: None,
+            exit_code: None,
+            inputs: Map::new(),
+            resolved_artifacts: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+        })
+        .expect("metadata"),
+    )
+    .expect("metadata written");
+
+    let store = JobStore::new(&temp).expect("job store should init");
+    let recovered = store
+        .recover_interrupted_jobs()
+        .expect("recovery should succeed");
+
+    assert_eq!(recovered, 1);
+    let metadata = store.read_job(job_id).expect("job should load");
+    assert_eq!(metadata.status, JobStatus::Canceled);
+    assert!(metadata.finished_at.is_some());
+    assert!(
+        fs::read_to_string(jobs_dir.join("stderr.log"))
+            .expect("stderr should read")
+            .contains("runner restarted while canceling the job")
+    );
+}
+
+#[test]
+fn recovers_canceling_jobs_on_startup_as_canceled() {
+    let temp = temp_dir("job_recovery_canceling");
+    let job_id = "job_00000000000000000000000000000003";
+    let jobs_dir = temp.join("jobs").join(job_id);
+    fs::create_dir_all(&jobs_dir).expect("job dir should be created");
+    fs::write(jobs_dir.join("stderr.log"), "").expect("stderr should exist");
+    fs::write(
+        jobs_dir.join("metadata.json"),
+        serde_json::to_vec_pretty(&JobMetadata {
+            job_id: job_id.to_string(),
+            name: "build-app".to_string(),
+            idempotency_key: "dispatch_recovery_canceling".to_string(),
+            request_hash: "abc123".to_string(),
+            status: JobStatus::Canceling,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            finished_at: None,
+            exit_code: None,
+            inputs: Map::new(),
+            resolved_artifacts: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+        })
+        .expect("metadata"),
+    )
+    .expect("metadata written");
+
+    let store = JobStore::new(&temp).expect("job store should init");
+    let recovered = store
+        .recover_interrupted_jobs()
+        .expect("recovery should succeed");
+
+    assert_eq!(recovered, 1);
+    let metadata = store.read_job(job_id).expect("job should load");
+    assert_eq!(metadata.status, JobStatus::Canceled);
+    assert!(metadata.finished_at.is_some());
+    assert!(
+        fs::read_to_string(jobs_dir.join("stderr.log"))
+            .expect("stderr should read")
+            .contains("runner restarted while canceling the job")
     );
 }
 
@@ -1979,6 +2068,12 @@ async fn wait_for_terminal_metadata(temp: &Path, job_id: &str) -> JobMetadata {
     }
 
     panic!("job did not reach a terminal state");
+}
+
+fn read_metadata(temp: &Path, job_id: &str) -> JobMetadata {
+    let metadata_path = temp.join("jobs").join(job_id).join("metadata.json");
+    serde_json::from_slice(&fs::read(&metadata_path).expect("metadata should be readable"))
+        .expect("metadata should parse")
 }
 
 async fn wait_for_file(path: &Path) -> String {

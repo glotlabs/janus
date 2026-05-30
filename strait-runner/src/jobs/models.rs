@@ -106,11 +106,22 @@ pub struct JobOutputDefinitionResponse {
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Running,
+    CancelRequested,
+    Canceling,
     Success,
     Failed,
     TimedOut,
     Canceled,
     Rejected,
+}
+
+impl JobStatus {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Success | Self::Failed | Self::TimedOut | Self::Canceled | Self::Rejected
+        )
+    }
 }
 
 pub(super) struct JobExecution {

@@ -49,6 +49,7 @@ pub struct BootstrapAdminConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SchedulerConfig {
     pub poll_interval_ms: u64,
+    pub cancel_stuck_timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -76,6 +76,8 @@ pub struct PipelineRun {
     pub commit_sha: Option<String>,
     pub status: String,
     pub started_at: String,
+    pub cancel_requested_at: Option<String>,
+    pub cancel_started_at: Option<String>,
     pub finished_at: Option<String>,
 }
 
@@ -92,6 +94,8 @@ pub struct JobRun {
     pub status: String,
     pub allow_failure: bool,
     pub started_at: Option<String>,
+    pub cancel_requested_at: Option<String>,
+    pub cancel_started_at: Option<String>,
     pub finished_at: Option<String>,
 }
 

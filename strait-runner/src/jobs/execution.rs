@@ -12,7 +12,7 @@ use tokio::{
     process::{Child, Command},
     sync::mpsc,
     task::JoinHandle,
-    time::{Duration, Instant},
+    time::{Duration, Instant, sleep},
 };
 use tracing::{error, info, warn};
 
@@ -120,6 +120,11 @@ impl JobStore {
 
             tokio::select! {
                 _ = &mut cancel_wait => {
+                    let _ = self.transition_metadata_status(
+                        &execution.metadata_path,
+                        None,
+                        JobStatus::Canceling,
+                    );
                     warn!(
                         job_id = %execution.job_id,
                         job_name = %execution.metadata.name,
@@ -474,7 +479,19 @@ fn log_limit_message(stream_name: &str, limit_bytes: u64) -> String {
 async fn terminate_job(child: &mut Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
-        if unix_kill_process_group(pid as i32).is_ok() {
+        if unix_signal_process_group(pid as i32, SIGTERM).is_ok() {
+            let deadline = Instant::now() + Duration::from_secs(CANCEL_GRACE_PERIOD_SECONDS);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if Instant::now() < deadline => {
+                        sleep(Duration::from_millis(25)).await;
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        }
+        if unix_signal_process_group(pid as i32, SIGKILL).is_ok() {
             let _ = child.wait().await;
             return;
         }
@@ -493,20 +510,25 @@ fn configure_process_group(command: &mut Command) {
 fn configure_process_group(_command: &mut Command) {}
 
 #[cfg(unix)]
-fn unix_kill_process_group(pid: i32) -> std::io::Result<()> {
+fn unix_signal_process_group(pid: i32, signal: i32) -> std::io::Result<()> {
     unsafe extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }
 
-    const SIGKILL: i32 = 9;
-
-    let result = unsafe { kill(-pid, SIGKILL) };
+    let result = unsafe { kill(-pid, signal) };
     if result == 0 {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
     }
 }
+
+#[cfg(unix)]
+const SIGTERM: i32 = 15;
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+#[cfg(unix)]
+const CANCEL_GRACE_PERIOD_SECONDS: u64 = 2;
 
 fn append_error(path: &Path, error: &JobError) -> Result<(), JobError> {
     append_runtime_message(path, &error.to_string())

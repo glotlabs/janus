@@ -288,7 +288,7 @@ async fn pipelines_page(CurrentUser(user): CurrentUser, State(state): State<Arc<
     for pipeline in pipelines {
         if let Some(repo) = repo_by_id.get(&pipeline.repo_id) {
             if !can_view_repo(&user, repo) { continue; }
-            body.push_str(&format!("<li><a href=\"/pipelines/{}\">{}</a> {} {} {}/{}</li>", pipeline.id, pipeline.id, html_escape(&pipeline.status), html_escape(&pipeline.trigger_ref.clone().unwrap_or_default()), html_escape(&repo.owner_username), html_escape(&repo.name)));
+            body.push_str(&format!("<li><a href=\"/pipelines/{}\">{}</a> {} {} {}/{}</li>", pipeline.id, pipeline.id, html_escape(&display_status(&pipeline.status)), html_escape(&pipeline.trigger_ref.clone().unwrap_or_default()), html_escape(&repo.owner_username), html_escape(&repo.name)));
         }
     }
     body.push_str("</ul>");
@@ -299,9 +299,9 @@ async fn pipeline_detail(CurrentUser(user): CurrentUser, State(state): State<Arc
     let pipeline = authorized_pipeline(&state, &user, &pipeline_id)?;
     let snapshot = state.db.pipeline_snapshot(&pipeline.id).map_err(internal_error)?.ok_or_else(|| not_found("pipeline"))?;
     let csrf = csrf_token(&state, &user);
-    let mut body = format!("<p>Status: {}</p><p>Trigger: {:?}</p><form method=\"post\" action=\"/pipelines/{}/rerun\">{}<button type=\"submit\">Rerun</button></form><form method=\"post\" action=\"/pipelines/{}/cancel\">{}<button type=\"submit\">Cancel</button></form><ul>", html_escape(&snapshot.pipeline.status), snapshot.pipeline.trigger_ref, snapshot.pipeline.id, csrf_input(&csrf), snapshot.pipeline.id, csrf_input(&csrf));
+    let mut body = format!("<p>Status: {}</p><p>Trigger: {:?}</p><p>Cancel Requested At: {}</p><p>Cancel Started At: {}</p><form method=\"post\" action=\"/pipelines/{}/rerun\">{}<button type=\"submit\">Rerun</button></form><form method=\"post\" action=\"/pipelines/{}/cancel\">{}<button type=\"submit\">Cancel</button></form><ul>", html_escape(&display_status(&snapshot.pipeline.status)), snapshot.pipeline.trigger_ref, html_escape(&snapshot.pipeline.cancel_requested_at.clone().unwrap_or_default()), html_escape(&snapshot.pipeline.cancel_started_at.clone().unwrap_or_default()), snapshot.pipeline.id, csrf_input(&csrf), snapshot.pipeline.id, csrf_input(&csrf));
     for job in snapshot.jobs {
-        body.push_str(&format!("<li><strong>{}</strong> [{}] runner={}<pre>{}</pre><pre>{}</pre></li>", html_escape(&job.run.job_name), html_escape(&job.run.status), html_escape(&job.run.runner_job_name), html_escape(&job.stdout), html_escape(&job.stderr)));
+        body.push_str(&format!("<li><strong>{}</strong> [{}] runner={} cancel_requested_at={} cancel_started_at={}<pre>{}</pre><pre>{}</pre></li>", html_escape(&job.run.job_name), html_escape(&display_status(&job.run.status)), html_escape(&job.run.runner_job_name), html_escape(&job.run.cancel_requested_at.clone().unwrap_or_default()), html_escape(&job.run.cancel_started_at.clone().unwrap_or_default()), html_escape(&job.stdout), html_escape(&job.stderr)));
     }
     body.push_str("</ul><script>const e=new EventSource('/pipelines/");
     body.push_str(&pipeline.id);
@@ -421,6 +421,14 @@ async fn refresh_single_runner(state: &Arc<AppState>, runner_id: &str) -> Result
 }
 
 struct ParsedWorkflow { trigger_json: String, definition_json: String }
+
+fn display_status(status: &str) -> String {
+    match status {
+        "cancel_requested" => "cancel requested".to_string(),
+        "canceling" => "stopping".to_string(),
+        _ => status.to_string(),
+    }
+}
 
 fn parse_workflow_form(state: &Arc<AppState>, form: &WorkflowForm) -> Result<ParsedWorkflow, Response> {
     if form.name.trim().is_empty() { return Err(bad_request("workflow name cannot be empty")); }

@@ -20,6 +20,7 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::time::sleep;
 use tower::util::ServiceExt;
 use uuid::Uuid;
 
@@ -220,6 +221,147 @@ async fn scheduler_reuses_dispatch_key_after_ambiguous_runner_create_failure() {
     assert_eq!(mock.dispatch_count(), 1);
 }
 
+#[tokio::test]
+async fn cancel_pipeline_tracks_runner_cancel_progress() {
+    let mock = spawn_mock_runner().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .create_push_event(
+            &repo.id,
+            "event-cancel",
+            &[crate::models::PushEventRef {
+                old_rev: "0".repeat(40),
+                new_rev: "1".repeat(40),
+                ref_name: "refs/heads/main".to_string(),
+            }],
+        )
+        .expect("push event");
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("dispatch");
+    let pipeline = fixture
+        .state
+        .db
+        .list_pipeline_runs()
+        .expect("pipelines")
+        .remove(0);
+
+    scheduler::cancel_pipeline(Arc::clone(&fixture.state), &pipeline.id)
+        .await
+        .expect("cancel");
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "cancel_requested");
+    assert_eq!(snapshot.jobs[0].run.status, "cancel_requested");
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("poll cancel requested");
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "cancel_requested");
+    assert_eq!(snapshot.jobs[0].run.status, "cancel_requested");
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("poll canceling");
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "canceling");
+    assert_eq!(snapshot.jobs[0].run.status, "canceling");
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("poll canceled");
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "canceled");
+    assert_eq!(snapshot.jobs[0].run.status, "canceled");
+}
+
+#[tokio::test]
+async fn scheduler_retries_stuck_cancellation() {
+    let mock = spawn_mock_runner_with_stuck_cancellation().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .create_push_event(
+            &repo.id,
+            "event-stuck-cancel",
+            &[crate::models::PushEventRef {
+                old_rev: "0".repeat(40),
+                new_rev: "1".repeat(40),
+                ref_name: "refs/heads/main".to_string(),
+            }],
+        )
+        .expect("push event");
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("dispatch");
+    let pipeline = fixture
+        .state
+        .db
+        .list_pipeline_runs()
+        .expect("pipelines")
+        .remove(0);
+
+    scheduler::cancel_pipeline(Arc::clone(&fixture.state), &pipeline.id)
+        .await
+        .expect("cancel");
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    let runner_run_id = snapshot.jobs[0]
+        .run
+        .runner_run_id
+        .clone()
+        .expect("runner run id");
+    assert_eq!(mock.cancel_count(&runner_run_id), 1);
+
+    sleep(std::time::Duration::from_millis(1100)).await;
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("reconcile stuck cancel");
+
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "cancel_requested");
+    assert_eq!(snapshot.jobs[0].run.status, "cancel_requested");
+    assert!(mock.cancel_count(&runner_run_id) >= 2);
+}
+
 struct TestFixture {
     state: Arc<crate::app::AppState>,
     app: Router,
@@ -236,9 +378,22 @@ async fn test_fixture_with_runner(base_url: &str) -> TestFixture {
     let config_path = write_test_config(&dir);
     let state = build_state(config_path, PathBuf::from("/bin/strait-server")).expect("state");
     let hash = hash_password("password123").expect("hash");
-    state.db.create_user("alice", &hash, "developer").expect("user");
-    let user = state.db.get_user_credentials("alice").expect("creds").unwrap().0;
-    let runner_id = state.db.create_runner("runner1", base_url, "token").expect("runner");
+    let username = format!("alice-{}", Uuid::now_v7());
+    state
+        .db
+        .create_user(&username, &hash, "developer")
+        .expect("user");
+    let user = state
+        .db
+        .get_user_credentials(&username)
+        .expect("creds")
+        .unwrap()
+        .0;
+    let runner_name = format!("runner-{}", Uuid::now_v7());
+    let runner_id = state
+        .db
+        .create_runner(&runner_name, base_url, "token")
+        .expect("runner");
     if base_url != "http://127.0.0.1:9" {
         state
             .db
@@ -336,6 +491,7 @@ password = "password123"
 
 [scheduler]
 poll_interval_ms = 50
+cancel_stuck_timeout_seconds = 1
 
 [runners]
 healthcheck_interval_seconds = 60
@@ -373,9 +529,17 @@ fn session_cookie_value(state: &Arc<crate::app::AppState>, user_id: &str) -> Str
 }
 
 struct MockRunnerState {
-    runs: Mutex<BTreeMap<String, usize>>,
+    runs: Mutex<BTreeMap<String, MockRun>>,
     dispatches: Mutex<BTreeMap<String, String>>,
+    cancel_requests: Mutex<BTreeMap<String, usize>>,
     fail_first_dispatch: AtomicBool,
+    stall_cancellation: AtomicBool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MockRun {
+    polls: usize,
+    cancel_stage: Option<u8>,
 }
 
 struct MockRunner {
@@ -384,18 +548,27 @@ struct MockRunner {
 }
 
 async fn spawn_mock_runner() -> MockRunner {
-    spawn_mock_runner_with_options(false).await
+    spawn_mock_runner_with_options(false, false).await
 }
 
 async fn spawn_mock_runner_with_fail_first_dispatch() -> MockRunner {
-    spawn_mock_runner_with_options(true).await
+    spawn_mock_runner_with_options(true, false).await
 }
 
-async fn spawn_mock_runner_with_options(fail_first_dispatch: bool) -> MockRunner {
+async fn spawn_mock_runner_with_stuck_cancellation() -> MockRunner {
+    spawn_mock_runner_with_options(false, true).await
+}
+
+async fn spawn_mock_runner_with_options(
+    fail_first_dispatch: bool,
+    stall_cancellation: bool,
+) -> MockRunner {
     let state = Arc::new(MockRunnerState {
         runs: Mutex::new(BTreeMap::new()),
         dispatches: Mutex::new(BTreeMap::new()),
+        cancel_requests: Mutex::new(BTreeMap::new()),
         fail_first_dispatch: AtomicBool::new(fail_first_dispatch),
+        stall_cancellation: AtomicBool::new(stall_cancellation),
     });
     let app = Router::new()
         .route("/jobs", get(mock_list_jobs))
@@ -421,6 +594,16 @@ async fn spawn_mock_runner_with_options(fail_first_dispatch: bool) -> MockRunner
 impl MockRunner {
     fn dispatch_count(&self) -> usize {
         self.state.dispatches.lock().expect("dispatches").len()
+    }
+
+    fn cancel_count(&self, job_id: &str) -> usize {
+        self.state
+            .cancel_requests
+            .lock()
+            .expect("cancel requests")
+            .get(job_id)
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -450,7 +633,10 @@ async fn mock_create_run(
         .lock()
         .expect("runs")
         .entry(job_id.clone())
-        .or_insert(0);
+        .or_insert(MockRun {
+            polls: 0,
+            cancel_stage: None,
+        });
     if state.fail_first_dispatch.swap(false, Ordering::SeqCst) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -468,9 +654,40 @@ async fn mock_get_run(
     AxumPath(job_id): AxumPath<String>,
 ) -> Json<JsonValue> {
     let mut runs = state.runs.lock().expect("runs");
-    let attempts = runs.entry(job_id.clone()).or_insert(0);
-    *attempts += 1;
-    if *attempts >= 2 {
+    let run = runs.entry(job_id.clone()).or_insert(MockRun {
+        polls: 0,
+        cancel_stage: None,
+    });
+    if let Some(stage) = run.cancel_stage {
+        if state.stall_cancellation.load(Ordering::SeqCst) {
+            return Json(json!({
+                "job_id": job_id,
+                "name": "build-app",
+                "status": "running",
+                "started_at": Utc::now().to_rfc3339(),
+                "finished_at": null,
+                "exit_code": null,
+                "outputs": {}
+            }));
+        }
+        run.cancel_stage = Some(stage.saturating_add(1));
+        let status = match stage {
+            0 => "cancel_requested",
+            1 => "canceling",
+            _ => "canceled",
+        };
+        return Json(json!({
+            "job_id": job_id,
+            "name": "build-app",
+            "status": status,
+            "started_at": Utc::now().to_rfc3339(),
+            "finished_at": if status == "canceled" { json!(Utc::now().to_rfc3339()) } else { JsonValue::Null },
+            "exit_code": null,
+            "outputs": {}
+        }));
+    }
+    run.polls += 1;
+    if run.polls >= 2 {
         Json(json!({
             "job_id": job_id,
             "name": "build-app",
@@ -497,7 +714,17 @@ async fn mock_logs() -> Json<JsonValue> {
     Json(json!({"stdout":"ok\n","stderr":""}))
 }
 
-async fn mock_cancel_run() -> StatusCode {
+async fn mock_cancel_run(
+    State(state): State<Arc<MockRunnerState>>,
+    AxumPath(job_id): AxumPath<String>,
+) -> StatusCode {
+    {
+        let mut cancel_requests = state.cancel_requests.lock().expect("cancel requests");
+        *cancel_requests.entry(job_id.clone()).or_insert(0) += 1;
+    }
+    if let Some(run) = state.runs.lock().expect("runs").get_mut(&job_id) {
+        run.cancel_stage = Some(0);
+    }
     StatusCode::ACCEPTED
 }
 

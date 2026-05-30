@@ -2,6 +2,8 @@
 pub enum JobStatus {
     Pending,
     Running,
+    CancelRequested,
+    Canceling,
     Success,
     Failed,
     Canceled,
@@ -14,6 +16,8 @@ impl JobStatus {
         match value {
             "pending" => Some(Self::Pending),
             "running" => Some(Self::Running),
+            "cancel_requested" => Some(Self::CancelRequested),
+            "canceling" => Some(Self::Canceling),
             "success" => Some(Self::Success),
             "failed" => Some(Self::Failed),
             "canceled" => Some(Self::Canceled),
@@ -27,6 +31,8 @@ impl JobStatus {
         match self {
             Self::Pending => "pending",
             Self::Running => "running",
+            Self::CancelRequested => "cancel_requested",
+            Self::Canceling => "canceling",
             Self::Success => "success",
             Self::Failed => "failed",
             Self::Canceled => "canceled",
@@ -40,6 +46,8 @@ impl JobStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineStatus {
     Running,
+    CancelRequested,
+    Canceling,
     Success,
     Failed,
     Canceled,
@@ -50,6 +58,8 @@ impl PipelineStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
+            Self::CancelRequested => "cancel_requested",
+            Self::Canceling => "canceling",
             Self::Success => "success",
             Self::Failed => "failed",
             Self::Canceled => "canceled",
@@ -65,7 +75,15 @@ pub fn next_ready_job_status(
     if statuses.iter().any(|(status, allow_failure)| *status == JobStatus::Failed && !allow_failure) {
         return Some(JobStatus::Blocked);
     }
-    if statuses.iter().any(|(status, _)| matches!(status, JobStatus::Pending | JobStatus::Running)) {
+    if statuses.iter().any(|(status, _)| {
+        matches!(
+            status,
+            JobStatus::Pending
+                | JobStatus::Running
+                | JobStatus::CancelRequested
+                | JobStatus::Canceling
+        )
+    }) {
         return None;
     }
     if statuses.iter().any(|(status, _)| *status == JobStatus::Canceled) {
@@ -96,6 +114,15 @@ pub fn terminal_pipeline_status(
     }
     if statuses.iter().all(|(status, _)| *status == JobStatus::Canceled) && !statuses.is_empty() {
         return PipelineStatus::Canceled;
+    }
+    if statuses.iter().any(|(status, _)| *status == JobStatus::Canceling) {
+        return PipelineStatus::Canceling;
+    }
+    if statuses
+        .iter()
+        .any(|(status, _)| *status == JobStatus::CancelRequested)
+    {
+        return PipelineStatus::CancelRequested;
     }
     PipelineStatus::Running
 }
