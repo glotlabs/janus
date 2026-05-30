@@ -6,7 +6,7 @@ use tokio::time::{self, Duration, MissedTickBehavior};
 use tracing::{error, info, warn};
 
 use crate::{
-    AppState, git,
+    app::AppState, git,
     models::{WorkflowDefinition, WorkflowTrigger},
     state_machine::{self, JobStatus, PipelineStatus},
 };

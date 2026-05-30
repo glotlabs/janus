@@ -13,7 +13,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use crate::{AppState, models::User};
+use crate::{app::AppState, models::User};
 
 const SESSION_COOKIE: &str = "strait_session";
 type HmacSha256 = Hmac<Sha256>;
