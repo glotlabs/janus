@@ -106,6 +106,8 @@ pub struct JobRun {
     pub cancel_started_at: Option<String>,
     pub cancel_retry_count: i64,
     pub last_cancel_retry_at: Option<String>,
+    pub infra_retry_count: i64,
+    pub last_infra_retry_at: Option<String>,
     pub finished_at: Option<String>,
     pub output_metadata: JobOutputMetadata,
 }

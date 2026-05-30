@@ -22,6 +22,7 @@ password = "change-me"
 poll_interval_ms = 2000
 cancel_stuck_timeout_seconds = 30
 max_cancel_retries = 3
+max_infra_retries = 2
 
 [runners]
 healthcheck_interval_seconds = 30

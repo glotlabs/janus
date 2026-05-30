@@ -165,6 +165,84 @@ async fn scheduler_persists_terminal_runner_state() {
 }
 
 #[tokio::test]
+async fn scheduler_persists_timeout_runner_state() {
+    let mock = spawn_mock_runner_with_timeout().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .create_push_event(
+            &repo.id,
+            "event-timeout",
+            &[crate::models::PushEventRef {
+                old_rev: "0".repeat(40),
+                new_rev: "1".repeat(40),
+                ref_name: "refs/heads/main".to_string(),
+            }],
+        )
+        .expect("push event");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("reconcile1");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("reconcile2");
+    let pipeline = fixture.state.db.list_pipeline_runs().expect("pipelines").remove(0);
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "failed");
+    assert_eq!(snapshot.jobs[0].run.status, "failed");
+    assert_eq!(snapshot.jobs[0].run.terminal_reason.as_deref(), Some("timeout"));
+    assert_eq!(snapshot.jobs[0].run.failure_category.as_deref(), Some("timeout"));
+    assert_eq!(snapshot.jobs[0].run.exit_code, None);
+}
+
+#[tokio::test]
+async fn scheduler_persists_job_failure_runner_state() {
+    let mock = spawn_mock_runner_with_job_failure().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .create_push_event(
+            &repo.id,
+            "event-job-failed",
+            &[crate::models::PushEventRef {
+                old_rev: "0".repeat(40),
+                new_rev: "1".repeat(40),
+                ref_name: "refs/heads/main".to_string(),
+            }],
+        )
+        .expect("push event");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("reconcile1");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("reconcile2");
+    let pipeline = fixture.state.db.list_pipeline_runs().expect("pipelines").remove(0);
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "failed");
+    assert_eq!(snapshot.jobs[0].run.status, "failed");
+    assert_eq!(snapshot.jobs[0].run.terminal_reason.as_deref(), Some("exit_code"));
+    assert_eq!(snapshot.jobs[0].run.failure_category.as_deref(), Some("job"));
+    assert_eq!(snapshot.jobs[0].run.exit_code, Some(7));
+}
+
+#[tokio::test]
 async fn scheduler_reuses_dispatch_key_after_ambiguous_runner_create_failure() {
     let mock = spawn_mock_runner_with_fail_first_dispatch().await;
     let fixture = test_fixture_with_runner(&mock.base_url).await;
@@ -304,6 +382,119 @@ async fn cancel_pipeline_tracks_runner_cancel_progress() {
         .unwrap();
     assert_eq!(snapshot.pipeline.status, "canceled");
     assert_eq!(snapshot.jobs[0].run.status, "canceled");
+    assert_eq!(snapshot.jobs[0].run.terminal_reason.as_deref(), Some("canceled"));
+    assert_eq!(snapshot.jobs[0].run.failure_category.as_deref(), Some("canceled"));
+    assert_eq!(snapshot.jobs[0].run.duration_ms, Some(1000));
+}
+
+#[tokio::test]
+async fn scheduler_retries_infra_failure_and_recovers() {
+    let mock = spawn_mock_runner_with_infra_failure_once().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .create_push_event(
+            &repo.id,
+            "event-infra-retry",
+            &[crate::models::PushEventRef {
+                old_rev: "0".repeat(40),
+                new_rev: "1".repeat(40),
+                ref_name: "refs/heads/main".to_string(),
+            }],
+        )
+        .expect("push event");
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("dispatch1");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("poll infra failure");
+    let pipeline = fixture.state.db.list_pipeline_runs().expect("pipelines").remove(0);
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "running");
+    assert_eq!(snapshot.jobs[0].run.status, "pending");
+    assert_eq!(snapshot.jobs[0].run.infra_retry_count, 1);
+    assert!(snapshot.jobs[0].run.last_infra_retry_at.is_some());
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("dispatch2");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("poll success");
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "success");
+    assert_eq!(snapshot.jobs[0].run.status, "success");
+    assert_eq!(snapshot.jobs[0].run.infra_retry_count, 1);
+    assert_eq!(mock.dispatch_count(), 2);
+}
+
+#[tokio::test]
+async fn scheduler_fails_job_after_infra_retry_budget_exhausted() {
+    let mock = spawn_mock_runner_with_infra_failure().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .create_push_event(
+            &repo.id,
+            "event-infra-exhaust",
+            &[crate::models::PushEventRef {
+                old_rev: "0".repeat(40),
+                new_rev: "1".repeat(40),
+                ref_name: "refs/heads/main".to_string(),
+            }],
+        )
+        .expect("push event");
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("dispatch1");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("poll1");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("dispatch2");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("poll2");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("dispatch3");
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("poll3");
+
+    let pipeline = fixture.state.db.list_pipeline_runs().expect("pipelines").remove(0);
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "failed");
+    assert_eq!(snapshot.jobs[0].run.status, "failed");
+    assert_eq!(snapshot.jobs[0].run.infra_retry_count, 2);
+    assert_eq!(snapshot.jobs[0].run.failure_category.as_deref(), Some("infra"));
+    assert_eq!(snapshot.jobs[0].run.terminal_reason.as_deref(), Some("spawn_error"));
+    assert_eq!(mock.dispatch_count(), 3);
 }
 
 #[tokio::test]
@@ -564,6 +755,7 @@ password = "password123"
 poll_interval_ms = 50
 cancel_stuck_timeout_seconds = 1
 max_cancel_retries = 2
+max_infra_retries = 2
 
 [runners]
 healthcheck_interval_seconds = 60
@@ -606,6 +798,7 @@ struct MockRunnerState {
     cancel_requests: Mutex<BTreeMap<String, usize>>,
     fail_first_dispatch: AtomicBool,
     stall_cancellation: AtomicBool,
+    terminal_outcome: MockTerminalOutcome,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -614,26 +807,53 @@ struct MockRun {
     cancel_stage: Option<u8>,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum MockTerminalOutcome {
+    Success,
+    Timeout,
+    JobFailed,
+    InfraFailed,
+    InfraFailOnceThenSuccess,
+}
+
 struct MockRunner {
     base_url: String,
     state: Arc<MockRunnerState>,
 }
 
 async fn spawn_mock_runner() -> MockRunner {
-    spawn_mock_runner_with_options(false, false).await
+    spawn_mock_runner_with_options(false, false, MockTerminalOutcome::Success).await
 }
 
 async fn spawn_mock_runner_with_fail_first_dispatch() -> MockRunner {
-    spawn_mock_runner_with_options(true, false).await
+    spawn_mock_runner_with_options(true, false, MockTerminalOutcome::Success).await
 }
 
 async fn spawn_mock_runner_with_stuck_cancellation() -> MockRunner {
-    spawn_mock_runner_with_options(false, true).await
+    spawn_mock_runner_with_options(false, true, MockTerminalOutcome::Success).await
+}
+
+async fn spawn_mock_runner_with_timeout() -> MockRunner {
+    spawn_mock_runner_with_options(false, false, MockTerminalOutcome::Timeout).await
+}
+
+async fn spawn_mock_runner_with_job_failure() -> MockRunner {
+    spawn_mock_runner_with_options(false, false, MockTerminalOutcome::JobFailed).await
+}
+
+async fn spawn_mock_runner_with_infra_failure() -> MockRunner {
+    spawn_mock_runner_with_options(false, false, MockTerminalOutcome::InfraFailed).await
+}
+
+async fn spawn_mock_runner_with_infra_failure_once() -> MockRunner {
+    spawn_mock_runner_with_options(false, false, MockTerminalOutcome::InfraFailOnceThenSuccess)
+        .await
 }
 
 async fn spawn_mock_runner_with_options(
     fail_first_dispatch: bool,
     stall_cancellation: bool,
+    terminal_outcome: MockTerminalOutcome,
 ) -> MockRunner {
     let state = Arc::new(MockRunnerState {
         runs: Mutex::new(BTreeMap::new()),
@@ -641,6 +861,7 @@ async fn spawn_mock_runner_with_options(
         cancel_requests: Mutex::new(BTreeMap::new()),
         fail_first_dispatch: AtomicBool::new(fail_first_dispatch),
         stall_cancellation: AtomicBool::new(stall_cancellation),
+        terminal_outcome,
     });
     let app = Router::new()
         .route("/jobs", get(mock_list_jobs))
@@ -776,19 +997,36 @@ async fn mock_get_run(
     }
     run.polls += 1;
     if run.polls >= 2 {
+        let dispatch_count = state.dispatches.lock().expect("dispatches").len();
+        let (status, exit_code, terminal_reason, failure_category, stdout_bytes) =
+            match state.terminal_outcome {
+                MockTerminalOutcome::Success => ("success", Some(0), Some("success"), None, 3),
+                MockTerminalOutcome::Timeout => ("failed", None, Some("timeout"), Some("timeout"), 0),
+                MockTerminalOutcome::JobFailed => ("failed", Some(7), Some("exit_code"), Some("job"), 0),
+                MockTerminalOutcome::InfraFailed => {
+                    ("failed", None, Some("spawn_error"), Some("infra"), 0)
+                }
+                MockTerminalOutcome::InfraFailOnceThenSuccess => {
+                    if dispatch_count >= 2 {
+                        ("success", Some(0), Some("success"), None, 3)
+                    } else {
+                        ("failed", None, Some("spawn_error"), Some("infra"), 0)
+                    }
+                }
+            };
         Json(json!({
             "job_id": job_id,
             "name": "build-app",
-            "status": "success",
+            "status": status,
             "started_at": Utc::now().to_rfc3339(),
             "finished_at": Utc::now().to_rfc3339(),
             "duration_ms": 1000,
-            "exit_code": 0,
-            "terminal_reason": "success",
-            "failure_category": null,
+            "exit_code": exit_code,
+            "terminal_reason": terminal_reason,
+            "failure_category": failure_category,
             "outputs": {},
             "output_metadata": {
-                "stdout": {"bytes": 3, "truncated": false},
+                "stdout": {"bytes": stdout_bytes, "truncated": false},
                 "stderr": {"bytes": 0, "truncated": false},
                 "artifacts": {"count": 0, "bytes": 0}
             }

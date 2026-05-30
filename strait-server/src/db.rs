@@ -625,7 +625,7 @@ impl Database {
         allow_failure: bool,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let id = Uuid::now_v7().to_string();
-        let dispatch_idempotency_key = format!("dispatch_{}", Uuid::now_v7().simple());
+        let dispatch_idempotency_key = next_dispatch_idempotency_key();
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
             "INSERT INTO job_runs (id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, status, allow_failure)
@@ -749,7 +749,7 @@ impl Database {
             return Ok(None);
         };
         let mut stmt = conn.prepare(
-            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, finished_at, output_metadata_json
+            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json
              FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_name",
         )?;
         let job_rows = stmt
@@ -775,8 +775,10 @@ impl Database {
                     cancel_started_at: row.get(17)?,
                     cancel_retry_count: row.get(18)?,
                     last_cancel_retry_at: row.get(19)?,
-                    finished_at: row.get(20)?,
-                    output_metadata: parse_output_metadata(row.get(21)?),
+                    infra_retry_count: row.get(20)?,
+                    last_infra_retry_at: row.get(21)?,
+                    finished_at: row.get(22)?,
+                    output_metadata: parse_output_metadata(row.get(23)?),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -826,7 +828,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut query = String::from(
-            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, finished_at, output_metadata_json FROM job_runs WHERE status IN (",
+            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json FROM job_runs WHERE status IN (",
         );
         for idx in 0..statuses.len() {
             if idx > 0 {
@@ -859,8 +861,10 @@ impl Database {
                 cancel_started_at: row.get(17)?,
                 cancel_retry_count: row.get(18)?,
                 last_cancel_retry_at: row.get(19)?,
-                finished_at: row.get(20)?,
-                output_metadata: parse_output_metadata(row.get(21)?),
+                infra_retry_count: row.get(20)?,
+                last_infra_retry_at: row.get(21)?,
+                finished_at: row.get(22)?,
+                output_metadata: parse_output_metadata(row.get(23)?),
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -872,7 +876,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT jr.id, jr.pipeline_run_id, jr.job_id, jr.job_name, jr.runner_id, jr.runner_job_name, jr.dispatch_idempotency_key, jr.runner_run_id, jr.status, jr.allow_failure, jr.started_at, jr.duration_ms, jr.exit_code, jr.terminal_reason, jr.failure_category, jr.cancel_reason, jr.cancel_requested_at, jr.cancel_started_at, jr.cancel_retry_count, jr.last_cancel_retry_at, jr.finished_at, jr.output_metadata_json
+            "SELECT jr.id, jr.pipeline_run_id, jr.job_id, jr.job_name, jr.runner_id, jr.runner_job_name, jr.dispatch_idempotency_key, jr.runner_run_id, jr.status, jr.allow_failure, jr.started_at, jr.duration_ms, jr.exit_code, jr.terminal_reason, jr.failure_category, jr.cancel_reason, jr.cancel_requested_at, jr.cancel_started_at, jr.cancel_retry_count, jr.last_cancel_retry_at, jr.infra_retry_count, jr.last_infra_retry_at, jr.finished_at, jr.output_metadata_json
              FROM job_run_dependencies d
              JOIN job_runs jr ON jr.id = d.depends_on_job_run_id
              WHERE d.job_run_id = ?1",
@@ -899,8 +903,10 @@ impl Database {
                 cancel_started_at: row.get(17)?,
                 cancel_retry_count: row.get(18)?,
                 last_cancel_retry_at: row.get(19)?,
-                finished_at: row.get(20)?,
-                output_metadata: parse_output_metadata(row.get(21)?),
+                infra_retry_count: row.get(20)?,
+                last_infra_retry_at: row.get(21)?,
+                finished_at: row.get(22)?,
+                output_metadata: parse_output_metadata(row.get(23)?),
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1065,6 +1071,48 @@ impl Database {
         Ok(count)
     }
 
+    pub fn requeue_job_run_for_infra_retry(
+        &self,
+        job_run_id: &str,
+    ) -> Result<i64, Box<dyn std::error::Error>> {
+        let mut conn = self.conn.lock().expect("db mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE job_runs
+             SET status = 'pending',
+                 runner_run_id = NULL,
+                 started_at = NULL,
+                 duration_ms = NULL,
+                 exit_code = NULL,
+                 terminal_reason = NULL,
+                 failure_category = NULL,
+                 cancel_reason = NULL,
+                 cancel_requested_at = NULL,
+                 cancel_started_at = NULL,
+                 cancel_retry_count = 0,
+                 last_cancel_retry_at = NULL,
+                 dispatch_idempotency_key = ?3,
+                 infra_retry_count = infra_retry_count + 1,
+                 last_infra_retry_at = ?2,
+                 finished_at = NULL,
+                 output_metadata_json = NULL
+             WHERE id = ?1",
+            params![job_run_id, now(), next_dispatch_idempotency_key()],
+        )?;
+        tx.execute(
+            "UPDATE job_run_logs SET stdout = '', stderr = '', updated_at = ?2 WHERE job_run_id = ?1",
+            params![job_run_id, now()],
+        )?;
+        tx.execute("DELETE FROM job_run_artifacts WHERE job_run_id = ?1", [job_run_id])?;
+        let count = tx.query_row(
+            "SELECT infra_retry_count FROM job_runs WHERE id = ?1",
+            [job_run_id],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(count)
+    }
+
     pub fn mark_job_run_cancel_retry_exhausted(
         &self,
         job_run_id: &str,
@@ -1139,7 +1187,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, finished_at, output_metadata_json
+            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json
              FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_name",
         )?;
         let rows = stmt.query_map([pipeline_id], |row| {
@@ -1164,8 +1212,10 @@ impl Database {
                 cancel_started_at: row.get(17)?,
                 cancel_retry_count: row.get(18)?,
                 last_cancel_retry_at: row.get(19)?,
-                finished_at: row.get(20)?,
-                output_metadata: parse_output_metadata(row.get(21)?),
+                infra_retry_count: row.get(20)?,
+                last_infra_retry_at: row.get(21)?,
+                finished_at: row.get(22)?,
+                output_metadata: parse_output_metadata(row.get(23)?),
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1383,6 +1433,10 @@ fn parse_output_metadata(raw: Option<String>) -> JobOutputMetadata {
         .unwrap_or_default()
 }
 
+fn next_dispatch_idempotency_key() -> String {
+    format!("dispatch_{}", Uuid::now_v7().simple())
+}
+
 fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1523,6 +1577,8 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             cancel_started_at TEXT,
             cancel_retry_count INTEGER NOT NULL DEFAULT 0,
             last_cancel_retry_at TEXT,
+            infra_retry_count INTEGER NOT NULL DEFAULT 0,
+            last_infra_retry_at TEXT,
             finished_at TEXT,
             output_metadata_json TEXT,
             FOREIGN KEY(pipeline_run_id) REFERENCES pipeline_runs(id) ON DELETE CASCADE,
@@ -1625,6 +1681,12 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
     }
     if !columns.iter().any(|name| name == "last_cancel_retry_at") {
         tx.execute_batch("ALTER TABLE job_runs ADD COLUMN last_cancel_retry_at TEXT;")?;
+    }
+    if !columns.iter().any(|name| name == "infra_retry_count") {
+        tx.execute_batch("ALTER TABLE job_runs ADD COLUMN infra_retry_count INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    if !columns.iter().any(|name| name == "last_infra_retry_at") {
+        tx.execute_batch("ALTER TABLE job_runs ADD COLUMN last_infra_retry_at TEXT;")?;
     }
     if !columns.iter().any(|name| name == "duration_ms") {
         tx.execute_batch("ALTER TABLE job_runs ADD COLUMN duration_ms INTEGER;")?;

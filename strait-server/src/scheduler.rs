@@ -280,6 +280,17 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
                         error!(%error, "failed to fetch runner logs");
                         crate::runner::JobLogsResponse { stdout: String::new(), stderr: String::new() }
                     });
+                    if should_retry_infra_failure(&job, &status, state.config.scheduler.max_infra_retries) {
+                        let retry_count = state.db.requeue_job_run_for_infra_retry(&job.id)?;
+                        info!(
+                            job_run_id = %job.id,
+                            terminal_reason = ?status.terminal_reason.as_ref().map(|reason| reason.as_str()),
+                            retry_count,
+                            "requeued job after infra-classified terminal failure"
+                        );
+                        state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
+                        continue;
+                    }
                     let outputs = status
                         .outputs
                         .into_iter()
@@ -321,6 +332,19 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
         }
     }
     Ok(())
+}
+
+fn should_retry_infra_failure(
+    job: &crate::models::JobRun,
+    status: &crate::runner::JobStatusResponse,
+    max_infra_retries: u32,
+) -> bool {
+    status.status == "failed"
+        && matches!(
+            status.failure_category,
+            Some(crate::runner::FailureCategory::Infra)
+        )
+        && job.infra_retry_count < i64::from(max_infra_retries)
 }
 
 async fn retry_stuck_cancellation(

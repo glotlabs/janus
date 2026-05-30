@@ -301,7 +301,31 @@ async fn pipeline_detail(CurrentUser(user): CurrentUser, State(state): State<Arc
     let csrf = csrf_token(&state, &user);
     let mut body = format!("<p>Status: {}</p><p>Trigger: {:?}</p><p>Cancel Reason: {}</p><p>Cancel Requested At: {}</p><p>Cancel Started At: {}</p><form method=\"post\" action=\"/pipelines/{}/rerun\">{}<button type=\"submit\">Rerun</button></form><form method=\"post\" action=\"/pipelines/{}/cancel\">{}<button type=\"submit\">Cancel</button></form><ul>", html_escape(&display_status(&snapshot.pipeline.status)), snapshot.pipeline.trigger_ref, html_escape(&snapshot.pipeline.cancel_reason.clone().unwrap_or_default()), html_escape(&snapshot.pipeline.cancel_requested_at.clone().unwrap_or_default()), html_escape(&snapshot.pipeline.cancel_started_at.clone().unwrap_or_default()), snapshot.pipeline.id, csrf_input(&csrf), snapshot.pipeline.id, csrf_input(&csrf));
     for job in snapshot.jobs {
-        body.push_str(&format!("<li><strong>{}</strong> [{}] runner={} cancel_reason={} cancel_requested_at={} cancel_started_at={} cancel_retry_count={} last_cancel_retry_at={}<pre>{}</pre><pre>{}</pre></li>", html_escape(&job.run.job_name), html_escape(&display_status(&job.run.status)), html_escape(&job.run.runner_job_name), html_escape(&job.run.cancel_reason.clone().unwrap_or_default()), html_escape(&job.run.cancel_requested_at.clone().unwrap_or_default()), html_escape(&job.run.cancel_started_at.clone().unwrap_or_default()), job.run.cancel_retry_count, html_escape(&job.run.last_cancel_retry_at.clone().unwrap_or_default()), html_escape(&job.stdout), html_escape(&job.stderr)));
+        body.push_str(&format!(
+            "<li><strong>{}</strong> [{}] runner={} failure_category={} terminal_reason={} exit_code={} duration_ms={} cancel_reason={} cancel_requested_at={} cancel_started_at={} cancel_retry_count={} last_cancel_retry_at={} infra_retry_count={} last_infra_retry_at={} stdout={}B truncated={} stderr={}B truncated={} artifacts={} files/{}B<pre>{}</pre><pre>{}</pre></li>",
+            html_escape(&job.run.job_name),
+            html_escape(&display_status(&job.run.status)),
+            html_escape(&job.run.runner_job_name),
+            html_escape(&render_optional(job.run.failure_category.as_deref())),
+            html_escape(&render_optional(job.run.terminal_reason.as_deref())),
+            html_escape(&render_optional(job.run.exit_code.map(|value| value.to_string()).as_deref())),
+            html_escape(&render_optional(job.run.duration_ms.map(|value| value.to_string()).as_deref())),
+            html_escape(&job.run.cancel_reason.clone().unwrap_or_default()),
+            html_escape(&job.run.cancel_requested_at.clone().unwrap_or_default()),
+            html_escape(&job.run.cancel_started_at.clone().unwrap_or_default()),
+            job.run.cancel_retry_count,
+            html_escape(&job.run.last_cancel_retry_at.clone().unwrap_or_default()),
+            job.run.infra_retry_count,
+            html_escape(&job.run.last_infra_retry_at.clone().unwrap_or_default()),
+            job.run.output_metadata.stdout.bytes,
+            job.run.output_metadata.stdout.truncated,
+            job.run.output_metadata.stderr.bytes,
+            job.run.output_metadata.stderr.truncated,
+            job.run.output_metadata.artifacts.count,
+            job.run.output_metadata.artifacts.bytes,
+            html_escape(&job.stdout),
+            html_escape(&job.stderr)
+        ));
     }
     body.push_str("</ul><script>const e=new EventSource('/pipelines/");
     body.push_str(&pipeline.id);
@@ -426,8 +450,13 @@ fn display_status(status: &str) -> String {
     match status {
         "cancel_requested" => "cancel requested".to_string(),
         "canceling" => "stopping".to_string(),
+        "failed" => "failed".to_string(),
         _ => status.to_string(),
     }
+}
+
+fn render_optional(value: Option<&str>) -> String {
+    value.unwrap_or_default().to_string()
 }
 
 fn parse_workflow_form(state: &Arc<AppState>, form: &WorkflowForm) -> Result<ParsedWorkflow, Response> {

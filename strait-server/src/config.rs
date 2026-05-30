@@ -51,6 +51,7 @@ pub struct SchedulerConfig {
     pub poll_interval_ms: u64,
     pub cancel_stuck_timeout_seconds: u64,
     pub max_cancel_retries: u32,
+    pub max_infra_retries: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
