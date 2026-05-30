@@ -120,6 +120,27 @@ impl RunnerClient {
         Ok(response.json().await?)
     }
 
+    pub async fn cancel_job_run(
+        &self,
+        runner: &Runner,
+        runner_run_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let response = self
+            .http
+            .delete(format!(
+                "{}/runs/{}",
+                runner.base_url.trim_end_matches('/'),
+                runner_run_id
+            ))
+            .bearer_auth(&runner.token)
+            .send()
+            .await?;
+        if response.status() != StatusCode::ACCEPTED {
+            return Err(format!("runner cancel failed with {}", response.status()).into());
+        }
+        Ok(())
+    }
+
     pub async fn download_artifact(
         &self,
         runner: &Runner,

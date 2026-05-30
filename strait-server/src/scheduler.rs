@@ -37,10 +37,86 @@ pub fn spawn(state: Arc<AppState>) {
     });
 }
 
-async fn reconcile(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn reconcile_once(
+    state: Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    recover_incomplete_pipelines(Arc::clone(&state))?;
     process_push_events(Arc::clone(&state)).await?;
     dispatch_pending_jobs(Arc::clone(&state)).await?;
     poll_running_jobs(state).await?;
+    Ok(())
+}
+
+async fn reconcile(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
+    reconcile_once(state).await
+}
+
+pub(crate) fn enqueue_workflow_run(
+    state: Arc<AppState>,
+    workflow: &crate::models::Workflow,
+    trigger_type: &str,
+    trigger_ref: Option<&str>,
+    commit_sha: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)?;
+    definition.validate().map_err(std::io::Error::other)?;
+    let pipeline_id = state.db.create_pipeline_run(
+        &workflow.repo_id,
+        &workflow.id,
+        &workflow.version_id,
+        trigger_type,
+        trigger_ref,
+        commit_sha,
+    )?;
+    let mut run_ids = BTreeMap::new();
+    for job in &definition.jobs {
+        let run_id = state.db.create_job_run(
+            &pipeline_id,
+            &job.id,
+            &job.name,
+            &job.runner_id,
+            &job.runner_job_name,
+            job.allow_failure,
+        )?;
+        run_ids.insert(job.id.clone(), run_id);
+    }
+    for job in &definition.jobs {
+        for need in &job.needs {
+            if let (Some(job_run_id), Some(dep_run_id)) = (run_ids.get(&job.id), run_ids.get(need))
+            {
+                state.db.add_job_dependency(job_run_id, dep_run_id)?;
+            }
+        }
+    }
+    Ok(pipeline_id)
+}
+
+pub(crate) async fn cancel_pipeline(
+    state: Arc<AppState>,
+    pipeline_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let jobs = state
+        .db
+        .list_job_runs_for_pipeline(pipeline_id)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    for job in jobs {
+        let runner = state
+            .db
+            .get_runner(&job.runner_id)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if job.status == "running"
+            && let (Some(runner), Some(runner_run_id)) = (runner, job.runner_run_id.clone())
+        {
+            let _ = state
+                .runner_client
+                .cancel_job_run(&runner, &runner_run_id)
+                .await;
+        }
+        if matches!(job.status.as_str(), "pending" | "running") {
+            state.db.set_job_run_status(&job.id, "canceled")?;
+        }
+    }
+    state.db.set_pipeline_status(pipeline_id, "canceled")?;
     Ok(())
 }
 
@@ -57,44 +133,24 @@ async fn process_push_events(state: Arc<AppState>) -> Result<(), Box<dyn std::er
                 if !matches_branch(&trigger.branches, &ref_update.ref_name) {
                     continue;
                 }
-                let Some(workflow_version_id) = state.db.latest_workflow_version_id(&workflow.id)? else {
-                    continue;
-                };
-                let pipeline_id = state.db.create_pipeline_run(
-                    &event.repo_id,
-                    &workflow.id,
-                    &workflow_version_id,
+                let pipeline_id = enqueue_workflow_run(
+                    Arc::clone(&state),
+                    &workflow,
                     "push",
                     Some(&ref_update.ref_name),
                     Some(&ref_update.new_rev),
                 )?;
-                let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)?;
-                definition.validate().map_err(|error| error.to_string())?;
-                let mut run_ids = BTreeMap::new();
-                for job in &definition.jobs {
-                    let run_id = state.db.create_job_run(
-                        &pipeline_id,
-                        &job.id,
-                        &job.name,
-                        &job.runner_id,
-                        &job.runner_job_name,
-                        job.allow_failure,
-                    )?;
-                    run_ids.insert(job.id.clone(), run_id);
-                }
-                for job in &definition.jobs {
-                    for need in &job.needs {
-                        if let (Some(job_run_id), Some(dep_run_id)) =
-                            (run_ids.get(&job.id), run_ids.get(need))
-                        {
-                            state.db.add_job_dependency(job_run_id, dep_run_id)?;
-                        }
-                    }
-                }
                 info!(pipeline_id, workflow = %workflow.name, "pipeline created from push event");
             }
         }
         state.db.mark_push_event_processed(&event.id)?;
+    }
+    Ok(())
+}
+
+fn recover_incomplete_pipelines(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
+    for pipeline in state.db.pipelines_requiring_recovery()? {
+        state.db.set_pipeline_status(&pipeline.id, "running")?;
     }
     Ok(())
 }

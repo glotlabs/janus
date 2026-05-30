@@ -43,6 +43,7 @@ pub struct Workflow {
     pub enabled: bool,
     pub created_at: String,
     pub version: i64,
+    pub version_id: String,
     pub trigger_json: String,
     pub definition_json: String,
 }

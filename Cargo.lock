@@ -1434,6 +1434,7 @@ dependencies = [
  "sha2",
  "tokio",
  "toml",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "url",

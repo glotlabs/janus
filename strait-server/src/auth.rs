@@ -125,3 +125,13 @@ fn verify_signed_cookie(secret: &str, value: &str) -> Option<String> {
         None
     }
 }
+
+pub fn parse_session_cookie(secret: &str, cookie_header: &str) -> Option<String> {
+    for part in cookie_header.split(';') {
+        let trimmed = part.trim();
+        if let Some(raw_value) = trimmed.strip_prefix(&format!("{SESSION_COOKIE}=")) {
+            return verify_signed_cookie(secret, raw_value);
+        }
+    }
+    None
+}

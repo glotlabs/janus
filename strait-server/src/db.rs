@@ -227,6 +227,24 @@ impl Database {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn get_user(&self, user_id: &str) -> Result<Option<User>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT id, username, role, created_at FROM users WHERE id = ?1",
+                [user_id],
+                |row| {
+                    Ok(User {
+                        id: row.get(0)?,
+                        username: row.get(1)?,
+                        role: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     pub fn get_user_credentials(
         &self,
         username: &str,
@@ -575,7 +593,7 @@ impl Database {
     pub fn list_workflows(&self) -> Result<Vec<Workflow>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT w.id, w.repo_id, w.name, w.enabled, w.created_at, v.version, v.trigger_json, v.definition_json
+            "SELECT w.id, w.repo_id, w.name, w.enabled, w.created_at, v.version, v.id, v.trigger_json, v.definition_json
              FROM workflows w
              JOIN workflow_versions v ON v.workflow_id = w.id
              WHERE v.version = (SELECT MAX(version) FROM workflow_versions WHERE workflow_id = w.id)
@@ -589,8 +607,9 @@ impl Database {
                 enabled: row.get::<_, i64>(3)? != 0,
                 created_at: row.get(4)?,
                 version: row.get(5)?,
-                trigger_json: row.get(6)?,
-                definition_json: row.get(7)?,
+                version_id: row.get(6)?,
+                trigger_json: row.get(7)?,
+                definition_json: row.get(8)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -599,7 +618,7 @@ impl Database {
     pub fn workflows_for_repo(&self, repo_id: &str) -> Result<Vec<Workflow>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT w.id, w.repo_id, w.name, w.enabled, w.created_at, v.version, v.trigger_json, v.definition_json
+            "SELECT w.id, w.repo_id, w.name, w.enabled, w.created_at, v.version, v.id, v.trigger_json, v.definition_json
              FROM workflows w
              JOIN workflow_versions v ON v.workflow_id = w.id
              WHERE w.repo_id = ?1
@@ -614,11 +633,99 @@ impl Database {
                 enabled: row.get::<_, i64>(3)? != 0,
                 created_at: row.get(4)?,
                 version: row.get(5)?,
-                trigger_json: row.get(6)?,
-                definition_json: row.get(7)?,
+                version_id: row.get(6)?,
+                trigger_json: row.get(7)?,
+                definition_json: row.get(8)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_workflow(&self, workflow_id: &str) -> Result<Option<Workflow>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT w.id, w.repo_id, w.name, w.enabled, w.created_at, v.version, v.id, v.trigger_json, v.definition_json
+             FROM workflows w
+             JOIN workflow_versions v ON v.workflow_id = w.id
+             WHERE w.id = ?1
+               AND v.version = (SELECT MAX(version) FROM workflow_versions WHERE workflow_id = w.id)",
+            [workflow_id],
+            |row| {
+                Ok(Workflow {
+                    id: row.get(0)?,
+                    repo_id: row.get(1)?,
+                    name: row.get(2)?,
+                    enabled: row.get::<_, i64>(3)? != 0,
+                    created_at: row.get(4)?,
+                    version: row.get(5)?,
+                    version_id: row.get(6)?,
+                    trigger_json: row.get(7)?,
+                    definition_json: row.get(8)?,
+                })
+            },
+        ).optional()?)
+    }
+
+    pub fn get_workflow_by_version_id(
+        &self,
+        workflow_version_id: &str,
+    ) -> Result<Option<Workflow>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT w.id, w.repo_id, w.name, w.enabled, w.created_at, v.version, v.id, v.trigger_json, v.definition_json
+             FROM workflows w
+             JOIN workflow_versions v ON v.workflow_id = w.id
+             WHERE v.id = ?1",
+            [workflow_version_id],
+            |row| {
+                Ok(Workflow {
+                    id: row.get(0)?,
+                    repo_id: row.get(1)?,
+                    name: row.get(2)?,
+                    enabled: row.get::<_, i64>(3)? != 0,
+                    created_at: row.get(4)?,
+                    version: row.get(5)?,
+                    version_id: row.get(6)?,
+                    trigger_json: row.get(7)?,
+                    definition_json: row.get(8)?,
+                })
+            },
+        ).optional()?)
+    }
+
+    pub fn update_workflow(
+        &self,
+        workflow_id: &str,
+        name: &str,
+        enabled: bool,
+        trigger_json: &str,
+        definition_json: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut conn = self.conn.lock().expect("db mutex poisoned");
+        let tx = conn.transaction()?;
+        let next_version: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM workflow_versions WHERE workflow_id = ?1",
+            [workflow_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "UPDATE workflows SET name = ?2, enabled = ?3 WHERE id = ?1",
+            params![workflow_id, name, enabled as i64],
+        )?;
+        tx.execute(
+            "INSERT INTO workflow_versions (id, workflow_id, version, trigger_json, definition_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                Uuid::now_v7().to_string(),
+                workflow_id,
+                next_version,
+                trigger_json,
+                definition_json,
+                now()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn create_pipeline_run(
@@ -638,18 +745,6 @@ impl Database {
             params![id, repo_id, workflow_id, workflow_version_id, trigger_type, trigger_ref, commit_sha, now()],
         )?;
         Ok(id)
-    }
-
-    pub fn latest_workflow_version_id(
-        &self,
-        workflow_id: &str,
-    ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().expect("db mutex poisoned");
-        Ok(conn.query_row(
-            "SELECT id FROM workflow_versions WHERE workflow_id = ?1 ORDER BY version DESC LIMIT 1",
-            [workflow_id],
-            |row| row.get(0),
-        ).optional()?)
     }
 
     pub fn create_job_run(
@@ -709,6 +804,32 @@ impl Database {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_pipeline_run(
+        &self,
+        pipeline_id: &str,
+    ) -> Result<Option<PipelineRun>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT id, repo_id, workflow_id, workflow_version_id, trigger_type, trigger_ref, commit_sha, status, started_at, finished_at
+             FROM pipeline_runs WHERE id = ?1",
+            [pipeline_id],
+            |row| {
+                Ok(PipelineRun {
+                    id: row.get(0)?,
+                    repo_id: row.get(1)?,
+                    workflow_id: row.get(2)?,
+                    workflow_version_id: row.get(3)?,
+                    trigger_type: row.get(4)?,
+                    trigger_ref: row.get(5)?,
+                    commit_sha: row.get(6)?,
+                    status: row.get(7)?,
+                    started_at: row.get(8)?,
+                    finished_at: row.get(9)?,
+                })
+            },
+        ).optional()?)
     }
 
     pub fn pipeline_snapshot(
@@ -962,6 +1083,33 @@ impl Database {
         ).optional()?)
     }
 
+    pub fn list_job_runs_for_pipeline(
+        &self,
+        pipeline_id: &str,
+    ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, runner_run_id, status, allow_failure, started_at, finished_at
+             FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_name",
+        )?;
+        let rows = stmt.query_map([pipeline_id], |row| {
+            Ok(JobRun {
+                id: row.get(0)?,
+                pipeline_run_id: row.get(1)?,
+                job_id: row.get(2)?,
+                job_name: row.get(3)?,
+                runner_id: row.get(4)?,
+                runner_job_name: row.get(5)?,
+                runner_run_id: row.get(6)?,
+                status: row.get(7)?,
+                allow_failure: row.get::<_, i64>(8)? != 0,
+                started_at: row.get(9)?,
+                finished_at: row.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn workflow_definition_json(
         &self,
         workflow_version_id: &str,
@@ -999,6 +1147,44 @@ impl Database {
             )?;
         }
         Ok(())
+    }
+
+    pub fn set_pipeline_status(
+        &self,
+        pipeline_id: &str,
+        status: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "UPDATE pipeline_runs SET status = ?2, finished_at = CASE WHEN ?2 IN ('success', 'failed', 'canceled', 'blocked') THEN ?3 ELSE NULL END WHERE id = ?1",
+            params![pipeline_id, status, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn pipelines_requiring_recovery(&self) -> Result<Vec<PipelineRun>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT p.id, p.repo_id, p.workflow_id, p.workflow_version_id, p.trigger_type, p.trigger_ref, p.commit_sha, p.status, p.started_at, p.finished_at
+             FROM pipeline_runs p
+             LEFT JOIN job_runs j ON j.pipeline_run_id = p.id
+             WHERE p.status = 'running' OR j.status IN ('pending', 'running')",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PipelineRun {
+                id: row.get(0)?,
+                repo_id: row.get(1)?,
+                workflow_id: row.get(2)?,
+                workflow_version_id: row.get(3)?,
+                trigger_type: row.get(4)?,
+                trigger_ref: row.get(5)?,
+                commit_sha: row.get(6)?,
+                status: row.get(7)?,
+                started_at: row.get(8)?,
+                finished_at: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }
 
