@@ -3,15 +3,15 @@ script = "/opt/strait-runner/jobs/build-app.sh"
 timeout_seconds = 600
 concurrency = "job_exclusive"
 
-[params.commit]
+[inputs.commit]
 type = "string"
 required = true
 
-[params.branch]
+[inputs.branch]
 type = "string"
 required = true
 
-[params.source]
+[inputs.source]
 type = "artifact"
 required = true
 

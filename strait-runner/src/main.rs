@@ -571,11 +571,11 @@ script = "{}"
 timeout_seconds = 600
 concurrency = "parallel"
 
-[params.commit]
+[inputs.commit]
 type = "string"
 required = true
 
-[params.branch]
+[inputs.branch]
 type = "string"
 required = true
 "#,

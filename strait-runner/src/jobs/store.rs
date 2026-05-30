@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::{
     artifacts::ArtifactStore,
-    manifest::{Concurrency, JobManifest, ManifestStore, ParamType},
+    manifest::{Concurrency, JobManifest, ManifestStore, InputType},
     storage::atomic_write,
 };
 
@@ -26,7 +26,7 @@ use super::{
     models::{JobCreated, JobExecution, JobLogs},
 };
 
-const REDACTED_PARAM_VALUE: &str = "[REDACTED]";
+const REDACTED_INPUT_VALUE: &str = "[REDACTED]";
 
 #[derive(Debug)]
 pub struct JobStore {
@@ -61,7 +61,7 @@ impl JobStore {
     pub fn create_job(
         self: &Arc<Self>,
         name: &str,
-        params: Map<String, Value>,
+        inputs: Map<String, Value>,
         manifests: &ManifestStore,
         artifacts: &ArtifactStore,
         default_log_limit_mb: u64,
@@ -77,8 +77,8 @@ impl JobStore {
             .cloned()
             .ok_or_else(|| JobError::UnknownJob(name.to_string()))?;
 
-        let resolved = validate_params(&manifest, &params, artifacts)?;
-        let metadata_params = redact_sensitive_params(&manifest, &params);
+        let resolved = validate_inputs(&manifest, &inputs, artifacts)?;
+        let metadata_inputs = redact_sensitive_inputs(&manifest, &inputs);
         let log_limit_bytes = default_log_limit_mb
             .checked_mul(1024_u64 * 1024_u64)
             .ok_or(JobError::InvalidLogLimit {
@@ -94,7 +94,7 @@ impl JobStore {
             started_at: started_at.clone(),
             finished_at: None,
             exit_code: None,
-            params: metadata_params,
+            inputs: metadata_inputs,
             resolved_artifacts: resolved,
             outputs: BTreeMap::new(),
         };
@@ -175,7 +175,7 @@ impl JobStore {
             cleanup_successful_workdirs,
             keep_failed_workdirs,
             metadata: job,
-            raw_params: params,
+            raw_inputs: inputs,
             cancel_rx,
         };
 
@@ -392,31 +392,31 @@ impl JobStore {
     }
 }
 
-fn validate_params(
+fn validate_inputs(
     manifest: &JobManifest,
-    params: &Map<String, Value>,
+    inputs: &Map<String, Value>,
     artifacts: &ArtifactStore,
 ) -> Result<BTreeMap<String, String>, JobError> {
-    for (param_name, spec) in &manifest.params {
-        if spec.required && !params.contains_key(param_name) {
-            return Err(JobError::MissingParam(param_name.clone()));
+    for (input_name, spec) in &manifest.inputs {
+        if spec.required && !inputs.contains_key(input_name) {
+            return Err(JobError::MissingInput(input_name.clone()));
         }
     }
 
-    for name in params.keys() {
-        if !manifest.params.contains_key(name) {
-            return Err(JobError::UnknownParam(name.clone()));
+    for name in inputs.keys() {
+        if !manifest.inputs.contains_key(name) {
+            return Err(JobError::UnknownInput(name.clone()));
         }
     }
 
     let mut resolved = BTreeMap::new();
 
-    for (name, value) in params {
-        let spec = &manifest.params[name];
+    for (name, value) in inputs {
+        let spec = &manifest.inputs[name];
 
         match spec.kind {
-            ParamType::String => {
-                let string_value = value.as_str().ok_or_else(|| JobError::InvalidParamType {
+            InputType::String => {
+                let string_value = value.as_str().ok_or_else(|| JobError::InvalidInputType {
                     name: name.clone(),
                     expected: "string",
                 })?;
@@ -424,7 +424,7 @@ fn validate_params(
                 if let Some(max_length) = spec.max_length
                     && string_value.chars().count() > max_length
                 {
-                    return Err(JobError::InvalidParamValue {
+                    return Err(JobError::InvalidInputValue {
                         name: name.clone(),
                         reason: format!("must be at most {max_length} characters"),
                     });
@@ -435,30 +435,30 @@ fn validate_params(
                         .expect("manifest pattern should have been validated")
                         .is_match(string_value)
                 {
-                    return Err(JobError::InvalidParamValue {
+                    return Err(JobError::InvalidInputValue {
                         name: name.clone(),
                         reason: format!("must match pattern {pattern}"),
                     });
                 }
             }
-            ParamType::Integer => {
+            InputType::Integer => {
                 if value.as_i64().is_none() {
-                    return Err(JobError::InvalidParamType {
+                    return Err(JobError::InvalidInputType {
                         name: name.clone(),
                         expected: "integer",
                     });
                 }
             }
-            ParamType::Boolean => {
+            InputType::Boolean => {
                 if !value.is_boolean() {
-                    return Err(JobError::InvalidParamType {
+                    return Err(JobError::InvalidInputType {
                         name: name.clone(),
                         expected: "boolean",
                     });
                 }
             }
-            ParamType::Artifact => {
-                let artifact_id = value.as_str().ok_or_else(|| JobError::InvalidParamType {
+            InputType::Artifact => {
+                let artifact_id = value.as_str().ok_or_else(|| JobError::InvalidInputType {
                     name: name.clone(),
                     expected: "artifact id string",
                 })?;
@@ -479,9 +479,9 @@ fn validate_params(
                         .to_string(),
                 );
             }
-            ParamType::Json => {
+            InputType::Json => {
                 if value.is_null() {
-                    return Err(JobError::InvalidParamType {
+                    return Err(JobError::InvalidInputType {
                         name: name.clone(),
                         expected: "json",
                     });
@@ -490,7 +490,7 @@ fn validate_params(
                 if let Some(max_json_bytes) = spec.max_json_bytes
                     && value.to_string().len() > max_json_bytes
                 {
-                    return Err(JobError::InvalidParamValue {
+                    return Err(JobError::InvalidInputValue {
                         name: name.clone(),
                         reason: format!("must be at most {max_json_bytes} JSON bytes"),
                     });
@@ -502,15 +502,15 @@ fn validate_params(
     Ok(resolved)
 }
 
-fn redact_sensitive_params(
+fn redact_sensitive_inputs(
     manifest: &JobManifest,
-    params: &Map<String, Value>,
+    inputs: &Map<String, Value>,
 ) -> Map<String, Value> {
-    params
+    inputs
         .iter()
         .map(|(name, value)| {
-            let value = if manifest.params[name].sensitive {
-                Value::String(REDACTED_PARAM_VALUE.to_string())
+            let value = if manifest.inputs[name].sensitive {
+                Value::String(REDACTED_INPUT_VALUE.to_string())
             } else {
                 value.clone()
             };

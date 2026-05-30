@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::manifest::{Concurrency, JobManifest, ParamType};
+use crate::manifest::{Concurrency, JobManifest, InputType};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobCreated {
@@ -27,7 +27,7 @@ pub struct JobMetadata {
     pub started_at: String,
     pub finished_at: Option<String>,
     pub exit_code: Option<i32>,
-    pub params: Map<String, Value>,
+    pub inputs: Map<String, Value>,
     pub resolved_artifacts: BTreeMap<String, String>,
     #[serde(default)]
     pub outputs: BTreeMap<String, JobOutputArtifact>,
@@ -75,14 +75,14 @@ pub struct JobDefinitionResponse {
     pub name: String,
     pub concurrency: Concurrency,
     pub timeout_seconds: u64,
-    pub params: BTreeMap<String, JobParamDefinitionResponse>,
+    pub inputs: BTreeMap<String, JobInputDefinitionResponse>,
     pub outputs: BTreeMap<String, JobOutputDefinitionResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JobParamDefinitionResponse {
+pub struct JobInputDefinitionResponse {
     #[serde(rename = "type")]
-    pub kind: ParamType,
+    pub kind: InputType,
     pub required: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub sensitive: bool,
@@ -124,7 +124,7 @@ pub(super) struct JobExecution {
     pub(super) cleanup_successful_workdirs: bool,
     pub(super) keep_failed_workdirs: bool,
     pub(super) metadata: JobMetadata,
-    pub(super) raw_params: Map<String, Value>,
+    pub(super) raw_inputs: Map<String, Value>,
     pub(super) cancel_rx: tokio::sync::watch::Receiver<bool>,
 }
 
@@ -186,13 +186,13 @@ impl From<JobManifest> for JobDefinitionResponse {
             name: value.name,
             concurrency: value.concurrency,
             timeout_seconds: value.timeout_seconds,
-            params: value
-                .params
+            inputs: value
+                .inputs
                 .into_iter()
                 .map(|(name, spec)| {
                     (
                         name,
-                        JobParamDefinitionResponse {
+                        JobInputDefinitionResponse {
                             kind: spec.kind,
                             required: spec.required,
                             sensitive: spec.sensitive,

@@ -48,13 +48,13 @@ pub async fn create_job(
         .map_err(|_| JobError::RequestTooLarge { max_bytes })?;
     let body: Value =
         serde_json::from_slice(&bytes).map_err(|source| JobError::ParseRequestBody { source })?;
-    let params = body
+    let inputs = body
         .as_object()
         .cloned()
         .ok_or(JobError::InvalidBody("expected a JSON object"))?;
     let created = state.jobs.create_job(
         &name,
-        params,
+        inputs,
         &state.manifests,
         &state.artifacts,
         state.config.jobs.default_log_limit_mb,

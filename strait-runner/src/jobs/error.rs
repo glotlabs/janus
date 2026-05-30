@@ -42,13 +42,13 @@ pub enum JobError {
     JobNotFound(String),
     JobNotRunning(String),
     UnknownJob(String),
-    MissingParam(String),
-    UnknownParam(String),
-    InvalidParamType {
+    MissingInput(String),
+    UnknownInput(String),
+    InvalidInputType {
         name: String,
         expected: &'static str,
     },
-    InvalidParamValue {
+    InvalidInputValue {
         name: String,
         reason: String,
     },
@@ -113,13 +113,13 @@ impl fmt::Display for JobError {
             Self::JobNotFound(job_id) => write!(f, "job not found: {job_id}"),
             Self::JobNotRunning(job_id) => write!(f, "job is not running: {job_id}"),
             Self::UnknownJob(name) => write!(f, "job not found: {name}"),
-            Self::MissingParam(name) => write!(f, "missing required param: {name}"),
-            Self::UnknownParam(name) => write!(f, "unknown param: {name}"),
-            Self::InvalidParamType { name, expected } => {
-                write!(f, "invalid param type for {name}: expected {expected}")
+            Self::MissingInput(name) => write!(f, "missing required input: {name}"),
+            Self::UnknownInput(name) => write!(f, "unknown input: {name}"),
+            Self::InvalidInputType { name, expected } => {
+                write!(f, "invalid input type for {name}: expected {expected}")
             }
-            Self::InvalidParamValue { name, reason } => {
-                write!(f, "invalid param value for {name}: {reason}")
+            Self::InvalidInputValue { name, reason } => {
+                write!(f, "invalid input value for {name}: {reason}")
             }
             Self::InvalidLogLimit { max_size_mb } => {
                 write!(f, "invalid job log limit in mb: {max_size_mb}")
@@ -142,7 +142,7 @@ impl fmt::Display for JobError {
             Self::ExpiredArtifact { name, artifact_id } => {
                 write!(
                     f,
-                    "artifact param {name} references expired artifact {artifact_id}"
+                    "artifact input {name} references expired artifact {artifact_id}"
                 )
             }
             Self::MissingOutput { name, path } => {
@@ -210,10 +210,10 @@ impl IntoResponse for JobError {
             Self::UnknownJob(_) | Self::JobNotFound(_) => StatusCode::NOT_FOUND,
             Self::JobNotRunning(_) => StatusCode::CONFLICT,
             Self::ShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
-            Self::MissingParam(_)
-            | Self::UnknownParam(_)
-            | Self::InvalidParamType { .. }
-            | Self::InvalidParamValue { .. }
+            Self::MissingInput(_)
+            | Self::UnknownInput(_)
+            | Self::InvalidInputType { .. }
+            | Self::InvalidInputValue { .. }
             | Self::InvalidLogLimit { .. }
             | Self::InvalidRequestBodyLimit { .. }
             | Self::Artifact(ArtifactError::NotFound(_))
@@ -285,10 +285,10 @@ impl JobErrorResponse {
             JobError::JobNotFound(_) => "job_not_found",
             JobError::JobNotRunning(_) => "job_not_running",
             JobError::UnknownJob(_) => "job_name_not_found",
-            JobError::MissingParam(_) => "job_missing_param",
-            JobError::UnknownParam(_) => "job_unknown_param",
-            JobError::InvalidParamType { .. } => "job_invalid_param_type",
-            JobError::InvalidParamValue { .. } => "job_invalid_param_value",
+            JobError::MissingInput(_) => "job_missing_input",
+            JobError::UnknownInput(_) => "job_unknown_input",
+            JobError::InvalidInputType { .. } => "job_invalid_input_type",
+            JobError::InvalidInputValue { .. } => "job_invalid_input_value",
             JobError::InvalidLogLimit { .. } => "job_invalid_log_limit",
             JobError::InvalidRequestBodyLimit { .. } => "job_invalid_request_body_limit",
             JobError::RateLimitExceeded { .. } => "job_rate_limit_exceeded",

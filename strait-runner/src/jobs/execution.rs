@@ -312,8 +312,8 @@ fn build_job_env(execution: &JobExecution) -> BTreeMap<String, String> {
         ),
     ]);
 
-    for (name, value) in &execution.raw_params {
-        let env_name = normalize_param_env(name);
+    for (name, value) in &execution.raw_inputs {
+        let env_name = normalize_input_env(name);
         let env_value = if let Some(path) = metadata.resolved_artifacts.get(name) {
             path.clone()
         } else if let Some(raw) = value.as_str() {
@@ -327,7 +327,7 @@ fn build_job_env(execution: &JobExecution) -> BTreeMap<String, String> {
     env
 }
 
-fn normalize_param_env(name: &str) -> String {
+fn normalize_input_env(name: &str) -> String {
     format!("JOB_{}", name.replace('-', "_").to_ascii_uppercase())
 }
 

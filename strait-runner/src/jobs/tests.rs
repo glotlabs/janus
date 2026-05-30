@@ -68,17 +68,17 @@ async fn creates_job_metadata_for_valid_request() {
             .expect("metadata should parse");
 
     assert_eq!(metadata.name, "build-app");
-    assert_eq!(metadata.params["commit"], "abc123");
+    assert_eq!(metadata.inputs["commit"], "abc123");
 }
 
 #[tokio::test]
-async fn redacts_sensitive_params_in_persisted_metadata() {
+async fn redacts_sensitive_inputs_in_persisted_metadata() {
     let temp = temp_dir("job_sensitive_redaction");
     let state = test_state_from_manifest(
         &temp,
         "build-app",
         r#"
-[params.token]
+[inputs.token]
 type = "string"
 required = true
 sensitive = true
@@ -119,12 +119,12 @@ sensitive = true
         serde_json::from_slice(&fs::read(metadata_path).expect("metadata should be written"))
             .expect("metadata should parse");
 
-    assert_eq!(metadata.params["token"], "[REDACTED]");
+    assert_eq!(metadata.inputs["token"], "[REDACTED]");
 }
 
 #[tokio::test]
-async fn rejects_missing_required_param() {
-    let temp = temp_dir("job_missing_param");
+async fn rejects_missing_required_input() {
+    let temp = temp_dir("job_missing_input");
     let state = test_state(&temp);
     let app = Router::new()
         .route("/jobs/{name}/runs", post(create_job))
@@ -145,8 +145,8 @@ async fn rejects_missing_required_param() {
 }
 
 #[tokio::test]
-async fn rejects_unknown_param() {
-    let temp = temp_dir("job_unknown_param");
+async fn rejects_unknown_input() {
+    let temp = temp_dir("job_unknown_input");
     let state = test_state(&temp);
     let app = Router::new()
         .route("/jobs/{name}/runs", post(create_job))
@@ -286,13 +286,13 @@ async fn rate_limits_job_creation_per_token() {
 }
 
 #[tokio::test]
-async fn rejects_string_param_over_max_length() {
+async fn rejects_string_input_over_max_length() {
     let temp = temp_dir("job_string_max_length");
     let state = test_state_from_manifest(
         &temp,
         "build-app",
         r#"
-[params.commit]
+[inputs.commit]
 type = "string"
 required = true
 max_length = 6
@@ -322,13 +322,13 @@ max_length = 6
 }
 
 #[tokio::test]
-async fn rejects_string_param_that_fails_pattern() {
+async fn rejects_string_input_that_fails_pattern() {
     let temp = temp_dir("job_string_pattern");
     let state = test_state_from_manifest(
         &temp,
         "build-app",
         r#"
-[params.commit]
+[inputs.commit]
 type = "string"
 required = true
 pattern = "^[a-f0-9]+$"
@@ -358,13 +358,13 @@ pattern = "^[a-f0-9]+$"
 }
 
 #[tokio::test]
-async fn rejects_json_param_over_max_json_bytes() {
+async fn rejects_json_input_over_max_json_bytes() {
     let temp = temp_dir("job_json_max_bytes");
     let state = test_state_from_manifest(
         &temp,
         "build-app",
         r#"
-[params.payload]
+[inputs.payload]
 type = "json"
 required = true
 max_json_bytes = 16
@@ -396,13 +396,13 @@ max_json_bytes = 16
 }
 
 #[tokio::test]
-async fn accepts_structured_json_param() {
+async fn accepts_structured_json_input() {
     let temp = temp_dir("job_json_accepts_structured_value");
     let state = test_state_from_manifest(
         &temp,
         "build-app",
         r#"
-[params.payload]
+[inputs.payload]
 type = "json"
 required = true
 "#,
@@ -439,13 +439,13 @@ required = true
 }
 
 #[tokio::test]
-async fn rejects_null_json_param() {
+async fn rejects_null_json_input() {
     let temp = temp_dir("job_json_rejects_null");
     let state = test_state_from_manifest(
         &temp,
         "build-app",
         r#"
-[params.payload]
+[inputs.payload]
 type = "json"
 required = true
 "#,
@@ -474,8 +474,8 @@ required = true
 }
 
 #[tokio::test]
-async fn resolves_artifact_params() {
-    let temp = temp_dir("job_artifact_param");
+async fn resolves_artifact_inputs() {
+    let temp = temp_dir("job_artifact_input");
     let state = test_state_with_artifact_manifest(&temp);
     let artifact_id = store_artifact(&state.artifacts, b"src");
     let app = Router::new()
@@ -643,7 +643,7 @@ async fn registers_declared_outputs_as_artifacts() {
         &temp,
         "build-app",
         r#"
-[params.commit]
+[inputs.commit]
 type = "string"
 required = false
 "#,
@@ -694,7 +694,7 @@ async fn fails_successful_script_when_required_output_is_missing() {
         &temp,
         "build-app",
         r#"
-[params.commit]
+[inputs.commit]
 type = "string"
 required = false
 "#,
@@ -900,18 +900,18 @@ async fn lists_job_definitions_over_http() {
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].name, "build-app");
     assert_eq!(jobs[0].timeout_seconds, 600);
-    assert!(jobs[0].params.contains_key("commit"));
-    assert!(jobs[0].params["commit"].required);
+    assert!(jobs[0].inputs.contains_key("commit"));
+    assert!(jobs[0].inputs["commit"].required);
 }
 
 #[tokio::test]
-async fn lists_sensitive_param_metadata_over_http() {
-    let temp = temp_dir("job_list_sensitive_param");
+async fn lists_sensitive_input_metadata_over_http() {
+    let temp = temp_dir("job_list_sensitive_input");
     let state = test_state_from_manifest(
         &temp,
         "build-app",
         r#"
-[params.token]
+[inputs.token]
 type = "string"
 required = true
 sensitive = true
@@ -943,7 +943,7 @@ sensitive = true
     let jobs: Vec<JobDefinitionResponse> =
         serde_json::from_slice(&body).expect("job definitions body");
 
-    assert!(jobs[0].params["token"].sensitive);
+    assert!(jobs[0].inputs["token"].sensitive);
 }
 
 #[tokio::test]
@@ -1138,13 +1138,13 @@ async fn job_process_sees_only_deliberate_environment() {
 }
 
 #[tokio::test]
-async fn sensitive_param_is_available_to_job_env_but_redacted_on_disk() {
+async fn sensitive_input_is_available_to_job_env_but_redacted_on_disk() {
     let temp = temp_dir("job_sensitive_env");
     let state = test_state_from_manifest(
         &temp,
         "build-app",
         r#"
-[params.token]
+[inputs.token]
 type = "string"
 required = true
 sensitive = true
@@ -1176,7 +1176,7 @@ sensitive = true
     let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
 
     assert_eq!(metadata.status, JobStatus::Success);
-    assert_eq!(metadata.params["token"], "[REDACTED]");
+    assert_eq!(metadata.inputs["token"], "[REDACTED]");
     assert_eq!(
         fs::read_to_string(temp.join("jobs").join(&created.job_id).join("stdout.log"))
             .expect("stdout should read"),
@@ -1256,7 +1256,7 @@ fn recovers_running_jobs_on_startup() {
             started_at: "2026-01-01T00:00:00Z".to_string(),
             finished_at: None,
             exit_code: None,
-            params: Map::new(),
+            inputs: Map::new(),
             resolved_artifacts: BTreeMap::new(),
             outputs: BTreeMap::new(),
         })
@@ -1321,13 +1321,13 @@ async fn parallel_jobs_can_run_together() {
             TestManifest {
                 job_name: "job-a",
                 concurrency: "parallel",
-                params_toml: OPTIONAL_COMMIT_PARAM,
+                inputs_toml: OPTIONAL_COMMIT_INPUT,
                 outputs_toml: "",
             },
             TestManifest {
                 job_name: "job-b",
                 concurrency: "parallel",
-                params_toml: OPTIONAL_COMMIT_PARAM,
+                inputs_toml: OPTIONAL_COMMIT_INPUT,
                 outputs_toml: "",
             },
         ],
@@ -1372,7 +1372,7 @@ async fn job_exclusive_rejects_second_instance_while_running() {
         vec![TestManifest {
             job_name: "build-app",
             concurrency: "job_exclusive",
-            params_toml: OPTIONAL_COMMIT_PARAM,
+            inputs_toml: OPTIONAL_COMMIT_INPUT,
             outputs_toml: "",
         }],
         "#!/bin/sh\nsleep 1\n",
@@ -1417,13 +1417,13 @@ async fn global_exclusive_rejects_when_other_job_is_running() {
             TestManifest {
                 job_name: "job-a",
                 concurrency: "parallel",
-                params_toml: OPTIONAL_COMMIT_PARAM,
+                inputs_toml: OPTIONAL_COMMIT_INPUT,
                 outputs_toml: "",
             },
             TestManifest {
                 job_name: "job-b",
                 concurrency: "global_exclusive",
-                params_toml: OPTIONAL_COMMIT_PARAM,
+                inputs_toml: OPTIONAL_COMMIT_INPUT,
                 outputs_toml: "",
             },
         ],
@@ -1469,13 +1469,13 @@ async fn parallel_job_rejects_while_global_exclusive_is_running() {
             TestManifest {
                 job_name: "job-a",
                 concurrency: "global_exclusive",
-                params_toml: OPTIONAL_COMMIT_PARAM,
+                inputs_toml: OPTIONAL_COMMIT_INPUT,
                 outputs_toml: "",
             },
             TestManifest {
                 job_name: "job-b",
                 concurrency: "parallel",
-                params_toml: OPTIONAL_COMMIT_PARAM,
+                inputs_toml: OPTIONAL_COMMIT_INPUT,
                 outputs_toml: "",
             },
         ],
@@ -1516,7 +1516,7 @@ fn test_state(temp: &Path) -> AppState {
     test_state_from_manifest(
         temp,
         "build-app",
-        REQUIRED_COMMIT_AND_BRANCH_PARAMS,
+        REQUIRED_COMMIT_AND_BRANCH_INPUTS,
         "",
         "#!/bin/sh\nexit 0\n",
         600,
@@ -1529,7 +1529,7 @@ fn test_state_with_artifact_manifest(temp: &Path) -> AppState {
     test_state_from_manifest(
         temp,
         "build-with-artifact",
-        REQUIRED_SOURCE_PARAM,
+        REQUIRED_SOURCE_INPUT,
         "",
         "#!/bin/sh\nexit 0\n",
         600,
@@ -1542,7 +1542,7 @@ fn test_state_with_request_body_limit(temp: &Path, max_request_body_kb: u64) -> 
     test_state_from_manifest(
         temp,
         "build-app",
-        REQUIRED_COMMIT_AND_BRANCH_PARAMS,
+        REQUIRED_COMMIT_AND_BRANCH_INPUTS,
         "",
         "#!/bin/sh\nexit 0\n",
         600,
@@ -1566,11 +1566,11 @@ script = "{}"
 timeout_seconds = 600
 concurrency = "parallel"
 
-[params.commit]
+[inputs.commit]
 type = "string"
 required = true
 
-[params.branch]
+[inputs.branch]
 type = "string"
 required = true
 "#,
@@ -1628,7 +1628,7 @@ fn test_state_with_script_and_log_limit(
     test_state_from_manifest(
         temp,
         job_name,
-        OPTIONAL_COMMIT_AND_SOURCE_PARAMS,
+        OPTIONAL_COMMIT_AND_SOURCE_INPUTS,
         "",
         script_body,
         timeout_seconds,
@@ -1640,7 +1640,7 @@ fn test_state_with_script_and_log_limit(
 fn test_state_from_manifest(
     temp: &Path,
     job_name: &str,
-    params_toml: &str,
+    inputs_toml: &str,
     outputs_toml: &str,
     script_body: &str,
     timeout_seconds: u64,
@@ -1661,7 +1661,7 @@ script = "{}"
 timeout_seconds = {timeout_seconds}
 concurrency = "parallel"
 
-{params_toml}
+{inputs_toml}
 {outputs_toml}
 "#,
             script.display()
@@ -1727,7 +1727,7 @@ concurrency = "{}"
                 script.display(),
                 timeout_seconds,
                 manifest.concurrency,
-                manifest.params_toml,
+                manifest.inputs_toml,
                 manifest.outputs_toml
             ),
         )
@@ -1895,34 +1895,34 @@ fn temp_dir(label: &str) -> PathBuf {
     path
 }
 
-const REQUIRED_COMMIT_AND_BRANCH_PARAMS: &str = r#"
-[params.commit]
+const REQUIRED_COMMIT_AND_BRANCH_INPUTS: &str = r#"
+[inputs.commit]
 type = "string"
 required = true
 
-[params.branch]
+[inputs.branch]
 type = "string"
 required = true
 "#;
 
-const REQUIRED_SOURCE_PARAM: &str = r#"
-[params.source]
+const REQUIRED_SOURCE_INPUT: &str = r#"
+[inputs.source]
 type = "artifact"
 required = true
 "#;
 
-const OPTIONAL_COMMIT_AND_SOURCE_PARAMS: &str = r#"
-[params.commit]
+const OPTIONAL_COMMIT_AND_SOURCE_INPUTS: &str = r#"
+[inputs.commit]
 type = "string"
 required = false
 
-[params.source]
+[inputs.source]
 type = "artifact"
 required = false
 "#;
 
-const OPTIONAL_COMMIT_PARAM: &str = r#"
-[params.commit]
+const OPTIONAL_COMMIT_INPUT: &str = r#"
+[inputs.commit]
 type = "string"
 required = false
 "#;
@@ -1930,6 +1930,6 @@ required = false
 struct TestManifest<'a> {
     job_name: &'a str,
     concurrency: &'a str,
-    params_toml: &'a str,
+    inputs_toml: &'a str,
     outputs_toml: &'a str,
 }

@@ -7,7 +7,7 @@ use std::{
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-const RESERVED_PARAM_NAMES: &[&str] = &["id", "name", "workdir", "output_dir", "metadata_path"];
+const RESERVED_INPUT_NAMES: &[&str] = &["id", "name", "workdir", "output_dir", "metadata_path"];
 
 #[derive(Debug, Clone)]
 pub struct ManifestStore {
@@ -82,7 +82,7 @@ pub struct JobManifest {
     pub timeout_seconds: u64,
     pub concurrency: Concurrency,
     #[serde(default)]
-    pub params: BTreeMap<String, ParamSpec>,
+    pub inputs: BTreeMap<String, InputSpec>,
     #[serde(default)]
     pub outputs: BTreeMap<String, OutputSpec>,
 }
@@ -116,12 +116,12 @@ impl JobManifest {
             });
         }
 
-        for param_name in self.params.keys() {
-            validate_param_name(param_name, path)?;
+        for input_name in self.inputs.keys() {
+            validate_input_name(input_name, path)?;
         }
 
-        for (param_name, param) in &self.params {
-            validate_param_constraints(param_name, param, path)?;
+        for (input_name, input) in &self.inputs {
+            validate_input_constraints(input_name, input, path)?;
         }
 
         for output_name in self.outputs.keys() {
@@ -138,7 +138,7 @@ impl JobManifest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ParamType {
+pub enum InputType {
     String,
     Integer,
     Boolean,
@@ -147,9 +147,9 @@ pub enum ParamType {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct ParamSpec {
+pub struct InputSpec {
     #[serde(rename = "type")]
-    pub kind: ParamType,
+    pub kind: InputType,
     pub required: bool,
     #[serde(default)]
     pub sensitive: bool,
@@ -201,11 +201,11 @@ pub enum ManifestError {
         name: String,
         path: String,
     },
-    InvalidParamName {
+    InvalidInputName {
         name: String,
         path: String,
     },
-    InvalidParamConstraint {
+    InvalidInputConstraint {
         name: String,
         path: String,
         reason: String,
@@ -260,13 +260,13 @@ impl fmt::Display for ManifestError {
             Self::InvalidJobName { name, path } => {
                 write!(f, "invalid job name {name} in manifest {path}")
             }
-            Self::InvalidParamName { name, path } => {
-                write!(f, "invalid param name {name} in manifest {path}")
+            Self::InvalidInputName { name, path } => {
+                write!(f, "invalid input name {name} in manifest {path}")
             }
-            Self::InvalidParamConstraint { name, path, reason } => {
+            Self::InvalidInputConstraint { name, path, reason } => {
                 write!(
                     f,
-                    "invalid param constraint for {name} in manifest {path}: {reason}"
+                    "invalid input constraint for {name} in manifest {path}: {reason}"
                 )
             }
             Self::InvalidOutputName { name, path } => {
@@ -311,9 +311,9 @@ fn validate_job_name(name: &str, path: &Path) -> Result<(), ManifestError> {
     Ok(())
 }
 
-fn validate_param_name(name: &str, path: &Path) -> Result<(), ManifestError> {
-    if !is_safe_name(name) || RESERVED_PARAM_NAMES.contains(&name) {
-        return Err(ManifestError::InvalidParamName {
+fn validate_input_name(name: &str, path: &Path) -> Result<(), ManifestError> {
+    if !is_safe_name(name) || RESERVED_INPUT_NAMES.contains(&name) {
+        return Err(ManifestError::InvalidInputName {
             name: name.to_string(),
             path: path.display().to_string(),
         });
@@ -333,39 +333,39 @@ fn validate_output_name(name: &str, path: &Path) -> Result<(), ManifestError> {
     Ok(())
 }
 
-fn validate_param_constraints(
+fn validate_input_constraints(
     name: &str,
-    spec: &ParamSpec,
+    spec: &InputSpec,
     path: &Path,
 ) -> Result<(), ManifestError> {
     if let Some(max_length) = spec.max_length {
         if max_length == 0 {
-            return Err(ManifestError::InvalidParamConstraint {
+            return Err(ManifestError::InvalidInputConstraint {
                 name: name.to_string(),
                 path: path.display().to_string(),
                 reason: "max_length must be positive".to_string(),
             });
         }
 
-        if !matches!(spec.kind, ParamType::String) {
-            return Err(ManifestError::InvalidParamConstraint {
+        if !matches!(spec.kind, InputType::String) {
+            return Err(ManifestError::InvalidInputConstraint {
                 name: name.to_string(),
                 path: path.display().to_string(),
-                reason: "max_length is only supported for string params".to_string(),
+                reason: "max_length is only supported for string inputs".to_string(),
             });
         }
     }
 
     if let Some(pattern) = &spec.pattern {
-        if !matches!(spec.kind, ParamType::String) {
-            return Err(ManifestError::InvalidParamConstraint {
+        if !matches!(spec.kind, InputType::String) {
+            return Err(ManifestError::InvalidInputConstraint {
                 name: name.to_string(),
                 path: path.display().to_string(),
-                reason: "pattern is only supported for string params".to_string(),
+                reason: "pattern is only supported for string inputs".to_string(),
             });
         }
 
-        Regex::new(pattern).map_err(|error| ManifestError::InvalidParamConstraint {
+        Regex::new(pattern).map_err(|error| ManifestError::InvalidInputConstraint {
             name: name.to_string(),
             path: path.display().to_string(),
             reason: format!("invalid regex pattern: {error}"),
@@ -374,18 +374,18 @@ fn validate_param_constraints(
 
     if let Some(max_json_bytes) = spec.max_json_bytes {
         if max_json_bytes == 0 {
-            return Err(ManifestError::InvalidParamConstraint {
+            return Err(ManifestError::InvalidInputConstraint {
                 name: name.to_string(),
                 path: path.display().to_string(),
                 reason: "max_json_bytes must be positive".to_string(),
             });
         }
 
-        if !matches!(spec.kind, ParamType::Json) {
-            return Err(ManifestError::InvalidParamConstraint {
+        if !matches!(spec.kind, InputType::Json) {
+            return Err(ManifestError::InvalidInputConstraint {
                 name: name.to_string(),
                 path: path.display().to_string(),
-                reason: "max_json_bytes is only supported for json params".to_string(),
+                reason: "max_json_bytes is only supported for json inputs".to_string(),
             });
         }
     }
@@ -475,7 +475,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{Concurrency, JobManifest, ManifestError, ManifestStore, ParamType};
+    use super::{Concurrency, JobManifest, ManifestError, ManifestStore, InputType};
 
     #[test]
     fn parses_manifest_file() {
@@ -492,7 +492,7 @@ script = "{}"
 timeout_seconds = 600
 concurrency = "job_exclusive"
 
-[params.commit]
+[inputs.commit]
 type = "string"
 required = true
 
@@ -510,14 +510,14 @@ required = true
         assert_eq!(manifest.name, "build-app");
         assert_eq!(manifest.timeout_seconds, 600);
         assert_eq!(manifest.concurrency, Concurrency::JobExclusive);
-        assert_eq!(manifest.params["commit"].kind, ParamType::String);
-        assert!(!manifest.params["commit"].sensitive);
+        assert_eq!(manifest.inputs["commit"].kind, InputType::String);
+        assert!(!manifest.inputs["commit"].sensitive);
         assert!(manifest.outputs["app"].required);
     }
 
     #[test]
-    fn parses_sensitive_param_flag() {
-        let temp = temp_dir("parse_sensitive_param");
+    fn parses_sensitive_input_flag() {
+        let temp = temp_dir("parse_sensitive_input");
         let script = write_executable_script(&temp, "build.sh");
         let manifest_path = temp.join("build-app.toml");
 
@@ -530,7 +530,7 @@ script = "{}"
 timeout_seconds = 600
 concurrency = "parallel"
 
-[params.token]
+[inputs.token]
 type = "string"
 required = true
 sensitive = true
@@ -542,7 +542,7 @@ sensitive = true
 
         let manifest = JobManifest::load_from_path(&manifest_path).expect("manifest should load");
 
-        assert!(manifest.params["token"].sensitive);
+        assert!(manifest.inputs["token"].sensitive);
     }
 
     #[test]
@@ -585,8 +585,8 @@ sensitive = true
     }
 
     #[test]
-    fn rejects_invalid_param_name() {
-        let temp = temp_dir("invalid_param_name");
+    fn rejects_invalid_input_name() {
+        let temp = temp_dir("invalid_input_name");
         let script = write_executable_script(&temp, "build.sh");
         let manifest_path = temp.join("bad.toml");
 
@@ -599,7 +599,7 @@ script = "{}"
 timeout_seconds = 600
 concurrency = "parallel"
 
-[params."bad.param"]
+[inputs."bad.input"]
 type = "string"
 required = true
 
@@ -612,14 +612,14 @@ required = true
         )
         .expect("manifest should be written");
 
-        let error = JobManifest::load_from_path(&manifest_path).expect_err("bad param must fail");
+        let error = JobManifest::load_from_path(&manifest_path).expect_err("bad input must fail");
 
-        assert!(matches!(error, ManifestError::InvalidParamName { .. }));
+        assert!(matches!(error, ManifestError::InvalidInputName { .. }));
     }
 
     #[test]
-    fn rejects_reserved_param_name() {
-        let temp = temp_dir("reserved_param_name");
+    fn rejects_reserved_input_name() {
+        let temp = temp_dir("reserved_input_name");
         let script = write_executable_script(&temp, "build.sh");
         let manifest_path = temp.join("bad.toml");
 
@@ -632,14 +632,14 @@ required = true
         );
 
         let error =
-            JobManifest::load_from_path(&manifest_path).expect_err("reserved param must fail");
+            JobManifest::load_from_path(&manifest_path).expect_err("reserved input must fail");
 
-        assert!(matches!(error, ManifestError::InvalidParamName { .. }));
+        assert!(matches!(error, ManifestError::InvalidInputName { .. }));
     }
 
     #[test]
-    fn rejects_invalid_string_param_pattern() {
-        let temp = temp_dir("invalid_param_pattern");
+    fn rejects_invalid_string_input_pattern() {
+        let temp = temp_dir("invalid_input_pattern");
         let script = write_executable_script(&temp, "build.sh");
         let manifest_path = temp.join("bad.toml");
 
@@ -652,7 +652,7 @@ script = "{}"
 timeout_seconds = 600
 concurrency = "parallel"
 
-[params.commit]
+[inputs.commit]
 type = "string"
 required = true
 pattern = "[unterminated"
@@ -667,12 +667,12 @@ pattern = "[unterminated"
 
         assert!(matches!(
             error,
-            ManifestError::InvalidParamConstraint { .. }
+            ManifestError::InvalidInputConstraint { .. }
         ));
     }
 
     #[test]
-    fn rejects_string_constraints_on_non_string_param() {
+    fn rejects_string_constraints_on_non_string_input() {
         let temp = temp_dir("invalid_string_constraint_kind");
         let script = write_executable_script(&temp, "build.sh");
         let manifest_path = temp.join("bad.toml");
@@ -686,7 +686,7 @@ script = "{}"
 timeout_seconds = 600
 concurrency = "parallel"
 
-[params.count]
+[inputs.count]
 type = "integer"
 required = true
 max_length = 12
@@ -701,12 +701,12 @@ max_length = 12
 
         assert!(matches!(
             error,
-            ManifestError::InvalidParamConstraint { .. }
+            ManifestError::InvalidInputConstraint { .. }
         ));
     }
 
     #[test]
-    fn rejects_json_constraints_on_non_json_param() {
+    fn rejects_json_constraints_on_non_json_input() {
         let temp = temp_dir("invalid_json_constraint_kind");
         let script = write_executable_script(&temp, "build.sh");
         let manifest_path = temp.join("bad.toml");
@@ -720,7 +720,7 @@ script = "{}"
 timeout_seconds = 600
 concurrency = "parallel"
 
-[params.commit]
+[inputs.commit]
 type = "string"
 required = true
 max_json_bytes = 32
@@ -735,7 +735,7 @@ max_json_bytes = 32
 
         assert!(matches!(
             error,
-            ManifestError::InvalidParamConstraint { .. }
+            ManifestError::InvalidInputConstraint { .. }
         ));
     }
 
@@ -767,7 +767,7 @@ script = "build.sh"
 timeout_seconds = 600
 concurrency = "parallel"
 
-[params.commit]
+[inputs.commit]
 type = "string"
 required = true
 "#,
@@ -795,7 +795,7 @@ script = "{}"
 timeout_seconds = 600
 concurrency = "parallel"
 
-[params.commit]
+[inputs.commit]
 type = "string"
 required = true
 
@@ -813,7 +813,7 @@ required = true
         assert!(matches!(error, ManifestError::InvalidOutputPath { .. }));
     }
 
-    fn write_manifest(path: &Path, name: &str, script: &Path, concurrency: &str, param_name: &str) {
+    fn write_manifest(path: &Path, name: &str, script: &Path, concurrency: &str, input_name: &str) {
         fs::write(
             path,
             format!(
@@ -823,7 +823,7 @@ script = "{}"
 timeout_seconds = 600
 concurrency = "{concurrency}"
 
-[params.{param_name}]
+[inputs.{input_name}]
 type = "string"
 required = true
 
