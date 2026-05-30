@@ -1,0 +1,23 @@
+data_dir = "/var/lib/strait-server"
+repos_dir = "/var/lib/strait-server/repos"
+
+[database]
+path = "/var/lib/strait-server/db/server.sqlite3"
+
+[server]
+listen = "127.0.0.1:8090"
+public_base_url = "ci.example.internal"
+
+[auth]
+session_secret = "replace-me-with-a-long-random-secret"
+
+[auth.bootstrap_admin]
+username = "admin"
+password = "change-me"
+
+[scheduler]
+poll_interval_ms = 2000
+
+[runners]
+healthcheck_interval_seconds = 30
+

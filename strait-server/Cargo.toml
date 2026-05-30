@@ -1,0 +1,28 @@
+[package]
+name = "strait-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+argon2 = "0.5.3"
+axum = { version = "0.8.4", features = ["form", "json", "macros"] }
+axum-extra = { version = "0.10.3", features = ["cookie"] }
+chrono = { version = "0.4.42", default-features = false, features = ["clock", "serde"] }
+futures-util = "0.3.32"
+glob = "0.3.3"
+hex = "0.4.3"
+hmac = "0.12.1"
+http = "1.3.1"
+rand = "0.8.5"
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.37.0", features = ["bundled", "chrono"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.10.9"
+tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+toml = "0.9.8"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "json"] }
+async-stream = "0.3.6"
+url = "2.5.7"
+uuid = { version = "1.18.1", features = ["serde", "v4", "v7"] }
