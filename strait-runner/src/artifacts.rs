@@ -145,6 +145,9 @@ impl ArtifactStore {
         let blob_path = artifact_dir.join("blob");
 
         let metadata = self.load_metadata(artifact_id)?;
+        if metadata.is_expired()? {
+            return Err(ArtifactError::NotFound(artifact_id.to_string()));
+        }
         let bytes =
             fs::read(&blob_path).map_err(|_| ArtifactError::NotFound(artifact_id.to_string()))?;
 
@@ -741,6 +744,57 @@ mod tests {
             .await
             .expect("download body");
         assert_eq!(body.as_ref(), payload);
+    }
+
+    #[tokio::test]
+    async fn rejects_download_of_expired_artifact() {
+        let temp = temp_dir("artifact_http_expired_download");
+        let state = test_state(&temp);
+        let app = Router::new()
+            .route("/artifacts", post(upload_artifact))
+            .route("/artifacts/{artifact_id}", get(download_artifact))
+            .with_state(state.clone());
+        let payload = b"artifact-body";
+        let checksum = hex::encode(Sha256::digest(payload));
+
+        let upload = app
+            .clone()
+            .oneshot(
+                Request::post("/artifacts")
+                    .header("authorization", "Bearer artifacts-write-token")
+                    .header("content-type", "application/octet-stream")
+                    .header("x-sha256", checksum.as_str())
+                    .body(Body::from(payload.to_vec()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(upload.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(upload.into_body(), usize::MAX)
+            .await
+            .expect("upload body");
+        let mut metadata: super::ArtifactMetadata =
+            serde_json::from_slice(&body).expect("metadata should deserialize");
+        metadata.expires_at = "1970-01-01T00:00:00Z".to_string();
+        let metadata_path = temp
+            .join("artifacts")
+            .join(&metadata.artifact_id)
+            .join("metadata.json");
+        let metadata_json = serde_json::to_vec_pretty(&metadata).expect("metadata json");
+        crate::storage::atomic_write(&metadata_path, &metadata_json).expect("metadata rewrite");
+
+        let download = app
+            .oneshot(
+                Request::get(format!("/artifacts/{}", metadata.artifact_id))
+                    .header("authorization", "Bearer artifacts-read-token")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(download.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
