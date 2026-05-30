@@ -663,7 +663,7 @@ impl Database {
     pub fn list_pipeline_runs(&self) -> Result<Vec<PipelineRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, repo_id, workflow_id, workflow_version_id, trigger_type, trigger_ref, commit_sha, status, started_at, cancel_requested_at, cancel_started_at, finished_at
+            "SELECT id, repo_id, workflow_id, workflow_version_id, trigger_type, trigger_ref, commit_sha, status, started_at, cancel_reason, cancel_requested_at, cancel_started_at, finished_at
              FROM pipeline_runs ORDER BY started_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -677,9 +677,10 @@ impl Database {
                 commit_sha: row.get(6)?,
                 status: row.get(7)?,
                 started_at: row.get(8)?,
-                cancel_requested_at: row.get(9)?,
-                cancel_started_at: row.get(10)?,
-                finished_at: row.get(11)?,
+                cancel_reason: row.get(9)?,
+                cancel_requested_at: row.get(10)?,
+                cancel_started_at: row.get(11)?,
+                finished_at: row.get(12)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -691,7 +692,7 @@ impl Database {
     ) -> Result<Option<PipelineRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         Ok(conn.query_row(
-            "SELECT id, repo_id, workflow_id, workflow_version_id, trigger_type, trigger_ref, commit_sha, status, started_at, cancel_requested_at, cancel_started_at, finished_at
+            "SELECT id, repo_id, workflow_id, workflow_version_id, trigger_type, trigger_ref, commit_sha, status, started_at, cancel_reason, cancel_requested_at, cancel_started_at, finished_at
              FROM pipeline_runs WHERE id = ?1",
             [pipeline_id],
             |row| {
@@ -705,9 +706,10 @@ impl Database {
                     commit_sha: row.get(6)?,
                     status: row.get(7)?,
                     started_at: row.get(8)?,
-                    cancel_requested_at: row.get(9)?,
-                    cancel_started_at: row.get(10)?,
-                    finished_at: row.get(11)?,
+                    cancel_reason: row.get(9)?,
+                    cancel_requested_at: row.get(10)?,
+                    cancel_started_at: row.get(11)?,
+                    finished_at: row.get(12)?,
                 })
             },
         ).optional()?)
@@ -720,7 +722,7 @@ impl Database {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let pipeline = conn
             .query_row(
-                "SELECT id, repo_id, workflow_id, workflow_version_id, trigger_type, trigger_ref, commit_sha, status, started_at, cancel_requested_at, cancel_started_at, finished_at
+                "SELECT id, repo_id, workflow_id, workflow_version_id, trigger_type, trigger_ref, commit_sha, status, started_at, cancel_reason, cancel_requested_at, cancel_started_at, finished_at
                  FROM pipeline_runs WHERE id = ?1",
                 [pipeline_id],
                 |row| {
@@ -734,9 +736,10 @@ impl Database {
                         commit_sha: row.get(6)?,
                         status: row.get(7)?,
                         started_at: row.get(8)?,
-                        cancel_requested_at: row.get(9)?,
-                        cancel_started_at: row.get(10)?,
-                        finished_at: row.get(11)?,
+                        cancel_reason: row.get(9)?,
+                        cancel_requested_at: row.get(10)?,
+                        cancel_started_at: row.get(11)?,
+                        finished_at: row.get(12)?,
                     })
                 },
             )
@@ -745,7 +748,7 @@ impl Database {
             return Ok(None);
         };
         let mut stmt = conn.prepare(
-            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, cancel_requested_at, cancel_started_at, finished_at
+            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, finished_at
              FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_name",
         )?;
         let job_rows = stmt
@@ -762,9 +765,12 @@ impl Database {
                     status: row.get(8)?,
                     allow_failure: row.get::<_, i64>(9)? != 0,
                     started_at: row.get(10)?,
-                    cancel_requested_at: row.get(11)?,
-                    cancel_started_at: row.get(12)?,
-                    finished_at: row.get(13)?,
+                    cancel_reason: row.get(11)?,
+                    cancel_requested_at: row.get(12)?,
+                    cancel_started_at: row.get(13)?,
+                    cancel_retry_count: row.get(14)?,
+                    last_cancel_retry_at: row.get(15)?,
+                    finished_at: row.get(16)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -814,7 +820,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut query = String::from(
-            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, cancel_requested_at, cancel_started_at, finished_at FROM job_runs WHERE status IN (",
+            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, finished_at FROM job_runs WHERE status IN (",
         );
         for idx in 0..statuses.len() {
             if idx > 0 {
@@ -838,9 +844,12 @@ impl Database {
                 status: row.get(8)?,
                 allow_failure: row.get::<_, i64>(9)? != 0,
                 started_at: row.get(10)?,
-                cancel_requested_at: row.get(11)?,
-                cancel_started_at: row.get(12)?,
-                finished_at: row.get(13)?,
+                cancel_reason: row.get(11)?,
+                cancel_requested_at: row.get(12)?,
+                cancel_started_at: row.get(13)?,
+                cancel_retry_count: row.get(14)?,
+                last_cancel_retry_at: row.get(15)?,
+                finished_at: row.get(16)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -852,7 +861,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT jr.id, jr.pipeline_run_id, jr.job_id, jr.job_name, jr.runner_id, jr.runner_job_name, jr.dispatch_idempotency_key, jr.runner_run_id, jr.status, jr.allow_failure, jr.started_at, jr.cancel_requested_at, jr.cancel_started_at, jr.finished_at
+            "SELECT jr.id, jr.pipeline_run_id, jr.job_id, jr.job_name, jr.runner_id, jr.runner_job_name, jr.dispatch_idempotency_key, jr.runner_run_id, jr.status, jr.allow_failure, jr.started_at, jr.cancel_reason, jr.cancel_requested_at, jr.cancel_started_at, jr.cancel_retry_count, jr.last_cancel_retry_at, jr.finished_at
              FROM job_run_dependencies d
              JOIN job_runs jr ON jr.id = d.depends_on_job_run_id
              WHERE d.job_run_id = ?1",
@@ -870,9 +879,12 @@ impl Database {
                 status: row.get(8)?,
                 allow_failure: row.get::<_, i64>(9)? != 0,
                 started_at: row.get(10)?,
-                cancel_requested_at: row.get(11)?,
-                cancel_started_at: row.get(12)?,
-                finished_at: row.get(13)?,
+                cancel_reason: row.get(11)?,
+                cancel_requested_at: row.get(12)?,
+                cancel_started_at: row.get(13)?,
+                cancel_retry_count: row.get(14)?,
+                last_cancel_retry_at: row.get(15)?,
+                finished_at: row.get(16)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -890,8 +902,11 @@ impl Database {
              SET status = 'running',
                  runner_run_id = ?2,
                  started_at = ?3,
+                 cancel_reason = NULL,
                  cancel_requested_at = NULL,
-                 cancel_started_at = NULL
+                 cancel_started_at = NULL,
+                 cancel_retry_count = 0,
+                 last_cancel_retry_at = NULL
              WHERE id = ?1",
             params![job_run_id, runner_run_id, started_at],
         )?;
@@ -909,7 +924,14 @@ impl Database {
         let mut conn = self.conn.lock().expect("db mutex poisoned");
         let tx = conn.transaction()?;
         tx.execute(
-            "UPDATE job_runs SET status = ?2, finished_at = ?3 WHERE id = ?1",
+            "UPDATE job_runs
+             SET status = ?2,
+                 finished_at = ?3,
+                 cancel_requested_at = CASE WHEN ?2 = 'canceled' THEN cancel_requested_at ELSE NULL END,
+                 cancel_started_at = CASE WHEN ?2 = 'canceled' THEN cancel_started_at ELSE NULL END,
+                 cancel_retry_count = CASE WHEN ?2 = 'canceled' THEN cancel_retry_count ELSE 0 END,
+                 last_cancel_retry_at = CASE WHEN ?2 = 'canceled' THEN last_cancel_retry_at ELSE NULL END
+             WHERE id = ?1",
             params![job_run_id, status, now()],
         )?;
         tx.execute(
@@ -933,6 +955,10 @@ impl Database {
         conn.execute(
             "UPDATE job_runs
              SET status = ?2,
+                 cancel_reason = CASE
+                     WHEN ?2 IN ('cancel_requested', 'canceling', 'canceled') THEN cancel_reason
+                     ELSE NULL
+                 END,
                  cancel_requested_at = CASE
                      WHEN ?2 = 'cancel_requested' AND cancel_requested_at IS NULL THEN ?3
                      WHEN ?2 NOT IN ('cancel_requested', 'canceling', 'canceled') THEN NULL
@@ -943,12 +969,74 @@ impl Database {
                      WHEN ?2 NOT IN ('canceling', 'canceled') THEN NULL
                      ELSE cancel_started_at
                  END,
+                 cancel_retry_count = CASE
+                     WHEN ?2 IN ('cancel_requested', 'canceling', 'canceled') THEN cancel_retry_count
+                     ELSE 0
+                 END,
+                 last_cancel_retry_at = CASE
+                     WHEN ?2 IN ('cancel_requested', 'canceling', 'canceled') THEN last_cancel_retry_at
+                     ELSE NULL
+                 END,
                  finished_at = CASE
                      WHEN ?2 IN ('success', 'failed', 'canceled', 'blocked', 'skipped') THEN ?3
                      ELSE NULL
                  END
              WHERE id = ?1",
             params![job_run_id, status, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_job_run_cancel_requested(
+        &self,
+        job_run_id: &str,
+        reason: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "UPDATE job_runs
+             SET status = 'cancel_requested',
+                 cancel_reason = ?2,
+                 cancel_requested_at = COALESCE(cancel_requested_at, ?3),
+                 finished_at = NULL
+             WHERE id = ?1",
+            params![job_run_id, reason, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_cancel_retry(
+        &self,
+        job_run_id: &str,
+    ) -> Result<i64, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "UPDATE job_runs
+             SET cancel_retry_count = cancel_retry_count + 1,
+                 last_cancel_retry_at = ?2
+             WHERE id = ?1",
+            params![job_run_id, now()],
+        )?;
+        let count = conn.query_row(
+            "SELECT cancel_retry_count FROM job_runs WHERE id = ?1",
+            [job_run_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    pub fn mark_job_run_cancel_retry_exhausted(
+        &self,
+        job_run_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "UPDATE job_runs
+             SET status = 'failed',
+                 cancel_reason = 'stuck_retry_exhausted',
+                 finished_at = ?2
+             WHERE id = ?1",
+            params![job_run_id, now()],
         )?;
         Ok(())
     }
@@ -980,7 +1068,7 @@ impl Database {
     ) -> Result<Option<PipelineRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         Ok(conn.query_row(
-            "SELECT p.id, p.repo_id, p.workflow_id, p.workflow_version_id, p.trigger_type, p.trigger_ref, p.commit_sha, p.status, p.started_at, p.cancel_requested_at, p.cancel_started_at, p.finished_at
+            "SELECT p.id, p.repo_id, p.workflow_id, p.workflow_version_id, p.trigger_type, p.trigger_ref, p.commit_sha, p.status, p.started_at, p.cancel_reason, p.cancel_requested_at, p.cancel_started_at, p.finished_at
              FROM job_runs j JOIN pipeline_runs p ON p.id = j.pipeline_run_id WHERE j.id = ?1",
             [job_run_id],
             |row| {
@@ -994,9 +1082,10 @@ impl Database {
                     commit_sha: row.get(6)?,
                     status: row.get(7)?,
                     started_at: row.get(8)?,
-                    cancel_requested_at: row.get(9)?,
-                    cancel_started_at: row.get(10)?,
-                    finished_at: row.get(11)?,
+                    cancel_reason: row.get(9)?,
+                    cancel_requested_at: row.get(10)?,
+                    cancel_started_at: row.get(11)?,
+                    finished_at: row.get(12)?,
                 })
             },
         ).optional()?)
@@ -1008,7 +1097,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, cancel_requested_at, cancel_started_at, finished_at
+            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, finished_at
              FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_name",
         )?;
         let rows = stmt.query_map([pipeline_id], |row| {
@@ -1024,9 +1113,12 @@ impl Database {
                 status: row.get(8)?,
                 allow_failure: row.get::<_, i64>(9)? != 0,
                 started_at: row.get(10)?,
-                cancel_requested_at: row.get(11)?,
-                cancel_started_at: row.get(12)?,
-                finished_at: row.get(13)?,
+                cancel_reason: row.get(11)?,
+                cancel_requested_at: row.get(12)?,
+                cancel_started_at: row.get(13)?,
+                cancel_retry_count: row.get(14)?,
+                last_cancel_retry_at: row.get(15)?,
+                finished_at: row.get(16)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1059,7 +1151,22 @@ impl Database {
         );
 
         conn.execute(
-            "UPDATE pipeline_runs SET status = ?2, finished_at = CASE WHEN ?2 IN ('success', 'failed', 'canceled', 'blocked') THEN ?3 ELSE NULL END WHERE id = ?1",
+            "UPDATE pipeline_runs
+             SET status = ?2,
+                 cancel_reason = CASE
+                     WHEN ?2 IN ('cancel_requested', 'canceling', 'canceled') THEN cancel_reason
+                     ELSE NULL
+                 END,
+                 cancel_requested_at = CASE
+                     WHEN ?2 IN ('cancel_requested', 'canceling', 'canceled') THEN cancel_requested_at
+                     ELSE NULL
+                 END,
+                 cancel_started_at = CASE
+                     WHEN ?2 IN ('canceling', 'canceled') THEN cancel_started_at
+                     ELSE NULL
+                 END,
+                 finished_at = CASE WHEN ?2 IN ('success', 'failed', 'canceled', 'blocked') THEN ?3 ELSE NULL END
+             WHERE id = ?1",
             params![pipeline_id, pipeline_status.as_str(), now()],
         )?;
         Ok(())
@@ -1074,6 +1181,10 @@ impl Database {
         conn.execute(
             "UPDATE pipeline_runs
              SET status = ?2,
+                 cancel_reason = CASE
+                     WHEN ?2 IN ('cancel_requested', 'canceling', 'canceled') THEN cancel_reason
+                     ELSE NULL
+                 END,
                  cancel_requested_at = CASE
                      WHEN ?2 = 'cancel_requested' AND cancel_requested_at IS NULL THEN ?3
                      WHEN ?2 NOT IN ('cancel_requested', 'canceling', 'canceled') THEN NULL
@@ -1091,10 +1202,28 @@ impl Database {
         Ok(())
     }
 
+    pub fn mark_pipeline_cancel_requested(
+        &self,
+        pipeline_id: &str,
+        reason: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "UPDATE pipeline_runs
+             SET status = 'cancel_requested',
+                 cancel_reason = ?2,
+                 cancel_requested_at = COALESCE(cancel_requested_at, ?3),
+                 finished_at = NULL
+             WHERE id = ?1",
+            params![pipeline_id, reason, now()],
+        )?;
+        Ok(())
+    }
+
     pub fn pipelines_requiring_recovery(&self) -> Result<Vec<PipelineRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT p.id, p.repo_id, p.workflow_id, p.workflow_version_id, p.trigger_type, p.trigger_ref, p.commit_sha, p.status, p.started_at, p.cancel_requested_at, p.cancel_started_at, p.finished_at
+            "SELECT DISTINCT p.id, p.repo_id, p.workflow_id, p.workflow_version_id, p.trigger_type, p.trigger_ref, p.commit_sha, p.status, p.started_at, p.cancel_reason, p.cancel_requested_at, p.cancel_started_at, p.finished_at
              FROM pipeline_runs p
              LEFT JOIN job_runs j ON j.pipeline_run_id = p.id
              WHERE p.status IN ('running', 'cancel_requested', 'canceling')
@@ -1111,9 +1240,10 @@ impl Database {
                 commit_sha: row.get(6)?,
                 status: row.get(7)?,
                 started_at: row.get(8)?,
-                cancel_requested_at: row.get(9)?,
-                cancel_started_at: row.get(10)?,
-                finished_at: row.get(11)?,
+                cancel_reason: row.get(9)?,
+                cancel_requested_at: row.get(10)?,
+                cancel_started_at: row.get(11)?,
+                finished_at: row.get(12)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1312,6 +1442,7 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             commit_sha TEXT,
             status TEXT NOT NULL,
             started_at TEXT NOT NULL,
+            cancel_reason TEXT,
             cancel_requested_at TEXT,
             cancel_started_at TEXT,
             finished_at TEXT,
@@ -1331,8 +1462,11 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             status TEXT NOT NULL,
             allow_failure INTEGER NOT NULL,
             started_at TEXT,
+            cancel_reason TEXT,
             cancel_requested_at TEXT,
             cancel_started_at TEXT,
+            cancel_retry_count INTEGER NOT NULL DEFAULT 0,
+            last_cancel_retry_at TEXT,
             finished_at TEXT,
             FOREIGN KEY(pipeline_run_id) REFERENCES pipeline_runs(id) ON DELETE CASCADE,
             FOREIGN KEY(runner_id) REFERENCES runners(id) ON DELETE CASCADE
@@ -1412,6 +1546,9 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
     if !columns.iter().any(|name| name == "cancel_started_at") {
         tx.execute_batch("ALTER TABLE pipeline_runs ADD COLUMN cancel_started_at TEXT;")?;
     }
+    if !columns.iter().any(|name| name == "cancel_reason") {
+        tx.execute_batch("ALTER TABLE pipeline_runs ADD COLUMN cancel_reason TEXT;")?;
+    }
     let mut stmt = tx.prepare("PRAGMA table_info(job_runs)")?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))?
@@ -1422,6 +1559,15 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
     }
     if !columns.iter().any(|name| name == "cancel_started_at") {
         tx.execute_batch("ALTER TABLE job_runs ADD COLUMN cancel_started_at TEXT;")?;
+    }
+    if !columns.iter().any(|name| name == "cancel_reason") {
+        tx.execute_batch("ALTER TABLE job_runs ADD COLUMN cancel_reason TEXT;")?;
+    }
+    if !columns.iter().any(|name| name == "cancel_retry_count") {
+        tx.execute_batch("ALTER TABLE job_runs ADD COLUMN cancel_retry_count INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    if !columns.iter().any(|name| name == "last_cancel_retry_at") {
+        tx.execute_batch("ALTER TABLE job_runs ADD COLUMN last_cancel_retry_at TEXT;")?;
     }
     tx.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?1)",

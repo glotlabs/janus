@@ -261,7 +261,9 @@ async fn cancel_pipeline_tracks_runner_cancel_progress() {
         .expect("snapshot")
         .unwrap();
     assert_eq!(snapshot.pipeline.status, "cancel_requested");
+    assert_eq!(snapshot.pipeline.cancel_reason.as_deref(), Some("user_requested"));
     assert_eq!(snapshot.jobs[0].run.status, "cancel_requested");
+    assert_eq!(snapshot.jobs[0].run.cancel_reason.as_deref(), Some("user_requested"));
 
     scheduler::reconcile_once(Arc::clone(&fixture.state))
         .await
@@ -345,6 +347,7 @@ async fn scheduler_retries_stuck_cancellation() {
         .clone()
         .expect("runner run id");
     assert_eq!(mock.cancel_count(&runner_run_id), 1);
+    assert_eq!(snapshot.jobs[0].run.cancel_retry_count, 0);
 
     sleep(std::time::Duration::from_millis(1100)).await;
     scheduler::reconcile_once(Arc::clone(&fixture.state))
@@ -359,7 +362,71 @@ async fn scheduler_retries_stuck_cancellation() {
         .unwrap();
     assert_eq!(snapshot.pipeline.status, "cancel_requested");
     assert_eq!(snapshot.jobs[0].run.status, "cancel_requested");
+    assert_eq!(snapshot.jobs[0].run.cancel_retry_count, 1);
+    assert!(snapshot.jobs[0].run.last_cancel_retry_at.is_some());
     assert!(mock.cancel_count(&runner_run_id) >= 2);
+}
+
+#[tokio::test]
+async fn scheduler_fails_job_after_cancel_retry_budget_exhausted() {
+    let mock = spawn_mock_runner_with_stuck_cancellation().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .create_push_event(
+            &repo.id,
+            "event-exhaust-cancel",
+            &[crate::models::PushEventRef {
+                old_rev: "0".repeat(40),
+                new_rev: "1".repeat(40),
+                ref_name: "refs/heads/main".to_string(),
+            }],
+        )
+        .expect("push event");
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("dispatch");
+    let pipeline = fixture
+        .state
+        .db
+        .list_pipeline_runs()
+        .expect("pipelines")
+        .remove(0);
+
+    scheduler::cancel_pipeline(Arc::clone(&fixture.state), &pipeline.id)
+        .await
+        .expect("cancel");
+
+    sleep(std::time::Duration::from_millis(1100)).await;
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("retry 1");
+    sleep(std::time::Duration::from_millis(1100)).await;
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("retry 2");
+    sleep(std::time::Duration::from_millis(1100)).await;
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("exhaust");
+
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "failed");
+    assert_eq!(snapshot.jobs[0].run.status, "failed");
+    assert_eq!(
+        snapshot.jobs[0].run.cancel_reason.as_deref(),
+        Some("stuck_retry_exhausted")
+    );
+    assert_eq!(snapshot.jobs[0].run.cancel_retry_count, 2);
 }
 
 struct TestFixture {
@@ -492,6 +559,7 @@ password = "password123"
 [scheduler]
 poll_interval_ms = 50
 cancel_stuck_timeout_seconds = 1
+max_cancel_retries = 2
 
 [runners]
 healthcheck_interval_seconds = 60

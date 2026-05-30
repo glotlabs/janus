@@ -103,6 +103,7 @@ pub(crate) async fn cancel_pipeline(
         .db
         .list_job_runs_for_pipeline(pipeline_id)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let mut requested_remote_cancel = false;
     for job in jobs {
         let runner = state
             .db
@@ -118,13 +119,20 @@ pub(crate) async fn cancel_pipeline(
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             state
                 .db
-                .set_job_run_status(&job.id, JobStatus::CancelRequested.as_str())?;
+                .mark_job_run_cancel_requested(&job.id, "user_requested")?;
+            requested_remote_cancel = true;
         }
         if job.status == JobStatus::Pending.as_str() {
             state.db.set_job_run_status(&job.id, "canceled")?;
         }
     }
-    state.db.finalize_pipeline_status(pipeline_id)?;
+    if requested_remote_cancel {
+        state
+            .db
+            .mark_pipeline_cancel_requested(pipeline_id, "user_requested")?;
+    } else {
+        state.db.set_pipeline_status(pipeline_id, "canceled")?;
+    }
     Ok(())
 }
 
@@ -233,7 +241,10 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
         let Some(runner_run_id) = &job.runner_run_id else {
             continue;
         };
-        retry_stuck_cancellation(Arc::clone(&state), &job, &runner, runner_run_id).await?;
+        if retry_stuck_cancellation(Arc::clone(&state), &job, &runner, runner_run_id).await? {
+            state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
+            continue;
+        }
         match state.runner_client.get_job_run(&runner, runner_run_id).await {
             Ok(status) => {
                 match status.status.as_str() {
@@ -309,25 +320,36 @@ async fn retry_stuck_cancellation(
     job: &crate::models::JobRun,
     runner: &crate::models::Runner,
     runner_run_id: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     let local_status = JobStatus::parse(&job.status);
     if !matches!(
         local_status,
         Some(JobStatus::CancelRequested | JobStatus::Canceling)
     ) {
-        return Ok(());
+        return Ok(false);
     }
     let Some(started_at) = job
         .cancel_started_at
         .as_deref()
         .or(job.cancel_requested_at.as_deref())
     else {
-        return Ok(());
+        return Ok(false);
     };
     let elapsed = Utc::now()
         .signed_duration_since(DateTime::parse_from_rfc3339(started_at)?.with_timezone(&Utc));
     if elapsed.num_seconds() < state.config.scheduler.cancel_stuck_timeout_seconds as i64 {
-        return Ok(());
+        return Ok(false);
+    }
+    if job.cancel_retry_count >= i64::from(state.config.scheduler.max_cancel_retries) {
+        warn!(
+            job_run_id = %job.id,
+            runner_run_id = %runner_run_id,
+            cancel_retry_count = job.cancel_retry_count,
+            max_cancel_retries = state.config.scheduler.max_cancel_retries,
+            "job cancellation retry budget exhausted; marking job failed"
+        );
+        state.db.mark_job_run_cancel_retry_exhausted(&job.id)?;
+        return Ok(true);
     }
 
     warn!(
@@ -342,7 +364,14 @@ async fn retry_stuck_cancellation(
         .cancel_job_run(runner, runner_run_id)
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    Ok(())
+    let retry_count = state.db.record_cancel_retry(&job.id)?;
+    warn!(
+        job_run_id = %job.id,
+        runner_run_id = %runner_run_id,
+        cancel_retry_count = retry_count,
+        "job cancellation retried"
+    );
+    Ok(false)
 }
 
 async fn resolve_job_inputs(
