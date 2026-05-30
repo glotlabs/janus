@@ -177,16 +177,18 @@ pub struct JobRunDetail {
     pub run: JobRun,
     pub stdout: String,
     pub stderr: String,
-    pub outputs: Vec<JobRunArtifact>,
+    pub outputs: Vec<JobRunOutput>,
     pub dependencies: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobRunArtifact {
-    pub artifact_name: String,
-    pub artifact_role: String,
-    pub runner_artifact_id: String,
+pub struct JobRunOutput {
+    pub output_name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub runner_artifact_id: Option<String>,
     pub server_artifact_id: Option<String>,
+    pub value: Option<Value>,
     pub sha256: Option<String>,
     pub size_bytes: Option<i64>,
 }

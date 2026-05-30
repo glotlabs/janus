@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::manifest::{Concurrency, InputType, JobManifest};
+use crate::manifest::{Concurrency, InputType, JobManifest, OutputType};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobCreated {
@@ -19,7 +19,7 @@ pub struct JobCreatedResponse {
     pub started_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JobMetadata {
     pub job_id: String,
     pub name: String,
@@ -38,7 +38,7 @@ pub struct JobMetadata {
     pub inputs: Map<String, Value>,
     pub resolved_artifacts: BTreeMap<String, String>,
     #[serde(default)]
-    pub outputs: BTreeMap<String, JobOutputArtifact>,
+    pub outputs: BTreeMap<String, JobOutput>,
     #[serde(default)]
     pub output_metadata: JobOutputMetadata,
 }
@@ -55,21 +55,29 @@ pub struct JobLogsResponse {
     pub stderr: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JobOutputArtifact {
-    pub artifact_id: String,
-    pub sha256: String,
-    pub size: u64,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JobOutput {
+    Artifact {
+        artifact_id: String,
+        sha256: String,
+        size: u64,
+    },
+    String {
+        value: String,
+    },
+    Integer {
+        value: i64,
+    },
+    Boolean {
+        value: bool,
+    },
+    Json {
+        value: Value,
+    },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JobOutputResponse {
-    pub artifact_id: String,
-    pub sha256: String,
-    pub size: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JobStatusResponse {
     pub job_id: String,
     pub name: String,
@@ -83,7 +91,7 @@ pub struct JobStatusResponse {
     pub terminal_reason: Option<TerminalReason>,
     #[serde(default)]
     pub failure_category: Option<FailureCategory>,
-    pub outputs: BTreeMap<String, JobOutputResponse>,
+    pub outputs: BTreeMap<String, JobOutput>,
     #[serde(default)]
     pub output_metadata: JobOutputMetadata,
 }
@@ -162,6 +170,8 @@ pub struct JobInputDefinitionResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobOutputDefinitionResponse {
+    #[serde(rename = "type")]
+    pub kind: OutputType,
     pub path: String,
     pub required: bool,
 }
@@ -246,20 +256,7 @@ impl From<JobMetadata> for JobStatusResponse {
             exit_code: value.exit_code,
             terminal_reason: value.terminal_reason,
             failure_category: value.failure_category,
-            outputs: value
-                .outputs
-                .into_iter()
-                .map(|(name, output)| {
-                    (
-                        name,
-                        JobOutputResponse {
-                            artifact_id: output.artifact_id,
-                            sha256: output.sha256,
-                            size: output.size,
-                        },
-                    )
-                })
-                .collect(),
+            outputs: value.outputs,
             output_metadata: value.output_metadata,
         }
     }
@@ -295,6 +292,7 @@ impl From<JobManifest> for JobDefinitionResponse {
                     (
                         name,
                         JobOutputDefinitionResponse {
+                            kind: output.kind,
                             path: output.path,
                             required: output.required,
                         },

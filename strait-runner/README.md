@@ -130,6 +130,7 @@ type = "artifact"
 required = true
 
 [outputs.app]
+type = "artifact"
 path = "app.tar.gz"
 required = true
 ```
@@ -255,8 +256,17 @@ Notes:
 
 Each output declares:
 
+- `type`: one of `artifact`, `string`, `integer`, `boolean`, `json`
 - `path`: relative path inside the job output directory
 - `required`: whether the file must exist for the job to remain successful
+
+Output behavior:
+
+- `artifact`: the file is uploaded and exposed as an artifact reference
+- `string`: the file is read as UTF-8 text
+- `integer`: the file must contain a valid signed integer
+- `boolean`: the file must contain `true` or `false`
+- `json`: the file must contain valid non-`null` JSON
 
 Output paths must be relative and must not escape the output directory.
 

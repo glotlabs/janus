@@ -16,5 +16,6 @@ type = "artifact"
 required = true
 
 [outputs.app]
+type = "artifact"
 path = "app.tar.gz"
 required = true

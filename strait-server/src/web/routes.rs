@@ -1153,6 +1153,7 @@ fn validate_workflow_runners(
     state: &Arc<AppState>,
     definition: &WorkflowDefinition,
 ) -> Result<(), Response> {
+    let mut runner_job_defs = BTreeMap::new();
     for job in &definition.jobs {
         let runner = state
             .db
@@ -1163,14 +1164,171 @@ fn validate_workflow_runners(
             .db
             .list_runner_jobs(&runner.id)
             .map_err(internal_error)?;
-        if !jobs.iter().any(|(name, _)| name == &job.runner_job_name) {
+        let definition_json = jobs
+            .iter()
+            .find(|(name, _)| name == &job.runner_job_name)
+            .map(|(_, definition_json)| definition_json.clone());
+        let Some(definition_json) = definition_json else {
             return Err(bad_request(format!(
                 "runner {} does not advertise job {}",
                 runner.name, job.runner_job_name
             )));
+        };
+        let runner_job = serde_json::from_str::<WorkflowRunnerJobCatalogEntry>(&definition_json)
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to parse runner job definition for {}: {error}",
+                    job.runner_job_name
+                ))
+            })?;
+        runner_job_defs.insert(job.id.clone(), runner_job);
+    }
+
+    for job in &definition.jobs {
+        let runner_job = runner_job_defs
+            .get(&job.id)
+            .ok_or_else(|| internal_error("missing parsed runner job definition"))?;
+        for (input_name, value) in &job.inputs {
+            let expected_kind = runner_job
+                .inputs
+                .get(input_name)
+                .map(|entry| entry.kind.as_str())
+                .ok_or_else(|| {
+                    bad_request(format!(
+                        "workflow job {} provides unknown input {} for runner job {}",
+                        job.id, input_name, job.runner_job_name
+                    ))
+                })?;
+            if let Value::String(raw) = value {
+                if raw == "$commit" || raw == "$branch" {
+                    if expected_kind != "string" {
+                        return Err(bad_request(format!(
+                            "workflow input {input_name} expects {expected_kind} but {raw} is string"
+                        )));
+                    }
+                    continue;
+                }
+                if raw == "$source" {
+                    if expected_kind != "artifact" {
+                        return Err(bad_request(format!(
+                            "workflow input {input_name} expects {expected_kind} but $source is artifact"
+                        )));
+                    }
+                    continue;
+                }
+                if raw.starts_with("$job.") {
+                    let mut parts = raw.trim_start_matches("$job.").split('.');
+                    let source_job_id = parts.next().unwrap_or_default();
+                    let output_name = parts.next().unwrap_or_default();
+                    if source_job_id.is_empty() || output_name.is_empty() || parts.next().is_some()
+                    {
+                        return Err(bad_request(format!(
+                            "workflow input {input_name} has invalid job output reference {raw}"
+                        )));
+                    }
+                    let upstream_job = definition
+                        .jobs
+                        .iter()
+                        .find(|candidate| candidate.id == source_job_id)
+                        .ok_or_else(|| {
+                            bad_request(format!(
+                                "workflow input {input_name} references unknown job {source_job_id}"
+                            ))
+                        })?;
+                    if !job.needs.iter().any(|need| need == &upstream_job.id) {
+                        return Err(bad_request(format!(
+                            "workflow input {input_name} references {source_job_id}.{output_name} but job {} does not depend on {source_job_id}",
+                            job.id
+                        )));
+                    }
+                    let upstream_runner_job = runner_job_defs
+                        .get(&upstream_job.id)
+                        .ok_or_else(|| internal_error("missing upstream runner job definition"))?;
+                    let output = upstream_runner_job
+                        .outputs
+                        .get(output_name)
+                        .ok_or_else(|| {
+                            bad_request(format!(
+                                "workflow input {input_name} references missing output {source_job_id}.{output_name}"
+                            ))
+                        })?;
+                    if output.kind != expected_kind {
+                        return Err(bad_request(format!(
+                            "workflow input {input_name} expects {expected_kind} but {source_job_id}.{output_name} is {}",
+                            output.kind
+                        )));
+                    }
+                    continue;
+                }
+            }
+            if !value_matches_input_kind(value, expected_kind) {
+                return Err(bad_request(format!(
+                    "workflow input {input_name} expects {expected_kind} but got {}",
+                    describe_json_value_kind(value)
+                )));
+            }
+        }
+
+        for upstream_job_id in &job.artifacts_from {
+            let upstream_job = definition
+                .jobs
+                .iter()
+                .find(|candidate| candidate.id == *upstream_job_id)
+                .ok_or_else(|| {
+                    bad_request(format!(
+                        "job {} references unknown artifacts_from job {upstream_job_id}",
+                        job.id
+                    ))
+                })?;
+            if !job.needs.iter().any(|need| need == &upstream_job.id) {
+                return Err(bad_request(format!(
+                    "job {} references artifacts_from {upstream_job_id} but does not depend on it",
+                    job.id
+                )));
+            }
+            let upstream_runner_job = runner_job_defs
+                .get(&upstream_job.id)
+                .ok_or_else(|| internal_error("missing upstream runner job definition"))?;
+            if upstream_runner_job
+                .outputs
+                .values()
+                .any(|output| output.kind != "artifact")
+            {
+                return Err(bad_request(format!(
+                    "job {} cannot use artifacts_from {upstream_job_id} because that job exposes non-artifact outputs",
+                    job.id
+                )));
+            }
         }
     }
     Ok(())
+}
+
+fn value_matches_input_kind(value: &Value, expected_kind: &str) -> bool {
+    match expected_kind {
+        "string" | "artifact" => value.is_string(),
+        "integer" => value.as_i64().is_some(),
+        "boolean" => value.is_boolean(),
+        "json" => !value.is_null(),
+        _ => false,
+    }
+}
+
+fn describe_json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) => {
+            if number.as_i64().is_some() {
+                "integer"
+            } else {
+                "number"
+            }
+        }
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1213,6 +1371,8 @@ struct WorkflowRunnerJobInputEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowRunnerJobOutputEntry {
+    #[serde(rename = "type", default)]
+    kind: String,
     #[serde(default)]
     required: bool,
 }
@@ -1371,7 +1531,7 @@ fn workflow_form_fields(
     );
     let repo_field = repo_selector.unwrap_or(&repo_id_input);
     format!(
-        r#"<div class="form-grid form-grid-2"><label><span>Workflow name</span><input name="name" value="{name}" /></label><label><span>Trigger</span><select name="trigger_kind"><option value="push" {push_selected}>push</option><option value="manual" {manual_selected}>manual</option></select></label></div><div class="form-grid form-grid-2"><label><span>Repository</span>{repo_input}</label><label><span>Branch</span><input name="branch_name" value="{branch_name}" /></label></div><div class="card soft-card"><div class="section-head"><div><div class="eyebrow">Jobs</div><h3>Workflow builder</h3><p class="muted">Runner and job selections derive workflow job IDs automatically. Inputs are rendered from the selected runner job manifest.</p></div></div><div id="workflow-builder" class="stack-md"><div id="workflow-job-list" class="stack-md"></div><div class="actions"><button type="button" id="workflow-add-job" class="secondary">Add job</button></div></div></div><textarea id="workflow-jobs-json" name="jobs_json" hidden>{jobs_json}</textarea><div class="inline-note">Artifact inputs can point to <code>source.tar.gz</code> or to output artifacts produced by earlier jobs.</div><script type="application/json" id="workflow-runner-catalog">{runner_catalog_json}</script><script type="application/json" id="workflow-initial-jobs">{initial_jobs_json}</script><script>
+        r#"<div class="form-grid form-grid-2"><label><span>Workflow name</span><input name="name" value="{name}" /></label><label><span>Trigger</span><select name="trigger_kind"><option value="push" {push_selected}>push</option><option value="manual" {manual_selected}>manual</option></select></label></div><div class="form-grid form-grid-2"><label><span>Repository</span>{repo_input}</label><label><span>Branch</span><input name="branch_name" value="{branch_name}" /></label></div><div class="card soft-card"><div class="section-head"><div><div class="eyebrow">Jobs</div><h3>Workflow builder</h3><p class="muted">Runner and job selections derive workflow job IDs automatically. Inputs are rendered from the selected runner job manifest.</p></div></div><div id="workflow-builder" class="stack-md"><div id="workflow-job-list" class="stack-md"></div><div class="actions"><button type="button" id="workflow-add-job" class="secondary">Add job</button></div></div></div><textarea id="workflow-jobs-json" name="jobs_json" hidden>{jobs_json}</textarea><div class="inline-note">Artifact inputs can point to <code>source.tar.gz</code>. Typed inputs can bind to matching outputs from earlier jobs in the workflow.</div><script type="application/json" id="workflow-runner-catalog">{runner_catalog_json}</script><script type="application/json" id="workflow-initial-jobs">{initial_jobs_json}</script><script>
 (() => {{
   const list = document.getElementById('workflow-job-list');
   const addButton = document.getElementById('workflow-add-job');
@@ -1507,9 +1667,17 @@ fn workflow_form_fields(
     if (kind === 'string') {{
       if (rawValue === '$commit') return {{ mode: 'commit', value: '' }};
       if (rawValue === '$branch') return {{ mode: 'branch', value: '' }};
+      if (typeof rawValue === 'string' && rawValue.startsWith('$job.')) {{
+        return {{ mode: 'output_value', value: rawValue.slice(5) }};
+      }}
       if (inputName === 'commit') return {{ mode: 'commit', value: '' }};
       if (inputName === 'branch') return {{ mode: 'branch', value: '' }};
       return {{ mode: 'literal', value: typeof rawValue === 'string' ? rawValue : '' }};
+    }}
+    if ((kind === 'boolean' || kind === 'integer' || kind === 'json')
+      && typeof rawValue === 'string'
+      && rawValue.startsWith('$job.')) {{
+      return {{ mode: 'output_value', value: rawValue.slice(5) }};
     }}
     if (kind === 'boolean') return {{ mode: 'literal', value: rawValue === true ? 'true' : 'false' }};
     if (kind === 'integer') return {{ mode: 'literal', value: rawValue == null ? '' : String(rawValue) }};
@@ -1530,7 +1698,11 @@ fn workflow_form_fields(
     if (kind === 'string') {{
       if (mode === 'commit') return [name, '$commit'];
       if (mode === 'branch') return [name, '$branch'];
+      if (mode === 'output_value') return [name, `$job.${{valueField.value}}`];
       return [name, valueField ? valueField.value : ''];
+    }}
+    if (mode === 'output_value') {{
+      return [name, `$job.${{valueField.value}}`];
     }}
     if (kind === 'boolean') {{
       return [name, valueField.value === 'true'];
@@ -1573,7 +1745,7 @@ fn workflow_form_fields(
       }};
     }}).filter((job) => job.runner_id || job.runner_job_name || Object.keys(job.inputs).length > 0);
     jobsJsonField.value = JSON.stringify(jobs);
-    renderArtifactOptions(derivedJobs);
+    renderOutputBindingOptions(derivedJobs);
     renderOutputTable(derivedJobs);
   }}
 
@@ -1586,13 +1758,14 @@ fn workflow_form_fields(
     return label;
   }}
 
-  function artifactOptionsFor(currentRow, derivedJobs) {{
-    const options = [{{ value: 'source.tar.gz', label: 'source.tar.gz' }}];
+  function outputOptionsFor(currentRow, derivedJobs, expectedKind) {{
+    const options = [];
     for (const job of derivedJobs) {{
       if (job.row === currentRow) continue;
       const definition = getJobDefinition(job.runnerId, job.runnerJobName);
-      const outputs = definition ? Object.keys(definition.outputs || {{}}) : [];
-      for (const outputName of outputs) {{
+      const outputs = definition ? Object.entries(definition.outputs || {{}}) : [];
+      for (const [outputName, outputDef] of outputs) {{
+        if ((outputDef.type || '') !== expectedKind) continue;
         options.push({{
           value: `${{job.id}}.${{outputName}}`,
           label: `${{job.name}} -> ${{outputName}}`
@@ -1602,15 +1775,60 @@ fn workflow_form_fields(
     return options;
   }}
 
-  function renderArtifactOptions(derivedJobs) {{
+  function findDerivedJobById(derivedJobs, jobId) {{
+    return derivedJobs.find((job) => job.id === jobId) || null;
+  }}
+
+  function literalHintFor(kind, mode) {{
+    if (mode !== 'literal') return '';
+    if (kind === 'string') return 'Enter a plain string value.';
+    if (kind === 'integer') return 'Enter a signed integer like 42.';
+    if (kind === 'boolean') return 'Choose true or false.';
+    if (kind === 'json') return 'Enter valid non-null JSON.';
+    return '';
+  }}
+
+  function outputBindingHint(row, inputRow, mode, derivedJobs) {{
+    if (mode !== 'output_artifact' && mode !== 'output_value') return '';
+    const reference = inputRow.dataset.bindingValue || '';
+    const kind = inputRow.dataset.inputKind;
+    const expectedKind = mode === 'output_artifact' ? 'artifact' : kind;
+    const options = outputOptionsFor(row, derivedJobs, expectedKind);
+    if (options.length === 0) {{
+      return `No earlier jobs expose matching ${{expectedKind}} outputs yet.`;
+    }}
+    if (!reference) return `Select a ${{expectedKind}} output from an earlier job.`;
+    const [sourceJobId] = reference.split('.', 1);
+    if (sourceJobId && !(Array.isArray(row._needs) && row._needs.includes(sourceJobId))) {{
+      return `Warning: add ${{sourceJobId}} to this job's needs before submitting.`;
+    }}
+    const sourceJob = findDerivedJobById(derivedJobs, sourceJobId);
+    if (sourceJob) {{
+      return `Binding to ${{sourceJob.name}}.`;
+    }}
+    return '';
+  }}
+
+  function renderOutputBindingOptions(derivedJobs) {{
     for (const job of derivedJobs) {{
-      for (const artifactRow of job.row.querySelectorAll('[data-input-row][data-input-kind="artifact"]')) {{
-        const mode = artifactRow.querySelector('[data-binding-mode]').value;
-        const valueField = artifactRow.querySelector('[data-binding-value]');
-        if (!valueField || valueField.tagName !== 'SELECT' || mode !== 'output_artifact') continue;
-        const selected = artifactRow.dataset.bindingValue || valueField.value;
+      for (const inputRow of job.row.querySelectorAll('[data-input-row]')) {{
+        const mode = inputRow.querySelector('[data-binding-mode]').value;
+        const valueField = inputRow.querySelector('[data-binding-value]');
+        const kind = inputRow.dataset.inputKind;
+        if (!valueField || valueField.tagName !== 'SELECT') continue;
+        if (mode !== 'output_artifact' && mode !== 'output_value') continue;
+        const selected = inputRow.dataset.bindingValue || valueField.value;
         valueField.replaceChildren();
-        for (const optionData of artifactOptionsFor(job.row, derivedJobs).filter((item) => item.value !== 'source.tar.gz')) {{
+        const expectedKind = mode === 'output_artifact' ? 'artifact' : kind;
+        const options = outputOptionsFor(job.row, derivedJobs, expectedKind);
+        if (options.length === 0) {{
+          const option = document.createElement('option');
+          option.value = '';
+          option.textContent = `No ${{expectedKind}} outputs available`;
+          option.selected = true;
+          valueField.appendChild(option);
+        }}
+        for (const optionData of options) {{
           const option = document.createElement('option');
           option.value = optionData.value;
           option.textContent = optionData.label;
@@ -1620,7 +1838,7 @@ fn workflow_form_fields(
         if (!valueField.value && valueField.options.length > 0) {{
           valueField.value = valueField.options[0].value;
         }}
-        artifactRow.dataset.bindingValue = valueField.value;
+        inputRow.dataset.bindingValue = valueField.value;
       }}
     }}
   }}
@@ -1632,8 +1850,13 @@ fn workflow_form_fields(
     ];
     if (kind === 'string') return [
       ['literal', 'Literal'],
+      ['output_value', 'Job output'],
       ['commit', 'Current commit'],
       ['branch', 'Current branch']
+    ];
+    if (kind === 'integer' || kind === 'boolean' || kind === 'json') return [
+      ['literal', 'Literal'],
+      ['output_value', 'Job output']
     ];
     return [['literal', 'Literal']];
   }}
@@ -1648,6 +1871,12 @@ fn workflow_form_fields(
         option.textContent = 'source.tar.gz';
         select.appendChild(option);
       }}
+      row.dataset.bindingValue = binding.value || '';
+      return select;
+    }}
+    if (binding.mode === 'output_value') {{
+      const select = makeSelect();
+      select.setAttribute('data-binding-value', 'true');
       row.dataset.bindingValue = binding.value || '';
       return select;
     }}
@@ -1684,6 +1913,7 @@ fn workflow_form_fields(
   }}
 
   function renderInputTable(row) {{
+    const derivedJobs = buildDerivedJobs([...list.querySelectorAll('[data-workflow-job-row]')]);
     const wrap = row.querySelector('[data-inputs-wrap]');
     const summary = row.querySelector('[data-input-summary]');
     wrap.replaceChildren();
@@ -1747,6 +1977,14 @@ fn workflow_form_fields(
           }});
         }}
         valueCell.appendChild(field);
+        const hint = literalHintFor(inputDef.type, modeSelect.value)
+          || outputBindingHint(row, inputRow, modeSelect.value, derivedJobs);
+        if (hint) {{
+          const note = document.createElement('div');
+          note.className = 'muted';
+          note.textContent = hint;
+          valueCell.appendChild(note);
+        }}
       }}
 
       modeSelect.addEventListener('change', () => {{
@@ -1790,7 +2028,7 @@ fn workflow_form_fields(
         const nameCell = document.createElement('td');
         nameCell.innerHTML = `<strong>${{outputName}}</strong>`;
         const typeCell = document.createElement('td');
-        typeCell.textContent = 'artifact';
+        typeCell.textContent = outputDef.type || 'unknown';
         const requiredCell = document.createElement('td');
         requiredCell.textContent = outputDef.required ? 'required' : 'optional';
         outputRow.append(nameCell, typeCell, requiredCell);
@@ -1852,7 +2090,7 @@ fn workflow_form_fields(
     const outputsDialogHeader = document.createElement('div');
     outputsDialogHeader.className = 'section-head';
     const outputsDialogHeaderText = document.createElement('div');
-    outputsDialogHeaderText.innerHTML = '<div class="eyebrow">Outputs</div><h3>Declared job outputs</h3><p class="muted">Runner jobs currently expose outputs as artifacts.</p>';
+    outputsDialogHeaderText.innerHTML = '<div class="eyebrow">Outputs</div><h3>Declared job outputs</h3><p class="muted">Runner jobs can expose artifact or typed outputs, which downstream jobs can consume.</p>';
     const outputsDialogCloseTop = document.createElement('button');
     outputsDialogCloseTop.type = 'button';
     outputsDialogCloseTop.textContent = 'Close';

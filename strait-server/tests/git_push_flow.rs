@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use axum::{
@@ -327,7 +327,15 @@ async fn spawn_mock_runner() -> MockRunner {
 }
 
 async fn mock_list_jobs() -> Json<Value> {
-    Json(json!([{"name":"build-app","timeout_seconds":60}]))
+    Json(json!([{
+        "name":"build-app",
+        "timeout_seconds":60,
+        "inputs":{
+            "commit":{"type":"string","required":true},
+            "branch":{"type":"string","required":true}
+        },
+        "outputs":{}
+    }]))
 }
 
 async fn mock_create_run(
@@ -410,10 +418,7 @@ async fn mock_artifact_download() -> Body {
 }
 
 fn temp_dir(label: &str) -> PathBuf {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time")
-        .as_nanos();
+    let suffix = Uuid::now_v7().simple().to_string();
     let dir = std::env::temp_dir().join(format!("strait-server-{label}-{suffix}"));
     fs::create_dir_all(&dir).expect("temp dir");
     dir

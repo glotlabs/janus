@@ -146,6 +146,16 @@ pub enum InputType {
     Json,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputType {
+    Artifact,
+    String,
+    Integer,
+    Boolean,
+    Json,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct InputSpec {
     #[serde(rename = "type")]
@@ -160,6 +170,8 @@ pub struct InputSpec {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct OutputSpec {
+    #[serde(rename = "type")]
+    pub kind: OutputType,
     pub path: String,
     pub required: bool,
 }
@@ -472,10 +484,10 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{Concurrency, InputType, JobManifest, ManifestError, ManifestStore};
+    use super::{Concurrency, InputType, JobManifest, ManifestError, ManifestStore, OutputType};
+    use uuid::Uuid;
 
     #[test]
     fn parses_manifest_file() {
@@ -497,6 +509,7 @@ type = "string"
 required = true
 
 [outputs.app]
+type = "artifact"
 path = "app.tar.gz"
 required = true
 "#,
@@ -512,6 +525,7 @@ required = true
         assert_eq!(manifest.concurrency, Concurrency::JobExclusive);
         assert_eq!(manifest.inputs["commit"].kind, InputType::String);
         assert!(!manifest.inputs["commit"].sensitive);
+        assert_eq!(manifest.outputs["app"].kind, OutputType::Artifact);
         assert!(manifest.outputs["app"].required);
     }
 
@@ -604,6 +618,7 @@ type = "string"
 required = true
 
 [outputs.app]
+type = "artifact"
 path = "app.tar.gz"
 required = true
 "#,
@@ -800,6 +815,7 @@ type = "string"
 required = true
 
 [outputs.app]
+type = "artifact"
 path = "../escape.txt"
 required = true
 "#,
@@ -828,6 +844,7 @@ type = "string"
 required = true
 
 [outputs.app]
+type = "artifact"
 path = "app.tar.gz"
 required = true
 "#,
@@ -854,10 +871,7 @@ required = true
     }
 
     fn temp_dir(label: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should work")
-            .as_nanos();
+        let unique = Uuid::now_v7().simple().to_string();
         let path = std::env::temp_dir().join(format!("strait-runner-{label}-{unique}"));
         fs::create_dir_all(&path).expect("temp dir should be created");
         path

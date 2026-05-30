@@ -55,6 +55,18 @@ pub(crate) async fn reconcile_once(state: Arc<AppState>) -> Result<(), Box<dyn s
     Ok(())
 }
 
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+struct RunnerJobDefinition {
+    #[serde(default)]
+    inputs: BTreeMap<String, RunnerJobInputDefinition>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct RunnerJobInputDefinition {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
 async fn reconcile(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
     reconcile_once(state).await
 }
@@ -219,8 +231,16 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
         let Some(job_definition) = definition.jobs.iter().find(|item| item.id == job.job_id) else {
             continue;
         };
-        let payload =
-            resolve_job_inputs(Arc::clone(&state), &pipeline, &job.id, job_definition).await?;
+        let runner_job_definition =
+            load_runner_job_definition(Arc::clone(&state), &job.runner_id, &job.runner_job_name)?;
+        let payload = resolve_job_inputs(
+            Arc::clone(&state),
+            &pipeline,
+            &job.id,
+            job_definition,
+            &runner_job_definition,
+        )
+        .await?;
         let created = state
             .runner_client
             .create_job_run(
@@ -426,9 +446,14 @@ async fn resolve_job_inputs(
     pipeline: &crate::models::PipelineRun,
     job_run_id: &str,
     job_definition: &crate::models::WorkflowJobDefinition,
+    runner_job_definition: &RunnerJobDefinition,
 ) -> Result<Map<String, Value>, Box<dyn std::error::Error>> {
     let mut resolved = Map::new();
     for (key, value) in &job_definition.inputs {
+        let expected_input_kind = runner_job_definition
+            .inputs
+            .get(key)
+            .map(|item| item.kind.as_str());
         match value {
             Value::String(raw) if raw == "$commit" => {
                 resolved.insert(
@@ -458,16 +483,38 @@ async fn resolve_job_inputs(
                     .db
                     .job_outputs(&upstream_run_id)?
                     .into_iter()
-                    .find(|item| item.artifact_name == output_name)
+                    .find(|item| item.output_name == output_name)
                     .ok_or_else(|| format!("missing output {output_name} from {source_job}"))?;
-                let artifact_id = ensure_runner_has_artifact(
-                    Arc::clone(&state),
-                    &job_definition.runner_id,
-                    &output.runner_artifact_id,
-                    &upstream_run_id,
-                )
-                .await?;
-                resolved.insert(key.clone(), json!(artifact_id));
+                if let Some(expected_input_kind) = expected_input_kind
+                    && output.kind != expected_input_kind
+                {
+                    return Err(format!(
+                        "workflow input {key} expects {expected_input_kind} but {source_job}.{output_name} is {}",
+                        output.kind
+                    )
+                    .into());
+                }
+                if output.kind == "artifact" {
+                    let source_artifact_id =
+                        output.runner_artifact_id.as_deref().ok_or_else(|| {
+                            format!("artifact output {output_name} missing artifact id")
+                        })?;
+                    let artifact_id = ensure_runner_has_artifact(
+                        Arc::clone(&state),
+                        &job_definition.runner_id,
+                        source_artifact_id,
+                        &upstream_run_id,
+                    )
+                    .await?;
+                    resolved.insert(key.clone(), json!(artifact_id));
+                } else {
+                    resolved.insert(
+                        key.clone(),
+                        output
+                            .value
+                            .ok_or_else(|| format!("typed output {output_name} missing value"))?,
+                    );
+                }
             }
             other => {
                 resolved.insert(key.clone(), other.clone());
@@ -496,6 +543,23 @@ fn find_job_run_id(
         .find(|item| item.run.job_id == job_id)
         .map(|item| item.run.id)
         .ok_or_else(|| format!("missing upstream job {job_id}").into())
+}
+
+fn load_runner_job_definition(
+    state: Arc<AppState>,
+    runner_id: &str,
+    runner_job_name: &str,
+) -> Result<RunnerJobDefinition, Box<dyn std::error::Error>> {
+    let definition_json = state
+        .db
+        .list_runner_jobs(runner_id)?
+        .into_iter()
+        .find(|(name, _)| name == runner_job_name)
+        .map(|(_, definition_json)| definition_json)
+        .ok_or_else(|| {
+            format!("missing runner job definition for {runner_id}/{runner_job_name}")
+        })?;
+    Ok(serde_json::from_str(&definition_json)?)
 }
 
 async fn ensure_source_artifact(
@@ -546,7 +610,7 @@ async fn ensure_runner_has_artifact(
     let server_artifact_id = upstream
         .outputs
         .iter()
-        .find(|item| item.runner_artifact_id == source_artifact_id)
+        .find(|item| item.runner_artifact_id.as_deref() == Some(source_artifact_id))
         .and_then(|item| item.server_artifact_id.clone())
         .ok_or("missing server-managed artifact mirror")?;
     let server_artifact = state
@@ -606,25 +670,80 @@ async fn persist_job_outputs(
     runner: &crate::models::Runner,
     job_run_id: &str,
     outputs: Vec<(String, crate::runner::JobOutputResponse)>,
-) -> Result<Vec<(String, String, Option<String>, String, u64)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<crate::models::JobRunOutput>, Box<dyn std::error::Error>> {
     let mut persisted = Vec::new();
     for (name, output) in outputs {
-        let bytes = state
-            .runner_client
-            .download_artifact(runner, &output.artifact_id)
-            .await
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        let pending = state
-            .artifacts
-            .store_bytes("job_output", job_run_id, &name, &bytes)?;
-        let server_artifact_id = state.db.insert_server_artifact(&pending)?;
-        persisted.push((
-            name,
-            output.artifact_id,
-            Some(server_artifact_id),
-            output.sha256,
-            output.size,
-        ));
+        match output {
+            crate::runner::JobOutputResponse::Artifact {
+                artifact_id,
+                sha256,
+                size,
+            } => {
+                let bytes = state
+                    .runner_client
+                    .download_artifact(runner, &artifact_id)
+                    .await
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                let pending =
+                    state
+                        .artifacts
+                        .store_bytes("job_output", job_run_id, &name, &bytes)?;
+                let server_artifact_id = state.db.insert_server_artifact(&pending)?;
+                persisted.push(crate::models::JobRunOutput {
+                    output_name: name,
+                    kind: "artifact".to_string(),
+                    runner_artifact_id: Some(artifact_id),
+                    server_artifact_id: Some(server_artifact_id),
+                    value: None,
+                    sha256: Some(sha256),
+                    size_bytes: Some(size as i64),
+                });
+            }
+            crate::runner::JobOutputResponse::String { value } => {
+                persisted.push(crate::models::JobRunOutput {
+                    output_name: name,
+                    kind: "string".to_string(),
+                    runner_artifact_id: None,
+                    server_artifact_id: None,
+                    value: Some(json!(value)),
+                    sha256: None,
+                    size_bytes: None,
+                });
+            }
+            crate::runner::JobOutputResponse::Integer { value } => {
+                persisted.push(crate::models::JobRunOutput {
+                    output_name: name,
+                    kind: "integer".to_string(),
+                    runner_artifact_id: None,
+                    server_artifact_id: None,
+                    value: Some(json!(value)),
+                    sha256: None,
+                    size_bytes: None,
+                });
+            }
+            crate::runner::JobOutputResponse::Boolean { value } => {
+                persisted.push(crate::models::JobRunOutput {
+                    output_name: name,
+                    kind: "boolean".to_string(),
+                    runner_artifact_id: None,
+                    server_artifact_id: None,
+                    value: Some(json!(value)),
+                    sha256: None,
+                    size_bytes: None,
+                });
+            }
+            crate::runner::JobOutputResponse::Json { value } => {
+                persisted.push(crate::models::JobRunOutput {
+                    output_name: name,
+                    kind: "json".to_string(),
+                    runner_artifact_id: None,
+                    server_artifact_id: None,
+                    value: Some(value),
+                    sha256: None,
+                    size_bytes: None,
+                });
+            }
+        }
     }
     Ok(persisted)
 }

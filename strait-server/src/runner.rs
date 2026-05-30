@@ -207,10 +207,25 @@ pub struct JobStatusResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobOutputResponse {
-    pub artifact_id: String,
-    pub sha256: String,
-    pub size: u64,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JobOutputResponse {
+    Artifact {
+        artifact_id: String,
+        sha256: String,
+        size: u64,
+    },
+    String {
+        value: String,
+    },
+    Integer {
+        value: i64,
+    },
+    Boolean {
+        value: bool,
+    },
+    Json {
+        value: Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

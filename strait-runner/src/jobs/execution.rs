@@ -16,12 +16,15 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 
-use crate::{artifacts::ArtifactStore, manifest::OutputSpec};
+use crate::{
+    artifacts::ArtifactStore,
+    manifest::{OutputSpec, OutputType},
+};
 
 use super::{
     JobError, JobMetadata, JobStatus, JobStore,
     models::{
-        ExecutionOutcome, FailureCategory, JobArtifactMetadata, JobExecution, JobOutputArtifact,
+        ExecutionOutcome, FailureCategory, JobArtifactMetadata, JobExecution, JobOutput,
         JobOutputMetadata, JobStreamMetadata, TerminalReason,
     },
     store::now_rfc3339,
@@ -435,15 +438,78 @@ fn register_outputs(
             }
         }
 
-        let stored = artifacts.store_file(&path)?;
-        metadata.outputs.insert(
-            name.clone(),
-            JobOutputArtifact {
-                artifact_id: stored.artifact_id,
-                sha256: stored.sha256,
-                size: stored.size,
+        let output = match spec.kind {
+            OutputType::Artifact => {
+                let stored = artifacts.store_file(&path)?;
+                JobOutput::Artifact {
+                    artifact_id: stored.artifact_id,
+                    sha256: stored.sha256,
+                    size: stored.size,
+                }
+            }
+            OutputType::String => JobOutput::String {
+                value: fs::read_to_string(&path).map_err(|source| JobError::ReadFile {
+                    path: path.display().to_string(),
+                    source,
+                })?,
             },
-        );
+            OutputType::Integer => {
+                let raw = fs::read_to_string(&path).map_err(|source| JobError::ReadFile {
+                    path: path.display().to_string(),
+                    source,
+                })?;
+                let value = raw.trim().parse::<i64>().map_err(|_| JobError::ReadFile {
+                    path: path.display().to_string(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "output must contain a valid integer",
+                    ),
+                })?;
+                JobOutput::Integer { value }
+            }
+            OutputType::Boolean => {
+                let raw = fs::read_to_string(&path).map_err(|source| JobError::ReadFile {
+                    path: path.display().to_string(),
+                    source,
+                })?;
+                let value = match raw.trim() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(JobError::ReadFile {
+                            path: path.display().to_string(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "output must contain true or false",
+                            ),
+                        });
+                    }
+                };
+                JobOutput::Boolean { value }
+            }
+            OutputType::Json => {
+                let raw = fs::read_to_string(&path).map_err(|source| JobError::ReadFile {
+                    path: path.display().to_string(),
+                    source,
+                })?;
+                let value: serde_json::Value =
+                    serde_json::from_str(&raw).map_err(|source| JobError::ReadFile {
+                        path: path.display().to_string(),
+                        source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                    })?;
+                if value.is_null() {
+                    return Err(JobError::ReadFile {
+                        path: path.display().to_string(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "output json must not be null",
+                        ),
+                    });
+                }
+                JobOutput::Json { value }
+            }
+        };
+        metadata.outputs.insert(name.clone(), output);
     }
 
     Ok(())
@@ -556,7 +622,7 @@ fn build_output_metadata(
     stdout_truncated: bool,
     stderr_path: &Path,
     stderr_truncated: bool,
-    outputs: &BTreeMap<String, JobOutputArtifact>,
+    outputs: &BTreeMap<String, JobOutput>,
 ) -> JobOutputMetadata {
     let stdout = JobStreamMetadata {
         bytes: file_size(stdout_path),
@@ -567,8 +633,17 @@ fn build_output_metadata(
         truncated: stderr_truncated,
     };
     let artifacts = JobArtifactMetadata {
-        count: outputs.len() as u64,
-        bytes: outputs.values().map(|output| output.size).sum(),
+        count: outputs
+            .values()
+            .filter(|output| matches!(output, JobOutput::Artifact { .. }))
+            .count() as u64,
+        bytes: outputs
+            .values()
+            .map(|output| match output {
+                JobOutput::Artifact { size, .. } => *size,
+                _ => 0,
+            })
+            .sum(),
     };
     JobOutputMetadata {
         stdout,

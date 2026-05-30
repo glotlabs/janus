@@ -6,7 +6,6 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -20,12 +19,13 @@ use serde_json::{Map, json};
 use sha2::Digest;
 use tokio::time::{Duration, sleep};
 use tower::util::ServiceExt;
+use uuid::Uuid;
 
 use super::{
     JobCreatedResponse, JobDefinitionResponse, JobLogsResponse, JobMetadata, JobStatus,
     JobStatusResponse, JobStore, cancel_job, create_job as create_job_impl, get_job, get_job_logs,
     list_jobs,
-    models::{FailureCategory, TerminalReason},
+    models::{FailureCategory, JobOutput, TerminalReason},
 };
 use crate::{
     AppState,
@@ -803,6 +803,7 @@ required = false
 "#,
         r#"
 [outputs.app]
+type = "artifact"
 path = "app.tar.gz"
 required = true
 "#,
@@ -831,14 +832,89 @@ required = true
 
     assert_eq!(metadata.status, JobStatus::Success);
     let output = &metadata.outputs["app"];
-    assert_eq!(output.size, 6);
-    let stored = fs::read_to_string(
-        temp.join("artifacts")
-            .join(&output.artifact_id)
-            .join("blob"),
-    )
-    .expect("stored output artifact");
+    let JobOutput::Artifact {
+        artifact_id, size, ..
+    } = output
+    else {
+        panic!("expected artifact output");
+    };
+    assert_eq!(*size, 6);
+    let stored = fs::read_to_string(temp.join("artifacts").join(artifact_id).join("blob"))
+        .expect("stored output artifact");
     assert_eq!(stored, "bundle");
+}
+
+#[tokio::test]
+async fn registers_typed_outputs() {
+    let temp = temp_dir("job_output_typed");
+    let state = test_state_from_manifest(
+        &temp,
+        "build-app",
+        "",
+        r#"
+[outputs.version]
+type = "string"
+path = "version.txt"
+required = true
+
+[outputs.build_number]
+type = "integer"
+path = "build-number.txt"
+required = true
+
+[outputs.published]
+type = "boolean"
+path = "published.txt"
+required = true
+
+[outputs.metadata]
+type = "json"
+path = "metadata.json"
+required = true
+"#,
+        "#!/bin/sh\nprintf 'v1.2.3' > \"$STRAIT_OUTPUT_DIR/version.txt\"\nprintf '42' > \"$STRAIT_OUTPUT_DIR/build-number.txt\"\nprintf 'true' > \"$STRAIT_OUTPUT_DIR/published.txt\"\nprintf '{\"commit\":\"abc123\"}' > \"$STRAIT_OUTPUT_DIR/metadata.json\"\n",
+        600,
+        50,
+        64,
+    );
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let created = read_created_job(
+        app.oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from("{}".to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed"),
+    )
+    .await;
+    let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+
+    assert_eq!(
+        metadata.outputs["version"],
+        JobOutput::String {
+            value: "v1.2.3".to_string()
+        }
+    );
+    assert_eq!(
+        metadata.outputs["build_number"],
+        JobOutput::Integer { value: 42 }
+    );
+    assert_eq!(
+        metadata.outputs["published"],
+        JobOutput::Boolean { value: true }
+    );
+    assert_eq!(
+        metadata.outputs["metadata"],
+        JobOutput::Json {
+            value: json!({ "commit": "abc123" }),
+        }
+    );
 }
 
 #[tokio::test]
@@ -854,6 +930,7 @@ required = false
 "#,
         r#"
 [outputs.app]
+type = "artifact"
 path = "app.tar.gz"
 required = true
 "#,
@@ -2151,10 +2228,7 @@ fn write_executable_script(dir: &Path, name: &str, body: &str) -> PathBuf {
 }
 
 fn temp_dir(label: &str) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time should work")
-        .as_nanos();
+    let unique = Uuid::now_v7().simple().to_string();
     let path = std::env::temp_dir().join(format!("strait-runner-{label}-{unique}"));
     fs::create_dir_all(&path).expect("temp dir should be created");
     path

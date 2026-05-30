@@ -2,10 +2,11 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::models::{
-    JobRun, JobRunArtifact, JobRunDetail, PipelineRun, PipelineSnapshot, PushEvent, PushEventRef,
+    JobRun, JobRunDetail, JobRunOutput, PipelineRun, PipelineSnapshot, PushEvent, PushEventRef,
     Repo, Runner, ServerArtifact, User, Workflow,
 };
 use crate::runner::JobOutputMetadata;
@@ -820,19 +821,10 @@ impl Database {
                 .query_map([run.id.clone()], |row| row.get(0))?
                 .collect::<Result<Vec<String>, _>>()?;
             let mut artifact_stmt = conn.prepare(
-                "SELECT artifact_name, artifact_role, runner_artifact_id, server_artifact_id, sha256, size_bytes FROM job_run_artifacts WHERE job_run_id = ?1 ORDER BY artifact_name",
+                "SELECT artifact_name, output_type, runner_artifact_id, server_artifact_id, value_json, sha256, size_bytes FROM job_run_artifacts WHERE job_run_id = ?1 ORDER BY artifact_name",
             )?;
             let outputs = artifact_stmt
-                .query_map([run.id.clone()], |row| {
-                    Ok(JobRunArtifact {
-                        artifact_name: row.get(0)?,
-                        artifact_role: row.get(1)?,
-                        runner_artifact_id: row.get(2)?,
-                        server_artifact_id: row.get(3)?,
-                        sha256: row.get(4)?,
-                        size_bytes: row.get(5)?,
-                    })
-                })?
+                .query_map([run.id.clone()], parse_job_run_output_row)?
                 .collect::<Result<Vec<_>, _>>()?;
             jobs.push(JobRunDetail {
                 run,
@@ -972,7 +964,7 @@ impl Database {
         output_metadata: &JobOutputMetadata,
         stdout: &str,
         stderr: &str,
-        outputs: &[(String, String, Option<String>, String, u64)],
+        outputs: &[JobRunOutput],
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut conn = self.conn.lock().expect("db mutex poisoned");
         let tx = conn.transaction()?;
@@ -1009,11 +1001,21 @@ impl Database {
             "DELETE FROM job_run_artifacts WHERE job_run_id = ?1",
             [job_run_id],
         )?;
-        for (name, artifact_id, server_artifact_id, sha256, size) in outputs {
+        for output in outputs {
             tx.execute(
-                "INSERT INTO job_run_artifacts (id, job_run_id, artifact_name, artifact_role, runner_artifact_id, server_artifact_id, sha256, size_bytes)
-                 VALUES (?1, ?2, ?3, 'output', ?4, ?5, ?6, ?7)",
-                params![Uuid::now_v7().to_string(), job_run_id, name, artifact_id, server_artifact_id, sha256, *size as i64],
+                "INSERT INTO job_run_artifacts (id, job_run_id, artifact_name, artifact_role, output_type, runner_artifact_id, server_artifact_id, value_json, sha256, size_bytes)
+                 VALUES (?1, ?2, ?3, 'output', ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    Uuid::now_v7().to_string(),
+                    job_run_id,
+                    output.output_name,
+                    output.kind,
+                    output.runner_artifact_id,
+                    output.server_artifact_id,
+                    output.value.as_ref().map(serde_json::to_string).transpose()?,
+                    output.sha256,
+                    output.size_bytes,
+                ],
             )?;
         }
         tx.commit()?;
@@ -1167,21 +1169,12 @@ impl Database {
     pub fn job_outputs(
         &self,
         job_run_id: &str,
-    ) -> Result<Vec<JobRunArtifact>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<JobRunOutput>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT artifact_name, artifact_role, runner_artifact_id, server_artifact_id, sha256, size_bytes FROM job_run_artifacts WHERE job_run_id = ?1 ORDER BY artifact_name",
+            "SELECT artifact_name, output_type, runner_artifact_id, server_artifact_id, value_json, sha256, size_bytes FROM job_run_artifacts WHERE job_run_id = ?1 ORDER BY artifact_name",
         )?;
-        let rows = stmt.query_map([job_run_id], |row| {
-            Ok(JobRunArtifact {
-                artifact_name: row.get(0)?,
-                artifact_role: row.get(1)?,
-                runner_artifact_id: row.get(2)?,
-                server_artifact_id: row.get(3)?,
-                sha256: row.get(4)?,
-                size_bytes: row.get(5)?,
-            })
-        })?;
+        let rows = stmt.query_map([job_run_id], parse_job_run_output_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -1472,6 +1465,31 @@ fn parse_output_metadata(raw: Option<String>) -> JobOutputMetadata {
         .unwrap_or_default()
 }
 
+fn parse_job_run_output_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRunOutput> {
+    let value_json: Option<String> = row.get(4)?;
+    let value = value_json
+        .map(|json| {
+            serde_json::from_str::<Value>(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()?;
+
+    Ok(JobRunOutput {
+        output_name: row.get(0)?,
+        kind: row.get(1)?,
+        runner_artifact_id: row.get(2)?,
+        server_artifact_id: row.get(3)?,
+        value,
+        sha256: row.get(5)?,
+        size_bytes: row.get(6)?,
+    })
+}
+
 fn next_dispatch_idempotency_key() -> String {
     format!("dispatch_{}", Uuid::now_v7().simple())
 }
@@ -1635,7 +1653,10 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             job_run_id TEXT NOT NULL,
             artifact_name TEXT NOT NULL,
             artifact_role TEXT NOT NULL,
-            runner_artifact_id TEXT NOT NULL,
+            output_type TEXT NOT NULL,
+            runner_artifact_id TEXT,
+            server_artifact_id TEXT,
+            value_json TEXT,
             sha256 TEXT,
             size_bytes INTEGER,
             FOREIGN KEY(job_run_id) REFERENCES job_runs(id) ON DELETE CASCADE
@@ -1660,14 +1681,6 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
         );
         "#,
     )?;
-    let mut stmt = tx.prepare("PRAGMA table_info(job_run_artifacts)")?;
-    let columns = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(stmt);
-    if !columns.iter().any(|name| name == "server_artifact_id") {
-        tx.execute_batch("ALTER TABLE job_run_artifacts ADD COLUMN server_artifact_id TEXT;")?;
-    }
     let mut stmt = tx.prepare("PRAGMA table_info(job_runs)")?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))?
