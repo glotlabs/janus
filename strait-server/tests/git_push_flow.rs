@@ -141,7 +141,10 @@ async fn git_push_triggers_pipeline_end_to_end() {
 
     let pipeline = wait_for_pipeline_success(&client, server_port, &session_cookie, repo_id).await;
     let detail = client
-        .get(format!("http://127.0.0.1:{server_port}/api/pipelines/{}", pipeline["id"].as_str().unwrap()))
+        .get(format!(
+            "http://127.0.0.1:{server_port}/api/pipelines/{}",
+            pipeline["id"].as_str().unwrap()
+        ))
         .header("cookie", &session_cookie)
         .send()
         .await

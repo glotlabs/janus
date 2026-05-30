@@ -159,7 +159,9 @@ impl RunnerClient {
             .send()
             .await?;
         if response.status() != StatusCode::OK {
-            return Err(format!("runner artifact download failed with {}", response.status()).into());
+            return Err(
+                format!("runner artifact download failed with {}", response.status()).into(),
+            );
         }
         Ok(response.bytes().await?.to_vec())
     }

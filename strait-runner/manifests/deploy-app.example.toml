@@ -1,0 +1,8 @@
+name = "deploy-app"
+script = "/opt/strait-runner/jobs/deploy-app.sh"
+timeout_seconds = 600
+concurrency = "job_exclusive"
+
+[inputs.app]
+type = "artifact"
+required = true

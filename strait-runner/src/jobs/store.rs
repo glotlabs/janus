@@ -84,7 +84,10 @@ impl JobStore {
         }
         validate_idempotency_key(idempotency_key)?;
 
-        let _create_lock = self.create_lock.lock().expect("job creation mutex poisoned");
+        let _create_lock = self
+            .create_lock
+            .lock()
+            .expect("job creation mutex poisoned");
 
         let manifest = manifests
             .get(name)
@@ -289,10 +292,11 @@ impl JobStore {
             .cloned();
         let Some(running_job) = running_job else {
             return match self.read_job(job_id) {
-                Ok(metadata) if matches!(
-                    metadata.status,
-                    JobStatus::CancelRequested | JobStatus::Canceling | JobStatus::Canceled
-                ) =>
+                Ok(metadata)
+                    if matches!(
+                        metadata.status,
+                        JobStatus::CancelRequested | JobStatus::Canceling | JobStatus::Canceled
+                    ) =>
                 {
                     Ok(())
                 }
@@ -375,8 +379,10 @@ impl JobStore {
                 JobStatus::Running => {
                     metadata.status = JobStatus::Failed;
                     metadata.finished_at = Some(now_rfc3339());
-                    metadata.duration_ms =
-                        calculate_duration_ms(&metadata.started_at, metadata.finished_at.as_deref());
+                    metadata.duration_ms = calculate_duration_ms(
+                        &metadata.started_at,
+                        metadata.finished_at.as_deref(),
+                    );
                     metadata.exit_code = None;
                     metadata.terminal_reason = Some(TerminalReason::Shutdown);
                     metadata.failure_category = Some(FailureCategory::Infra);
@@ -392,8 +398,10 @@ impl JobStore {
                 JobStatus::CancelRequested | JobStatus::Canceling => {
                     metadata.status = JobStatus::Canceled;
                     metadata.finished_at = Some(now_rfc3339());
-                    metadata.duration_ms =
-                        calculate_duration_ms(&metadata.started_at, metadata.finished_at.as_deref());
+                    metadata.duration_ms = calculate_duration_ms(
+                        &metadata.started_at,
+                        metadata.finished_at.as_deref(),
+                    );
                     metadata.exit_code = None;
                     metadata.terminal_reason = Some(TerminalReason::Shutdown);
                     metadata.failure_category = Some(FailureCategory::Canceled);
@@ -731,7 +739,10 @@ fn hash_request(name: &str, request_body: &[u8]) -> String {
 }
 
 fn job_id_for_idempotency_key(idempotency_key: &str) -> String {
-    format!("job_{}", &hash_request("job", idempotency_key.as_bytes())[..32])
+    format!(
+        "job_{}",
+        &hash_request("job", idempotency_key.as_bytes())[..32]
+    )
 }
 
 fn validate_job_id(job_id: &str) -> Result<(), JobError> {

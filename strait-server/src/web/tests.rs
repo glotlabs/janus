@@ -1,5 +1,11 @@
 use super::routes::{build_router, csrf_token};
-use crate::{app::build_state, auth::{hash_password, session_cookie}, git, models::{Repo, User, WorkflowDefinition, WorkflowJobDefinition, WorkflowTrigger}, scheduler};
+use crate::{
+    app::build_state,
+    auth::{hash_password, session_cookie},
+    git,
+    models::{Repo, User, WorkflowDefinition, WorkflowJobDefinition, WorkflowTrigger},
+    scheduler,
+};
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -22,6 +28,7 @@ use std::{
 };
 use tokio::time::sleep;
 use tower::util::ServiceExt;
+use url::form_urlencoded;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -54,14 +61,136 @@ async fn repo_creation_installs_hook() {
     assert!(hook.contains(&repo.id));
 }
 
+#[tokio::test]
+async fn workflows_page_renders_runner_job_builder() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    fixture
+        .state
+        .db
+        .replace_runner_jobs(
+            &fixture.runner_id,
+            &[
+                (
+                    "build-app".to_string(),
+                    r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true}},"outputs":{"app":{"required":true}}}"#.to_string(),
+                ),
+                (
+                    "test-app".to_string(),
+                    r#"{"name":"test-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true}},"outputs":{}}"#.to_string(),
+                ),
+            ],
+        )
+        .expect("runner jobs");
+    fixture
+        .state
+        .db
+        .update_runner_health(&fixture.runner_id, "healthy")
+        .expect("health");
+
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/workflows")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let html = String::from_utf8(body.to_vec()).expect("html");
+    assert!(html.contains("workflow-runner-catalog"));
+    assert!(html.contains("workflow-job-list"));
+    assert!(html.contains("Job"));
+    assert!(html.contains("build-app"));
+    assert!(html.contains("test-app"));
+    assert!(html.contains("\"commit\""));
+}
+
+#[tokio::test]
+async fn workflow_form_submission_accepts_structured_jobs_json() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
+    let token = csrf_token(&fixture.state, &fixture.user);
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let jobs_json = serde_json::to_string(&vec![json!({
+        "id": "build",
+        "name": "Build",
+        "runner_id": fixture.runner_id,
+        "runner_job_name": "build-app",
+        "needs": [],
+        "inputs": {
+            "commit": "$commit",
+            "branch": "$branch",
+            "source": "$source"
+        },
+        "allow_failure": false
+    })])
+    .expect("jobs json");
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf_token", &token)
+        .append_pair("repo_id", &repo.id)
+        .append_pair("name", "wf")
+        .append_pair("trigger_kind", "push")
+        .append_pair("branch_name", "main")
+        .append_pair("jobs_json", &jobs_json)
+        .finish();
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/workflows")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", cookie)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+    let workflow = fixture
+        .state
+        .db
+        .workflows_for_repo(&repo.id)
+        .expect("workflows")
+        .into_iter()
+        .find(|workflow| workflow.name == "wf")
+        .expect("workflow");
+    let definition: WorkflowDefinition =
+        serde_json::from_str(&workflow.definition_json).expect("definition");
+    assert_eq!(definition.jobs.len(), 1);
+    assert_eq!(definition.jobs[0].id, "build");
+    assert_eq!(definition.jobs[0].runner_job_name, "build-app");
+    assert_eq!(
+        definition.jobs[0].inputs.get("source"),
+        Some(&json!("$source"))
+    );
+}
+
 #[test]
 fn hook_ingestion_is_idempotent() {
     let dir = temp_dir("hook_idempotent");
     let config_path = write_test_config(&dir);
     let state = build_state(config_path, PathBuf::from("/bin/strait-server")).expect("state");
     let hash = hash_password("password123").expect("hash");
-    state.db.create_user("alice", &hash, "developer").expect("user");
-    let user = state.db.get_user_credentials("alice").expect("user").unwrap().0;
+    state
+        .db
+        .create_user("alice", &hash, "developer")
+        .expect("user");
+    let user = state
+        .db
+        .get_user_credentials("alice")
+        .expect("user")
+        .unwrap()
+        .0;
     let repo_id = state
         .db
         .create_repo(
@@ -78,8 +207,14 @@ fn hook_ingestion_is_idempotent() {
         ref_name: "refs/heads/main".to_string(),
     }];
     let key = git::event_key(&repo_id, &refs);
-    state.db.create_push_event(&repo_id, &key, &refs).expect("push1");
-    state.db.create_push_event(&repo_id, &key, &refs).expect("push2");
+    state
+        .db
+        .create_push_event(&repo_id, &key, &refs)
+        .expect("push1");
+    state
+        .db
+        .create_push_event(&repo_id, &key, &refs)
+        .expect("push2");
     let events = state.db.list_unprocessed_push_events().expect("events");
     assert_eq!(events.len(), 1);
 }
@@ -158,7 +293,10 @@ async fn scheduler_persists_terminal_runner_state() {
     assert_eq!(snapshot.pipeline.status, "success");
     assert_eq!(snapshot.jobs[0].run.status, "success");
     assert_eq!(snapshot.jobs[0].run.exit_code, Some(0));
-    assert_eq!(snapshot.jobs[0].run.terminal_reason.as_deref(), Some("success"));
+    assert_eq!(
+        snapshot.jobs[0].run.terminal_reason.as_deref(),
+        Some("success")
+    );
     assert_eq!(snapshot.jobs[0].run.failure_category, None);
     assert_eq!(snapshot.jobs[0].run.output_metadata.artifacts.count, 0);
     assert!(snapshot.jobs[0].stdout.contains("ok"));
@@ -189,7 +327,12 @@ async fn scheduler_persists_timeout_runner_state() {
     scheduler::reconcile_once(Arc::clone(&fixture.state))
         .await
         .expect("reconcile2");
-    let pipeline = fixture.state.db.list_pipeline_runs().expect("pipelines").remove(0);
+    let pipeline = fixture
+        .state
+        .db
+        .list_pipeline_runs()
+        .expect("pipelines")
+        .remove(0);
     let snapshot = fixture
         .state
         .db
@@ -198,8 +341,14 @@ async fn scheduler_persists_timeout_runner_state() {
         .unwrap();
     assert_eq!(snapshot.pipeline.status, "failed");
     assert_eq!(snapshot.jobs[0].run.status, "failed");
-    assert_eq!(snapshot.jobs[0].run.terminal_reason.as_deref(), Some("timeout"));
-    assert_eq!(snapshot.jobs[0].run.failure_category.as_deref(), Some("timeout"));
+    assert_eq!(
+        snapshot.jobs[0].run.terminal_reason.as_deref(),
+        Some("timeout")
+    );
+    assert_eq!(
+        snapshot.jobs[0].run.failure_category.as_deref(),
+        Some("timeout")
+    );
     assert_eq!(snapshot.jobs[0].run.exit_code, None);
 }
 
@@ -228,7 +377,12 @@ async fn scheduler_persists_job_failure_runner_state() {
     scheduler::reconcile_once(Arc::clone(&fixture.state))
         .await
         .expect("reconcile2");
-    let pipeline = fixture.state.db.list_pipeline_runs().expect("pipelines").remove(0);
+    let pipeline = fixture
+        .state
+        .db
+        .list_pipeline_runs()
+        .expect("pipelines")
+        .remove(0);
     let snapshot = fixture
         .state
         .db
@@ -237,8 +391,14 @@ async fn scheduler_persists_job_failure_runner_state() {
         .unwrap();
     assert_eq!(snapshot.pipeline.status, "failed");
     assert_eq!(snapshot.jobs[0].run.status, "failed");
-    assert_eq!(snapshot.jobs[0].run.terminal_reason.as_deref(), Some("exit_code"));
-    assert_eq!(snapshot.jobs[0].run.failure_category.as_deref(), Some("job"));
+    assert_eq!(
+        snapshot.jobs[0].run.terminal_reason.as_deref(),
+        Some("exit_code")
+    );
+    assert_eq!(
+        snapshot.jobs[0].run.failure_category.as_deref(),
+        Some("job")
+    );
     assert_eq!(snapshot.jobs[0].run.exit_code, Some(7));
 }
 
@@ -343,9 +503,15 @@ async fn cancel_pipeline_tracks_runner_cancel_progress() {
         .expect("snapshot")
         .unwrap();
     assert_eq!(snapshot.pipeline.status, "cancel_requested");
-    assert_eq!(snapshot.pipeline.cancel_reason.as_deref(), Some("user_requested"));
+    assert_eq!(
+        snapshot.pipeline.cancel_reason.as_deref(),
+        Some("user_requested")
+    );
     assert_eq!(snapshot.jobs[0].run.status, "cancel_requested");
-    assert_eq!(snapshot.jobs[0].run.cancel_reason.as_deref(), Some("user_requested"));
+    assert_eq!(
+        snapshot.jobs[0].run.cancel_reason.as_deref(),
+        Some("user_requested")
+    );
 
     scheduler::reconcile_once(Arc::clone(&fixture.state))
         .await
@@ -382,8 +548,14 @@ async fn cancel_pipeline_tracks_runner_cancel_progress() {
         .unwrap();
     assert_eq!(snapshot.pipeline.status, "canceled");
     assert_eq!(snapshot.jobs[0].run.status, "canceled");
-    assert_eq!(snapshot.jobs[0].run.terminal_reason.as_deref(), Some("canceled"));
-    assert_eq!(snapshot.jobs[0].run.failure_category.as_deref(), Some("canceled"));
+    assert_eq!(
+        snapshot.jobs[0].run.terminal_reason.as_deref(),
+        Some("canceled")
+    );
+    assert_eq!(
+        snapshot.jobs[0].run.failure_category.as_deref(),
+        Some("canceled")
+    );
     assert_eq!(snapshot.jobs[0].run.duration_ms, Some(1000));
 }
 
@@ -413,7 +585,12 @@ async fn scheduler_retries_infra_failure_and_recovers() {
     scheduler::reconcile_once(Arc::clone(&fixture.state))
         .await
         .expect("poll infra failure");
-    let pipeline = fixture.state.db.list_pipeline_runs().expect("pipelines").remove(0);
+    let pipeline = fixture
+        .state
+        .db
+        .list_pipeline_runs()
+        .expect("pipelines")
+        .remove(0);
     let snapshot = fixture
         .state
         .db
@@ -482,7 +659,12 @@ async fn scheduler_fails_job_after_infra_retry_budget_exhausted() {
         .await
         .expect("poll3");
 
-    let pipeline = fixture.state.db.list_pipeline_runs().expect("pipelines").remove(0);
+    let pipeline = fixture
+        .state
+        .db
+        .list_pipeline_runs()
+        .expect("pipelines")
+        .remove(0);
     let snapshot = fixture
         .state
         .db
@@ -492,8 +674,14 @@ async fn scheduler_fails_job_after_infra_retry_budget_exhausted() {
     assert_eq!(snapshot.pipeline.status, "failed");
     assert_eq!(snapshot.jobs[0].run.status, "failed");
     assert_eq!(snapshot.jobs[0].run.infra_retry_count, 2);
-    assert_eq!(snapshot.jobs[0].run.failure_category.as_deref(), Some("infra"));
-    assert_eq!(snapshot.jobs[0].run.terminal_reason.as_deref(), Some("spawn_error"));
+    assert_eq!(
+        snapshot.jobs[0].run.failure_category.as_deref(),
+        Some("infra")
+    );
+    assert_eq!(
+        snapshot.jobs[0].run.terminal_reason.as_deref(),
+        Some("spawn_error")
+    );
     assert_eq!(mock.dispatch_count(), 3);
 }
 
@@ -663,11 +851,14 @@ async fn test_fixture_with_runner(base_url: &str) -> TestFixture {
                 &runner_id,
                 &[(
                     "build-app".to_string(),
-                    r#"{"name":"build-app","timeout_seconds":60}"#.to_string(),
+                    r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true}},"outputs":{"app":{"required":true}}}"#.to_string(),
                 )],
             )
             .expect("runner jobs");
-        state.db.update_runner_health(&runner_id, "healthy").expect("health");
+        state
+            .db
+            .update_runner_health(&runner_id, "healthy")
+            .expect("health");
     }
     let session_id = state
         .db
@@ -998,22 +1189,25 @@ async fn mock_get_run(
     run.polls += 1;
     if run.polls >= 2 {
         let dispatch_count = state.dispatches.lock().expect("dispatches").len();
-        let (status, exit_code, terminal_reason, failure_category, stdout_bytes) =
-            match state.terminal_outcome {
-                MockTerminalOutcome::Success => ("success", Some(0), Some("success"), None, 3),
-                MockTerminalOutcome::Timeout => ("failed", None, Some("timeout"), Some("timeout"), 0),
-                MockTerminalOutcome::JobFailed => ("failed", Some(7), Some("exit_code"), Some("job"), 0),
-                MockTerminalOutcome::InfraFailed => {
+        let (status, exit_code, terminal_reason, failure_category, stdout_bytes) = match state
+            .terminal_outcome
+        {
+            MockTerminalOutcome::Success => ("success", Some(0), Some("success"), None, 3),
+            MockTerminalOutcome::Timeout => ("failed", None, Some("timeout"), Some("timeout"), 0),
+            MockTerminalOutcome::JobFailed => {
+                ("failed", Some(7), Some("exit_code"), Some("job"), 0)
+            }
+            MockTerminalOutcome::InfraFailed => {
+                ("failed", None, Some("spawn_error"), Some("infra"), 0)
+            }
+            MockTerminalOutcome::InfraFailOnceThenSuccess => {
+                if dispatch_count >= 2 {
+                    ("success", Some(0), Some("success"), None, 3)
+                } else {
                     ("failed", None, Some("spawn_error"), Some("infra"), 0)
                 }
-                MockTerminalOutcome::InfraFailOnceThenSuccess => {
-                    if dispatch_count >= 2 {
-                        ("success", Some(0), Some("success"), None, 3)
-                    } else {
-                        ("failed", None, Some("spawn_error"), Some("infra"), 0)
-                    }
-                }
-            };
+            }
+        };
         Json(json!({
             "job_id": job_id,
             "name": "build-app",

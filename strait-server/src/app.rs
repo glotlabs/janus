@@ -206,7 +206,8 @@ impl Cli {
                         }
                         "--config" => {
                             index += 1;
-                            config_path = PathBuf::from(args.get(index).ok_or("missing config path")?);
+                            config_path =
+                                PathBuf::from(args.get(index).ok_or("missing config path")?);
                         }
                         _ => {}
                     }
@@ -248,7 +249,8 @@ impl Cli {
                         }
                         "--config" => {
                             index += 1;
-                            config_path = PathBuf::from(args.get(index).ok_or("missing config path")?);
+                            config_path =
+                                PathBuf::from(args.get(index).ok_or("missing config path")?);
                         }
                         _ => {}
                     }

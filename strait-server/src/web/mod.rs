@@ -4,4 +4,3 @@ mod routes;
 mod tests;
 
 pub(crate) use routes::build_router;
-

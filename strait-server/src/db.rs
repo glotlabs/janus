@@ -38,7 +38,13 @@ impl Database {
             "INSERT INTO users (id, username, password_hash, role, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(username) DO NOTHING",
-            params![Uuid::now_v7().to_string(), username, password_hash, role, now],
+            params![
+                Uuid::now_v7().to_string(),
+                username,
+                password_hash,
+                role,
+                now
+            ],
         )?;
         Ok(())
     }
@@ -66,9 +72,8 @@ impl Database {
 
     pub fn list_users(&self) -> Result<Vec<User>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT id, username, role, created_at FROM users ORDER BY username ASC",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, username, role, created_at FROM users ORDER BY username ASC")?;
         let rows = stmt.query_map([], |row| {
             Ok(User {
                 id: row.get(0)?,
@@ -269,7 +274,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn list_unprocessed_push_events(&self) -> Result<Vec<PushEvent>, Box<dyn std::error::Error>> {
+    pub fn list_unprocessed_push_events(
+        &self,
+    ) -> Result<Vec<PushEvent>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, repo_id, received_at, event_key, processed_at
@@ -314,7 +321,10 @@ impl Database {
         Ok(result)
     }
 
-    pub fn mark_push_event_processed(&self, push_event_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn mark_push_event_processed(
+        &self,
+        push_event_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
             "UPDATE push_events SET processed_at = ?2 WHERE id = ?1",
@@ -359,7 +369,10 @@ impl Database {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn get_runner(&self, runner_id: &str) -> Result<Option<Runner>, Box<dyn std::error::Error>> {
+    pub fn get_runner(
+        &self,
+        runner_id: &str,
+    ) -> Result<Option<Runner>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         Ok(conn.query_row(
             "SELECT id, name, base_url, token_encrypted_or_local_ref, enabled, last_health_state, last_seen_at, created_at FROM runners WHERE id = ?1",
@@ -379,7 +392,11 @@ impl Database {
         ).optional()?)
     }
 
-    pub fn set_runner_enabled(&self, runner_id: &str, enabled: bool) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn set_runner_enabled(
+        &self,
+        runner_id: &str,
+        enabled: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
             "UPDATE runners SET enabled = ?2 WHERE id = ?1",
@@ -483,7 +500,10 @@ impl Database {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn workflows_for_repo(&self, repo_id: &str) -> Result<Vec<Workflow>, Box<dyn std::error::Error>> {
+    pub fn workflows_for_repo(
+        &self,
+        repo_id: &str,
+    ) -> Result<Vec<Workflow>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT w.id, w.repo_id, w.name, w.enabled, w.created_at, v.version, v.id, v.trigger_json, v.definition_json
@@ -509,7 +529,10 @@ impl Database {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn get_workflow(&self, workflow_id: &str) -> Result<Option<Workflow>, Box<dyn std::error::Error>> {
+    pub fn get_workflow(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Option<Workflow>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         Ok(conn.query_row(
             "SELECT w.id, w.repo_id, w.name, w.enabled, w.created_at, v.version, v.id, v.trigger_json, v.definition_json
@@ -839,34 +862,37 @@ impl Database {
         }
         query.push(')');
         let mut stmt = conn.prepare(&query)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(statuses.iter().copied()), |row| {
-            Ok(JobRun {
-                id: row.get(0)?,
-                pipeline_run_id: row.get(1)?,
-                job_id: row.get(2)?,
-                job_name: row.get(3)?,
-                runner_id: row.get(4)?,
-                runner_job_name: row.get(5)?,
-                dispatch_idempotency_key: row.get(6)?,
-                runner_run_id: row.get(7)?,
-                status: row.get(8)?,
-                allow_failure: row.get::<_, i64>(9)? != 0,
-                started_at: row.get(10)?,
-                duration_ms: row.get(11)?,
-                exit_code: row.get(12)?,
-                terminal_reason: row.get(13)?,
-                failure_category: row.get(14)?,
-                cancel_reason: row.get(15)?,
-                cancel_requested_at: row.get(16)?,
-                cancel_started_at: row.get(17)?,
-                cancel_retry_count: row.get(18)?,
-                last_cancel_retry_at: row.get(19)?,
-                infra_retry_count: row.get(20)?,
-                last_infra_retry_at: row.get(21)?,
-                finished_at: row.get(22)?,
-                output_metadata: parse_output_metadata(row.get(23)?),
-            })
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(statuses.iter().copied()),
+            |row| {
+                Ok(JobRun {
+                    id: row.get(0)?,
+                    pipeline_run_id: row.get(1)?,
+                    job_id: row.get(2)?,
+                    job_name: row.get(3)?,
+                    runner_id: row.get(4)?,
+                    runner_job_name: row.get(5)?,
+                    dispatch_idempotency_key: row.get(6)?,
+                    runner_run_id: row.get(7)?,
+                    status: row.get(8)?,
+                    allow_failure: row.get::<_, i64>(9)? != 0,
+                    started_at: row.get(10)?,
+                    duration_ms: row.get(11)?,
+                    exit_code: row.get(12)?,
+                    terminal_reason: row.get(13)?,
+                    failure_category: row.get(14)?,
+                    cancel_reason: row.get(15)?,
+                    cancel_requested_at: row.get(16)?,
+                    cancel_started_at: row.get(17)?,
+                    cancel_retry_count: row.get(18)?,
+                    last_cancel_retry_at: row.get(19)?,
+                    infra_retry_count: row.get(20)?,
+                    last_infra_retry_at: row.get(21)?,
+                    finished_at: row.get(22)?,
+                    output_metadata: parse_output_metadata(row.get(23)?),
+                })
+            },
+        )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -979,7 +1005,10 @@ impl Database {
             "UPDATE job_run_logs SET stdout = ?2, stderr = ?3, updated_at = ?4 WHERE job_run_id = ?1",
             params![job_run_id, stdout, stderr, now()],
         )?;
-        tx.execute("DELETE FROM job_run_artifacts WHERE job_run_id = ?1", [job_run_id])?;
+        tx.execute(
+            "DELETE FROM job_run_artifacts WHERE job_run_id = ?1",
+            [job_run_id],
+        )?;
         for (name, artifact_id, server_artifact_id, sha256, size) in outputs {
             tx.execute(
                 "INSERT INTO job_run_artifacts (id, job_run_id, artifact_name, artifact_role, runner_artifact_id, server_artifact_id, sha256, size_bytes)
@@ -991,7 +1020,11 @@ impl Database {
         Ok(())
     }
 
-    pub fn set_job_run_status(&self, job_run_id: &str, status: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn set_job_run_status(
+        &self,
+        job_run_id: &str,
+        status: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
             "UPDATE job_runs
@@ -1051,10 +1084,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn record_cancel_retry(
-        &self,
-        job_run_id: &str,
-    ) -> Result<i64, Box<dyn std::error::Error>> {
+    pub fn record_cancel_retry(&self, job_run_id: &str) -> Result<i64, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
             "UPDATE job_runs
@@ -1103,7 +1133,10 @@ impl Database {
             "UPDATE job_run_logs SET stdout = '', stderr = '', updated_at = ?2 WHERE job_run_id = ?1",
             params![job_run_id, now()],
         )?;
-        tx.execute("DELETE FROM job_run_artifacts WHERE job_run_id = ?1", [job_run_id])?;
+        tx.execute(
+            "DELETE FROM job_run_artifacts WHERE job_run_id = ?1",
+            [job_run_id],
+        )?;
         let count = tx.query_row(
             "SELECT infra_retry_count FROM job_runs WHERE id = ?1",
             [job_run_id],
@@ -1238,14 +1271,18 @@ impl Database {
         pipeline_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
-        let mut stmt = conn.prepare("SELECT status, allow_failure FROM job_runs WHERE pipeline_run_id = ?1")?;
+        let mut stmt =
+            conn.prepare("SELECT status, allow_failure FROM job_runs WHERE pipeline_run_id = ?1")?;
         let rows = stmt
-            .query_map([pipeline_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)))?
+            .query_map([pipeline_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
-        let pipeline_status = state_machine::terminal_pipeline_status(
-            rows.iter()
-                .filter_map(|(status, allow_failure)| JobStatus::parse(status).map(|parsed| (parsed, *allow_failure))),
-        );
+        let pipeline_status = state_machine::terminal_pipeline_status(rows.iter().filter_map(
+            |(status, allow_failure)| {
+                JobStatus::parse(status).map(|parsed| (parsed, *allow_failure))
+            },
+        ));
 
         conn.execute(
             "UPDATE pipeline_runs
@@ -1317,7 +1354,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn pipelines_requiring_recovery(&self) -> Result<Vec<PipelineRun>, Box<dyn std::error::Error>> {
+    pub fn pipelines_requiring_recovery(
+        &self,
+    ) -> Result<Vec<PipelineRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT DISTINCT p.id, p.repo_id, p.workflow_id, p.workflow_version_id, p.trigger_type, p.trigger_ref, p.commit_sha, p.status, p.started_at, p.cancel_reason, p.cancel_requested_at, p.cancel_started_at, p.finished_at
@@ -1634,7 +1673,10 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
-    if !columns.iter().any(|name| name == "dispatch_idempotency_key") {
+    if !columns
+        .iter()
+        .any(|name| name == "dispatch_idempotency_key")
+    {
         tx.execute_batch("ALTER TABLE job_runs ADD COLUMN dispatch_idempotency_key TEXT;")?;
         tx.execute(
             "UPDATE job_runs
@@ -1677,13 +1719,17 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
         tx.execute_batch("ALTER TABLE job_runs ADD COLUMN cancel_reason TEXT;")?;
     }
     if !columns.iter().any(|name| name == "cancel_retry_count") {
-        tx.execute_batch("ALTER TABLE job_runs ADD COLUMN cancel_retry_count INTEGER NOT NULL DEFAULT 0;")?;
+        tx.execute_batch(
+            "ALTER TABLE job_runs ADD COLUMN cancel_retry_count INTEGER NOT NULL DEFAULT 0;",
+        )?;
     }
     if !columns.iter().any(|name| name == "last_cancel_retry_at") {
         tx.execute_batch("ALTER TABLE job_runs ADD COLUMN last_cancel_retry_at TEXT;")?;
     }
     if !columns.iter().any(|name| name == "infra_retry_count") {
-        tx.execute_batch("ALTER TABLE job_runs ADD COLUMN infra_retry_count INTEGER NOT NULL DEFAULT 0;")?;
+        tx.execute_batch(
+            "ALTER TABLE job_runs ADD COLUMN infra_retry_count INTEGER NOT NULL DEFAULT 0;",
+        )?;
     }
     if !columns.iter().any(|name| name == "last_infra_retry_at") {
         tx.execute_batch("ALTER TABLE job_runs ADD COLUMN last_infra_retry_at TEXT;")?;

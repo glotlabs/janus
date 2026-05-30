@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::manifest::{Concurrency, JobManifest, InputType};
+use crate::manifest::{Concurrency, InputType, JobManifest};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobCreated {

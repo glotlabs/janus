@@ -7,7 +7,8 @@ use tokio::time::{self, Duration, MissedTickBehavior};
 use tracing::{error, info, warn};
 
 use crate::{
-    app::AppState, git,
+    app::AppState,
+    git,
     models::{WorkflowDefinition, WorkflowTrigger},
     state_machine::{self, JobStatus, PipelineStatus},
 };
@@ -15,8 +16,9 @@ use crate::{
 pub fn spawn(state: Arc<AppState>) {
     let scheduler_state = Arc::clone(&state);
     tokio::spawn(async move {
-        let mut interval =
-            time::interval(Duration::from_millis(scheduler_state.config.scheduler.poll_interval_ms.max(200)));
+        let mut interval = time::interval(Duration::from_millis(
+            scheduler_state.config.scheduler.poll_interval_ms.max(200),
+        ));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
@@ -29,7 +31,11 @@ pub fn spawn(state: Arc<AppState>) {
     let health_state = Arc::clone(&state);
     tokio::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(
-            health_state.config.runners.healthcheck_interval_seconds.max(5),
+            health_state
+                .config
+                .runners
+                .healthcheck_interval_seconds
+                .max(5),
         ));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
@@ -41,9 +47,7 @@ pub fn spawn(state: Arc<AppState>) {
     });
 }
 
-pub(crate) async fn reconcile_once(
-    state: Arc<AppState>,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn reconcile_once(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
     recover_incomplete_pipelines(Arc::clone(&state))?;
     process_push_events(Arc::clone(&state)).await?;
     dispatch_pending_jobs(Arc::clone(&state)).await?;
@@ -171,7 +175,9 @@ fn recover_incomplete_pipelines(state: Arc<AppState>) -> Result<(), Box<dyn std:
             "canceling" => PipelineStatus::Canceling,
             _ => PipelineStatus::Running,
         };
-        state.db.set_pipeline_status(&pipeline.id, next_status.as_str())?;
+        state
+            .db
+            .set_pipeline_status(&pipeline.id, next_status.as_str())?;
     }
     Ok(())
 }
@@ -180,11 +186,10 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
     let jobs = state.db.list_job_runs_by_status(&["pending"])?;
     for job in jobs {
         let dependencies = state.db.dependencies_for_job_run(&job.id)?;
-        let dependency_state = state_machine::next_ready_job_status(
-            dependencies
-                .iter()
-                .filter_map(|item| JobStatus::parse(&item.status).map(|status| (status, item.allow_failure))),
-        );
+        let dependency_state =
+            state_machine::next_ready_job_status(dependencies.iter().filter_map(|item| {
+                JobStatus::parse(&item.status).map(|status| (status, item.allow_failure))
+            }));
         if dependency_state == Some(JobStatus::Blocked) {
             state
                 .db
@@ -196,7 +201,9 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
             continue;
         }
         let Some(runner) = state.db.get_runner(&job.runner_id)? else {
-            state.db.set_job_run_status(&job.id, JobStatus::Failed.as_str())?;
+            state
+                .db
+                .set_job_run_status(&job.id, JobStatus::Failed.as_str())?;
             continue;
         };
         if !runner.enabled {
@@ -205,12 +212,15 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
         let Some(pipeline) = state.db.pipeline_for_job_run(&job.id)? else {
             continue;
         };
-        let definition_json = state.db.workflow_definition_json(&pipeline.workflow_version_id)?;
+        let definition_json = state
+            .db
+            .workflow_definition_json(&pipeline.workflow_version_id)?;
         let definition: WorkflowDefinition = serde_json::from_str(&definition_json)?;
         let Some(job_definition) = definition.jobs.iter().find(|item| item.id == job.job_id) else {
             continue;
         };
-        let payload = resolve_job_inputs(Arc::clone(&state), &pipeline, &job.id, job_definition).await?;
+        let payload =
+            resolve_job_inputs(Arc::clone(&state), &pipeline, &job.id, job_definition).await?;
         let created = state
             .runner_client
             .create_job_run(
@@ -245,42 +255,53 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
             state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
             continue;
         }
-        match state.runner_client.get_job_run(&runner, runner_run_id).await {
-            Ok(status) => {
-                match status.status.as_str() {
-                    "running" | "cancel_requested" | "canceling" => {
-                        let next_status = match status.status.as_str() {
-                            "canceling" => JobStatus::Canceling,
-                            "cancel_requested" => {
-                                if job.status == JobStatus::Canceling.as_str() {
-                                    JobStatus::Canceling
-                                } else {
-                                    JobStatus::CancelRequested
-                                }
+        match state
+            .runner_client
+            .get_job_run(&runner, runner_run_id)
+            .await
+        {
+            Ok(status) => match status.status.as_str() {
+                "running" | "cancel_requested" | "canceling" => {
+                    let next_status = match status.status.as_str() {
+                        "canceling" => JobStatus::Canceling,
+                        "cancel_requested" => {
+                            if job.status == JobStatus::Canceling.as_str() {
+                                JobStatus::Canceling
+                            } else {
+                                JobStatus::CancelRequested
                             }
-                            "running" => {
-                                if matches!(
-                                    job.status.as_str(),
-                                    "cancel_requested" | "canceling"
-                                ) {
-                                    JobStatus::parse(&job.status).unwrap_or(JobStatus::Running)
-                                } else {
-                                    JobStatus::Running
-                                }
-                            }
-                            _ => unreachable!(),
-                        };
-                        if job.status != next_status.as_str() {
-                            state.db.set_job_run_status(&job.id, next_status.as_str())?;
-                            state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
                         }
+                        "running" => {
+                            if matches!(job.status.as_str(), "cancel_requested" | "canceling") {
+                                JobStatus::parse(&job.status).unwrap_or(JobStatus::Running)
+                            } else {
+                                JobStatus::Running
+                            }
+                        }
+                        _ => unreachable!(),
+                    };
+                    if job.status != next_status.as_str() {
+                        state.db.set_job_run_status(&job.id, next_status.as_str())?;
+                        state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
                     }
-                    _ => {
-                    let logs = state.runner_client.get_job_logs(&runner, runner_run_id).await.unwrap_or_else(|error| {
-                        error!(%error, "failed to fetch runner logs");
-                        crate::runner::JobLogsResponse { stdout: String::new(), stderr: String::new() }
-                    });
-                    if should_retry_infra_failure(&job, &status, state.config.scheduler.max_infra_retries) {
+                }
+                _ => {
+                    let logs = state
+                        .runner_client
+                        .get_job_logs(&runner, runner_run_id)
+                        .await
+                        .unwrap_or_else(|error| {
+                            error!(%error, "failed to fetch runner logs");
+                            crate::runner::JobLogsResponse {
+                                stdout: String::new(),
+                                stderr: String::new(),
+                            }
+                        });
+                    if should_retry_infra_failure(
+                        &job,
+                        &status,
+                        state.config.scheduler.max_infra_retries,
+                    ) {
                         let retry_count = state.db.requeue_job_run_for_infra_retry(&job.id)?;
                         info!(
                             job_run_id = %job.id,
@@ -291,28 +312,23 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
                         state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
                         continue;
                     }
-                    let outputs = status
-                        .outputs
-                        .into_iter()
-                        .collect::<Vec<_>>();
+                    let outputs = status.outputs.into_iter().collect::<Vec<_>>();
                     let terminal = match status.status.as_str() {
                         "success" => JobStatus::Success,
                         "canceled" => JobStatus::Canceled,
                         _ => JobStatus::Failed,
                     };
-                    let outputs = persist_job_outputs(
-                        Arc::clone(&state),
-                        &runner,
-                        &job.id,
-                        outputs,
-                    )
-                    .await?;
+                    let outputs =
+                        persist_job_outputs(Arc::clone(&state), &runner, &job.id, outputs).await?;
                     state.db.finish_job_run(
                         &job.id,
                         terminal.as_str(),
                         status.duration_ms,
                         status.exit_code,
-                        status.terminal_reason.as_ref().map(|reason| reason.as_str()),
+                        status
+                            .terminal_reason
+                            .as_ref()
+                            .map(|reason| reason.as_str()),
                         status
                             .failure_category
                             .as_ref()
@@ -324,8 +340,7 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
                     )?;
                     state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
                 }
-                }
-            }
+            },
             Err(error) => {
                 warn!(%error, job_run_id = %job.id, "runner status polling failed");
             }
@@ -416,20 +431,29 @@ async fn resolve_job_inputs(
     for (key, value) in &job_definition.inputs {
         match value {
             Value::String(raw) if raw == "$commit" => {
-                resolved.insert(key.clone(), json!(pipeline.commit_sha.clone().unwrap_or_default()));
+                resolved.insert(
+                    key.clone(),
+                    json!(pipeline.commit_sha.clone().unwrap_or_default()),
+                );
             }
             Value::String(raw) if raw == "$branch" => {
-                resolved.insert(key.clone(), json!(pipeline.trigger_ref.clone().unwrap_or_default()));
+                resolved.insert(
+                    key.clone(),
+                    json!(pipeline.trigger_ref.clone().unwrap_or_default()),
+                );
             }
             Value::String(raw) if raw == "$source" => {
-                let artifact_id = ensure_source_artifact(Arc::clone(&state), pipeline, &job_definition.runner_id).await?;
+                let artifact_id =
+                    ensure_source_artifact(Arc::clone(&state), pipeline, &job_definition.runner_id)
+                        .await?;
                 resolved.insert(key.clone(), json!(artifact_id));
             }
             Value::String(raw) if raw.starts_with("$job.") => {
                 let mut parts = raw.trim_start_matches("$job.").split('.');
                 let source_job = parts.next().unwrap_or_default();
                 let output_name = parts.next().unwrap_or_default();
-                let upstream_run_id = find_job_run_id(Arc::clone(&state), &pipeline.id, source_job)?;
+                let upstream_run_id =
+                    find_job_run_id(Arc::clone(&state), &pipeline.id, source_job)?;
                 let output = state
                     .db
                     .job_outputs(&upstream_run_id)?
@@ -542,9 +566,10 @@ fn ensure_server_source_artifact(
     state: Arc<AppState>,
     pipeline: &crate::models::PipelineRun,
 ) -> Result<crate::models::ServerArtifact, Box<dyn std::error::Error>> {
-    if let Some(existing) = state
-        .db
-        .get_server_artifact("pipeline_source", &pipeline.id, "source")?
+    if let Some(existing) =
+        state
+            .db
+            .get_server_artifact("pipeline_source", &pipeline.id, "source")?
     {
         return Ok(existing);
     }
@@ -565,9 +590,10 @@ fn ensure_server_source_artifact(
             &archive_path,
         )?;
     }
-    let pending = state
-        .artifacts
-        .store_file("pipeline_source", &pipeline.id, "source", &archive_path)?;
+    let pending =
+        state
+            .artifacts
+            .store_file("pipeline_source", &pipeline.id, "source", &archive_path)?;
     state.db.insert_server_artifact(&pending)?;
     state
         .db
@@ -622,7 +648,13 @@ async fn refresh_runner_health(state: Arc<AppState>) -> Result<(), Box<dyn std::
             Ok(jobs) => {
                 let payloads = jobs
                     .into_iter()
-                    .map(|job| (job.name, serde_json::to_string(&job.definition).unwrap_or_else(|_| "{}".to_string())))
+                    .map(|job| {
+                        (
+                            job.name,
+                            serde_json::to_string(&job.definition)
+                                .unwrap_or_else(|_| "{}".to_string()),
+                        )
+                    })
                     .collect::<Vec<_>>();
                 state.db.replace_runner_jobs(&runner.id, &payloads)?;
                 state.db.update_runner_health(&runner.id, "healthy")?;

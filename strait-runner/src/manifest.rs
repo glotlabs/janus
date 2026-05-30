@@ -475,7 +475,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{Concurrency, JobManifest, ManifestError, ManifestStore, InputType};
+    use super::{Concurrency, InputType, JobManifest, ManifestError, ManifestStore};
 
     #[test]
     fn parses_manifest_file() {

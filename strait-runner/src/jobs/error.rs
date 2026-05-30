@@ -168,7 +168,10 @@ impl fmt::Display for JobError {
             Self::MissingIdempotencyKey => write!(f, "missing idempotency key"),
             Self::InvalidIdempotencyKey(key) => write!(f, "invalid idempotency key: {key}"),
             Self::IdempotencyConflict { key } => {
-                write!(f, "idempotency key {key} does not match the original request")
+                write!(
+                    f,
+                    "idempotency key {key} does not match the original request"
+                )
             }
         }
     }

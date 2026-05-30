@@ -250,7 +250,9 @@ impl JobStore {
                             );
                             let _ = append_error(&execution.stderr_path, &error);
                             terminal_reason = match error {
-                                JobError::MissingOutput { .. } => TerminalReason::MissingRequiredOutput,
+                                JobError::MissingOutput { .. } => {
+                                    TerminalReason::MissingRequiredOutput
+                                }
                                 _ => TerminalReason::OutputRegistrationFailed,
                             };
                             failure_category = Some(FailureCategory::Infra);
@@ -264,16 +266,15 @@ impl JobStore {
                 metadata.status = final_status.clone();
                 metadata.exit_code = outcome.exit_code;
                 metadata.finished_at = Some(finished_at);
-                metadata.duration_ms = calculate_duration_ms(&metadata.started_at, metadata.finished_at.as_deref());
+                metadata.duration_ms =
+                    calculate_duration_ms(&metadata.started_at, metadata.finished_at.as_deref());
                 metadata.terminal_reason = Some(if matches!(final_status, JobStatus::Success) {
                     TerminalReason::Success
                 } else {
                     classify_terminal_reason(&terminal_reason, &final_status)
                 });
-                metadata.failure_category = classify_failure_category(
-                    failure_category,
-                    &final_status,
-                );
+                metadata.failure_category =
+                    classify_failure_category(failure_category, &final_status);
                 metadata.output_metadata = build_output_metadata(
                     &execution.stdout_path,
                     outcome.stdout_truncated,

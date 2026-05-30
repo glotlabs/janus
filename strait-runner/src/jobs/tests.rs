@@ -23,8 +23,8 @@ use tower::util::ServiceExt;
 
 use super::{
     JobCreatedResponse, JobDefinitionResponse, JobLogsResponse, JobMetadata, JobStatus,
-    JobStatusResponse, JobStore, cancel_job, create_job as create_job_impl, get_job,
-    get_job_logs, list_jobs,
+    JobStatusResponse, JobStore, cancel_job, create_job as create_job_impl, get_job, get_job_logs,
+    list_jobs,
     models::{FailureCategory, TerminalReason},
 };
 use crate::{
@@ -786,10 +786,7 @@ async fn times_out_long_running_script() {
 
     assert_eq!(metadata.status, JobStatus::TimedOut);
     assert_eq!(metadata.terminal_reason, Some(TerminalReason::Timeout));
-    assert_eq!(
-        metadata.failure_category,
-        Some(FailureCategory::Timeout)
-    );
+    assert_eq!(metadata.failure_category, Some(FailureCategory::Timeout));
     assert_eq!(metadata.exit_code, None);
 }
 

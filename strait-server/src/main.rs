@@ -12,7 +12,9 @@ mod web;
 
 use std::env;
 
-use app::{Cli, Command, build_state, hook_post_receive, init_tracing, reconcile_hooks, seed_user, serve};
+use app::{
+    Cli, Command, build_state, hook_post_receive, init_tracing, reconcile_hooks, seed_user, serve,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

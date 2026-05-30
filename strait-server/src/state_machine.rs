@@ -40,7 +40,6 @@ impl JobStatus {
             Self::Skipped => "skipped",
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +71,10 @@ pub fn next_ready_job_status(
     dependency_statuses: impl Iterator<Item = (JobStatus, bool)>,
 ) -> Option<JobStatus> {
     let statuses = dependency_statuses.collect::<Vec<_>>();
-    if statuses.iter().any(|(status, allow_failure)| *status == JobStatus::Failed && !allow_failure) {
+    if statuses
+        .iter()
+        .any(|(status, allow_failure)| *status == JobStatus::Failed && !allow_failure)
+    {
         return Some(JobStatus::Blocked);
     }
     if statuses.iter().any(|(status, _)| {
@@ -86,7 +88,10 @@ pub fn next_ready_job_status(
     }) {
         return None;
     }
-    if statuses.iter().any(|(status, _)| *status == JobStatus::Canceled) {
+    if statuses
+        .iter()
+        .any(|(status, _)| *status == JobStatus::Canceled)
+    {
         return Some(JobStatus::Blocked);
     }
     Some(JobStatus::Pending)
@@ -109,13 +114,23 @@ pub fn terminal_pipeline_status(
     {
         return PipelineStatus::Failed;
     }
-    if statuses.iter().any(|(status, _)| *status == JobStatus::Blocked) {
+    if statuses
+        .iter()
+        .any(|(status, _)| *status == JobStatus::Blocked)
+    {
         return PipelineStatus::Blocked;
     }
-    if statuses.iter().all(|(status, _)| *status == JobStatus::Canceled) && !statuses.is_empty() {
+    if statuses
+        .iter()
+        .all(|(status, _)| *status == JobStatus::Canceled)
+        && !statuses.is_empty()
+    {
         return PipelineStatus::Canceled;
     }
-    if statuses.iter().any(|(status, _)| *status == JobStatus::Canceling) {
+    if statuses
+        .iter()
+        .any(|(status, _)| *status == JobStatus::Canceling)
+    {
         return PipelineStatus::Canceling;
     }
     if statuses
