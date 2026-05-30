@@ -521,8 +521,8 @@ async fn executes_successful_script_and_cleans_workdir() {
         &temp,
         "build-app",
         r#"#!/bin/sh
-printf '%s' "$JOB_COMMIT"
-printf '%s' "$JOB_SOURCE" >&2
+printf '%s' "$INPUT_COMMIT"
+printf '%s' "$INPUT_SOURCE" >&2
 exit 0
 "#,
         600,
@@ -652,7 +652,7 @@ required = false
 path = "app.tar.gz"
 required = true
 "#,
-        "#!/bin/sh\nprintf 'bundle' > \"$JOB_OUTPUT_DIR/app.tar.gz\"\n",
+        "#!/bin/sh\nprintf 'bundle' > \"$STRAIT_OUTPUT_DIR/app.tar.gz\"\n",
         600,
         50,
         64,
@@ -1014,7 +1014,7 @@ async fn cancel_kills_child_process_tree() {
     let state = test_state_with_script(
         &temp,
         "build-app",
-        "#!/bin/sh\nsleep 30 &\necho $! > \"$JOB_WORKDIR/child.pid\"\nwait\n",
+        "#!/bin/sh\nsleep 30 &\necho $! > \"$STRAIT_WORKDIR/child.pid\"\nwait\n",
         600,
     );
     let app = Router::new()
@@ -1131,8 +1131,8 @@ async fn job_process_sees_only_deliberate_environment() {
     assert_eq!(metadata.status, JobStatus::Success);
     let stdout = fs::read_to_string(temp.join("jobs").join(&created.job_id).join("stdout.log"))
         .expect("stdout log");
-    assert!(stdout.contains("JOB_NAME=build-app"));
-    assert!(stdout.contains("JOB_COMMIT=abc123"));
+    assert!(stdout.contains("STRAIT_JOB_NAME=build-app"));
+    assert!(stdout.contains("INPUT_COMMIT=abc123"));
     assert!(stdout.contains("PATH=/usr/local/bin:/usr/bin:/bin"));
     assert!(!stdout.contains("HOME="));
 }
@@ -1150,7 +1150,7 @@ required = true
 sensitive = true
 "#,
         "",
-        "#!/bin/sh\nprintf '%s' \"$JOB_TOKEN\"\n",
+        "#!/bin/sh\nprintf '%s' \"$INPUT_TOKEN\"\n",
         600,
         50,
         64,

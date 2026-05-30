@@ -296,18 +296,18 @@ impl JobStore {
 fn build_job_env(execution: &JobExecution) -> BTreeMap<String, String> {
     let metadata = &execution.metadata;
     let mut env = BTreeMap::from([
-        ("JOB_ID".to_string(), metadata.job_id.clone()),
-        ("JOB_NAME".to_string(), metadata.name.clone()),
+        ("STRAIT_JOB_ID".to_string(), metadata.job_id.clone()),
+        ("STRAIT_JOB_NAME".to_string(), metadata.name.clone()),
         (
-            "JOB_WORKDIR".to_string(),
+            "STRAIT_WORKDIR".to_string(),
             execution.work_dir.display().to_string(),
         ),
         (
-            "JOB_OUTPUT_DIR".to_string(),
+            "STRAIT_OUTPUT_DIR".to_string(),
             execution.output_dir.display().to_string(),
         ),
         (
-            "JOB_METADATA_PATH".to_string(),
+            "STRAIT_METADATA_PATH".to_string(),
             execution.metadata_path.display().to_string(),
         ),
     ]);
@@ -328,7 +328,7 @@ fn build_job_env(execution: &JobExecution) -> BTreeMap<String, String> {
 }
 
 fn normalize_input_env(name: &str) -> String {
-    format!("JOB_{}", name.replace('-', "_").to_ascii_uppercase())
+    format!("INPUT_{}", name.replace('-', "_").to_ascii_uppercase())
 }
 
 fn register_outputs(
