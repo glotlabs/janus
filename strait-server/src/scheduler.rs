@@ -1,12 +1,15 @@
-use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use glob::Pattern;
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 use tokio::time::{self, Duration, MissedTickBehavior};
 use tracing::{error, info, warn};
 
-use crate::{AppState, git, models::{WorkflowDefinition, WorkflowTrigger}};
+use crate::{
+    AppState, git,
+    models::{WorkflowDefinition, WorkflowTrigger},
+    state_machine::{self, JobStatus, PipelineStatus},
+};
 
 pub fn spawn(state: Arc<AppState>) {
     let scheduler_state = Arc::clone(&state);
@@ -150,7 +153,9 @@ async fn process_push_events(state: Arc<AppState>) -> Result<(), Box<dyn std::er
 
 fn recover_incomplete_pipelines(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
     for pipeline in state.db.pipelines_requiring_recovery()? {
-        state.db.set_pipeline_status(&pipeline.id, "running")?;
+        state
+            .db
+            .set_pipeline_status(&pipeline.id, PipelineStatus::Running.as_str())?;
     }
     Ok(())
 }
@@ -159,16 +164,23 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
     let jobs = state.db.list_job_runs_by_status(&["pending"])?;
     for job in jobs {
         let dependencies = state.db.dependencies_for_job_run(&job.id)?;
-        if dependencies.iter().any(|item| item.status == "failed" && !item.allow_failure) {
-            state.db.set_job_run_status(&job.id, "blocked")?;
+        let dependency_state = state_machine::next_ready_job_status(
+            dependencies
+                .iter()
+                .filter_map(|item| JobStatus::parse(&item.status).map(|status| (status, item.allow_failure))),
+        );
+        if dependency_state == Some(JobStatus::Blocked) {
+            state
+                .db
+                .set_job_run_status(&job.id, JobStatus::Blocked.as_str())?;
             state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
             continue;
         }
-        if dependencies.iter().any(|item| matches!(item.status.as_str(), "pending" | "running")) {
+        if dependency_state.is_none() {
             continue;
         }
         let Some(runner) = state.db.get_runner(&job.runner_id)? else {
-            state.db.set_job_run_status(&job.id, "failed")?;
+            state.db.set_job_run_status(&job.id, JobStatus::Failed.as_str())?;
             continue;
         };
         if !runner.enabled {
@@ -212,14 +224,26 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
                     let outputs = status
                         .outputs
                         .into_iter()
-                        .map(|(name, value)| (name, value.artifact_id, value.sha256, value.size))
                         .collect::<Vec<_>>();
                     let terminal = match status.status.as_str() {
-                        "success" => "success",
-                        "canceled" => "canceled",
-                        _ => "failed",
+                        "success" => JobStatus::Success,
+                        "canceled" => JobStatus::Canceled,
+                        _ => JobStatus::Failed,
                     };
-                    state.db.finish_job_run(&job.id, terminal, &logs.stdout, &logs.stderr, &outputs)?;
+                    let outputs = persist_job_outputs(
+                        Arc::clone(&state),
+                        &runner,
+                        &job.id,
+                        outputs,
+                    )
+                    .await?;
+                    state.db.finish_job_run(
+                        &job.id,
+                        terminal.as_str(),
+                        &logs.stdout,
+                        &logs.stderr,
+                        &outputs,
+                    )?;
                     state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
                 }
             }
@@ -304,27 +328,14 @@ async fn ensure_source_artifact(
     pipeline: &crate::models::PipelineRun,
     runner_id: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let Some(repo) = state.db.get_repo(&pipeline.repo_id)? else {
-        return Err(format!("missing repo {}", pipeline.repo_id).into());
-    };
-    let commit_sha = pipeline
-        .commit_sha
-        .clone()
-        .ok_or_else(|| "pipeline missing commit sha".to_string())?;
-    let archive_path = PathBuf::from(&state.config.data_dir)
-        .join("source-archives")
-        .join(format!("{}-{}.tar.gz", pipeline.id, commit_sha));
-    if !archive_path.exists() {
-        git::create_source_archive(PathBuf::from(repo.bare_path).as_path(), &commit_sha, &archive_path)?;
-    }
-    let bytes = fs::read(&archive_path)?;
-    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let server_artifact = ensure_server_source_artifact(Arc::clone(&state), pipeline)?;
+    let bytes = state.artifacts.read_bytes(&server_artifact)?;
     let Some(runner) = state.db.get_runner(runner_id)? else {
         return Err(format!("missing runner {runner_id}").into());
     };
     let upload = state
         .runner_client
-        .upload_artifact(&runner, bytes, &sha256)
+        .upload_artifact(&runner, bytes, &server_artifact.sha256)
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(upload.artifact_id)
@@ -354,24 +365,91 @@ async fn ensure_runner_has_artifact(
     if upstream.run.runner_id == target_runner_id {
         return Ok(source_artifact_id.to_string());
     }
-    let Some(source_runner) = state.db.get_runner(&upstream.run.runner_id)? else {
-        return Err("missing source runner".into());
-    };
     let Some(target_runner) = state.db.get_runner(target_runner_id)? else {
         return Err("missing target runner".into());
     };
-    let bytes = state
-        .runner_client
-        .download_artifact(&source_runner, source_artifact_id)
-        .await
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let server_artifact_id = upstream
+        .outputs
+        .iter()
+        .find(|item| item.runner_artifact_id == source_artifact_id)
+        .and_then(|item| item.server_artifact_id.clone())
+        .ok_or("missing server-managed artifact mirror")?;
+    let server_artifact = state
+        .db
+        .get_server_artifact_by_id(&server_artifact_id)?
+        .ok_or("missing server artifact record")?;
+    let bytes = state.artifacts.read_bytes(&server_artifact)?;
     let upload = state
         .runner_client
-        .upload_artifact(&target_runner, bytes, &sha256)
+        .upload_artifact(&target_runner, bytes, &server_artifact.sha256)
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(upload.artifact_id)
+}
+
+fn ensure_server_source_artifact(
+    state: Arc<AppState>,
+    pipeline: &crate::models::PipelineRun,
+) -> Result<crate::models::ServerArtifact, Box<dyn std::error::Error>> {
+    if let Some(existing) = state
+        .db
+        .get_server_artifact("pipeline_source", &pipeline.id, "source")?
+    {
+        return Ok(existing);
+    }
+    let Some(repo) = state.db.get_repo(&pipeline.repo_id)? else {
+        return Err(format!("missing repo {}", pipeline.repo_id).into());
+    };
+    let commit_sha = pipeline
+        .commit_sha
+        .clone()
+        .ok_or_else(|| "pipeline missing commit sha".to_string())?;
+    let archive_path = std::path::PathBuf::from(&state.config.data_dir)
+        .join("source-archives")
+        .join(format!("{}-{}.tar.gz", pipeline.id, commit_sha));
+    if !archive_path.exists() {
+        git::create_source_archive(
+            std::path::PathBuf::from(repo.bare_path).as_path(),
+            &commit_sha,
+            &archive_path,
+        )?;
+    }
+    let pending = state
+        .artifacts
+        .store_file("pipeline_source", &pipeline.id, "source", &archive_path)?;
+    state.db.insert_server_artifact(&pending)?;
+    state
+        .db
+        .get_server_artifact_by_id(&pending.id)?
+        .ok_or_else(|| "missing stored source artifact".into())
+}
+
+async fn persist_job_outputs(
+    state: Arc<AppState>,
+    runner: &crate::models::Runner,
+    job_run_id: &str,
+    outputs: Vec<(String, crate::runner::JobOutputResponse)>,
+) -> Result<Vec<(String, String, Option<String>, String, u64)>, Box<dyn std::error::Error>> {
+    let mut persisted = Vec::new();
+    for (name, output) in outputs {
+        let bytes = state
+            .runner_client
+            .download_artifact(runner, &output.artifact_id)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let pending = state
+            .artifacts
+            .store_bytes("job_output", job_run_id, &name, &bytes)?;
+        let server_artifact_id = state.db.insert_server_artifact(&pending)?;
+        persisted.push((
+            name,
+            output.artifact_id,
+            Some(server_artifact_id),
+            output.sha256,
+            output.size,
+        ));
+    }
+    Ok(persisted)
 }
 
 fn matches_branch(patterns: &[String], ref_name: &str) -> bool {

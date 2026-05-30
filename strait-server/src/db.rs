@@ -6,8 +6,9 @@ use uuid::Uuid;
 
 use crate::models::{
     JobRun, JobRunArtifact, JobRunDetail, PipelineRun, PipelineSnapshot, PushEvent, PushEventRef,
-    Repo, Runner, User, Workflow,
+    Repo, Runner, ServerArtifact, User, Workflow,
 };
+use crate::state_machine::{self, JobStatus};
 
 #[derive(Clone)]
 pub struct Database {
@@ -17,157 +18,8 @@ pub struct Database {
 impl Database {
     pub fn open(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let conn = Connection::open(path)?;
-        conn.execute_batch(
-            r#"
-            PRAGMA foreign_keys = ON;
-
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                username TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                role TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS repos (
-                id TEXT PRIMARY KEY,
-                owner_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                normalized_name TEXT NOT NULL,
-                bare_path TEXT NOT NULL,
-                default_branch TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(owner_id, normalized_name),
-                FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS runners (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                base_url TEXT NOT NULL,
-                token_encrypted_or_local_ref TEXT NOT NULL,
-                enabled INTEGER NOT NULL,
-                last_health_state TEXT NOT NULL,
-                last_seen_at TEXT,
-                created_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS runner_jobs (
-                id TEXT PRIMARY KEY,
-                runner_id TEXT NOT NULL,
-                job_name TEXT NOT NULL,
-                definition_json TEXT NOT NULL,
-                last_refreshed_at TEXT NOT NULL,
-                UNIQUE(runner_id, job_name),
-                FOREIGN KEY(runner_id) REFERENCES runners(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS workflows (
-                id TEXT PRIMARY KEY,
-                repo_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                enabled INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS workflow_versions (
-                id TEXT PRIMARY KEY,
-                workflow_id TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                trigger_json TEXT NOT NULL,
-                definition_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(workflow_id, version),
-                FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS push_events (
-                id TEXT PRIMARY KEY,
-                repo_id TEXT NOT NULL,
-                received_at TEXT NOT NULL,
-                event_key TEXT NOT NULL UNIQUE,
-                processed_at TEXT,
-                FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS push_event_refs (
-                id TEXT PRIMARY KEY,
-                push_event_id TEXT NOT NULL,
-                old_rev TEXT NOT NULL,
-                new_rev TEXT NOT NULL,
-                ref_name TEXT NOT NULL,
-                FOREIGN KEY(push_event_id) REFERENCES push_events(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS pipeline_runs (
-                id TEXT PRIMARY KEY,
-                repo_id TEXT NOT NULL,
-                workflow_id TEXT NOT NULL,
-                workflow_version_id TEXT NOT NULL,
-                trigger_type TEXT NOT NULL,
-                trigger_ref TEXT,
-                commit_sha TEXT,
-                status TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                finished_at TEXT,
-                FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE,
-                FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
-                FOREIGN KEY(workflow_version_id) REFERENCES workflow_versions(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS job_runs (
-                id TEXT PRIMARY KEY,
-                pipeline_run_id TEXT NOT NULL,
-                job_id TEXT NOT NULL,
-                job_name TEXT NOT NULL,
-                runner_id TEXT NOT NULL,
-                runner_job_name TEXT NOT NULL,
-                runner_run_id TEXT,
-                status TEXT NOT NULL,
-                allow_failure INTEGER NOT NULL,
-                started_at TEXT,
-                finished_at TEXT,
-                FOREIGN KEY(pipeline_run_id) REFERENCES pipeline_runs(id) ON DELETE CASCADE,
-                FOREIGN KEY(runner_id) REFERENCES runners(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS job_run_dependencies (
-                job_run_id TEXT NOT NULL,
-                depends_on_job_run_id TEXT NOT NULL,
-                PRIMARY KEY(job_run_id, depends_on_job_run_id),
-                FOREIGN KEY(job_run_id) REFERENCES job_runs(id) ON DELETE CASCADE,
-                FOREIGN KEY(depends_on_job_run_id) REFERENCES job_runs(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS job_run_artifacts (
-                id TEXT PRIMARY KEY,
-                job_run_id TEXT NOT NULL,
-                artifact_name TEXT NOT NULL,
-                artifact_role TEXT NOT NULL,
-                runner_artifact_id TEXT NOT NULL,
-                sha256 TEXT,
-                size_bytes INTEGER,
-                FOREIGN KEY(job_run_id) REFERENCES job_runs(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS job_run_logs (
-                job_run_id TEXT PRIMARY KEY,
-                stdout TEXT NOT NULL,
-                stderr TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(job_run_id) REFERENCES job_runs(id) ON DELETE CASCADE
-            );
-            "#,
-        )?;
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        apply_migrations(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -281,6 +133,21 @@ impl Database {
             params![session_id, user_id, expires_at, now()],
         )?;
         Ok(session_id)
+    }
+
+    pub fn delete_sessions_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute("DELETE FROM sessions WHERE user_id = ?1", [user_id])?;
+        Ok(())
+    }
+
+    pub fn cleanup_expired_sessions(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute("DELETE FROM sessions WHERE expires_at <= ?1", [now()])?;
+        Ok(())
     }
 
     pub fn delete_session(&self, session_id: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -897,7 +764,7 @@ impl Database {
                 .query_map([run.id.clone()], |row| row.get(0))?
                 .collect::<Result<Vec<String>, _>>()?;
             let mut artifact_stmt = conn.prepare(
-                "SELECT artifact_name, artifact_role, runner_artifact_id, sha256, size_bytes FROM job_run_artifacts WHERE job_run_id = ?1 ORDER BY artifact_name",
+                "SELECT artifact_name, artifact_role, runner_artifact_id, server_artifact_id, sha256, size_bytes FROM job_run_artifacts WHERE job_run_id = ?1 ORDER BY artifact_name",
             )?;
             let outputs = artifact_stmt
                 .query_map([run.id.clone()], |row| {
@@ -905,8 +772,9 @@ impl Database {
                         artifact_name: row.get(0)?,
                         artifact_role: row.get(1)?,
                         runner_artifact_id: row.get(2)?,
-                        sha256: row.get(3)?,
-                        size_bytes: row.get(4)?,
+                        server_artifact_id: row.get(3)?,
+                        sha256: row.get(4)?,
+                        size_bytes: row.get(5)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1004,7 +872,7 @@ impl Database {
         status: &str,
         stdout: &str,
         stderr: &str,
-        outputs: &[(String, String, String, u64)],
+        outputs: &[(String, String, Option<String>, String, u64)],
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut conn = self.conn.lock().expect("db mutex poisoned");
         let tx = conn.transaction()?;
@@ -1017,11 +885,11 @@ impl Database {
             params![job_run_id, stdout, stderr, now()],
         )?;
         tx.execute("DELETE FROM job_run_artifacts WHERE job_run_id = ?1", [job_run_id])?;
-        for (name, artifact_id, sha256, size) in outputs {
+        for (name, artifact_id, server_artifact_id, sha256, size) in outputs {
             tx.execute(
-                "INSERT INTO job_run_artifacts (id, job_run_id, artifact_name, artifact_role, runner_artifact_id, sha256, size_bytes)
-                 VALUES (?1, ?2, ?3, 'output', ?4, ?5, ?6)",
-                params![Uuid::now_v7().to_string(), job_run_id, name, artifact_id, sha256, *size as i64],
+                "INSERT INTO job_run_artifacts (id, job_run_id, artifact_name, artifact_role, runner_artifact_id, server_artifact_id, sha256, size_bytes)
+                 VALUES (?1, ?2, ?3, 'output', ?4, ?5, ?6, ?7)",
+                params![Uuid::now_v7().to_string(), job_run_id, name, artifact_id, server_artifact_id, sha256, *size as i64],
             )?;
         }
         tx.commit()?;
@@ -1043,15 +911,16 @@ impl Database {
     ) -> Result<Vec<JobRunArtifact>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT artifact_name, artifact_role, runner_artifact_id, sha256, size_bytes FROM job_run_artifacts WHERE job_run_id = ?1 ORDER BY artifact_name",
+            "SELECT artifact_name, artifact_role, runner_artifact_id, server_artifact_id, sha256, size_bytes FROM job_run_artifacts WHERE job_run_id = ?1 ORDER BY artifact_name",
         )?;
         let rows = stmt.query_map([job_run_id], |row| {
             Ok(JobRunArtifact {
                 artifact_name: row.get(0)?,
                 artifact_role: row.get(1)?,
                 runner_artifact_id: row.get(2)?,
-                sha256: row.get(3)?,
-                size_bytes: row.get(4)?,
+                server_artifact_id: row.get(3)?,
+                sha256: row.get(4)?,
+                size_bytes: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1131,19 +1000,15 @@ impl Database {
         let rows = stmt
             .query_map([pipeline_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)))?
             .collect::<Result<Vec<_>, _>>()?;
-        let mut pipeline_status = "running";
-        if !rows.is_empty() && rows.iter().all(|(status, _)| matches!(status.as_str(), "success" | "skipped")) {
-            pipeline_status = "success";
-        } else if rows.iter().any(|(status, allow_failure)| status == "failed" && !allow_failure) {
-            pipeline_status = "failed";
-        } else if rows.iter().any(|(status, _)| status == "blocked") {
-            pipeline_status = "blocked";
-        }
+        let pipeline_status = state_machine::terminal_pipeline_status(
+            rows.iter()
+                .filter_map(|(status, allow_failure)| JobStatus::parse(status).map(|parsed| (parsed, *allow_failure))),
+        );
 
-        if pipeline_status != "running" {
+        if pipeline_status != state_machine::PipelineStatus::Running {
             conn.execute(
                 "UPDATE pipeline_runs SET status = ?2, finished_at = ?3 WHERE id = ?1",
-                params![pipeline_id, pipeline_status, now()],
+                params![pipeline_id, pipeline_status.as_str(), now()],
             )?;
         }
         Ok(())
@@ -1186,8 +1051,273 @@ impl Database {
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+
+    pub fn insert_server_artifact(
+        &self,
+        artifact: &crate::artifacts::PendingArtifact,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "INSERT INTO server_artifacts (id, scope_type, scope_id, artifact_name, sha256, size_bytes, storage_path, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(scope_type, scope_id, artifact_name) DO UPDATE SET
+                sha256 = excluded.sha256,
+                size_bytes = excluded.size_bytes,
+                storage_path = excluded.storage_path,
+                created_at = excluded.created_at",
+            params![
+                artifact.id,
+                artifact.scope_type,
+                artifact.scope_id,
+                artifact.artifact_name,
+                artifact.sha256,
+                artifact.size_bytes,
+                artifact.storage_path,
+                now()
+            ],
+        )?;
+        Ok(artifact.id.clone())
+    }
+
+    pub fn get_server_artifact(
+        &self,
+        scope_type: &str,
+        scope_id: &str,
+        artifact_name: &str,
+    ) -> Result<Option<ServerArtifact>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT id, scope_type, scope_id, artifact_name, sha256, size_bytes, storage_path, created_at
+             FROM server_artifacts WHERE scope_type = ?1 AND scope_id = ?2 AND artifact_name = ?3",
+            params![scope_type, scope_id, artifact_name],
+            |row| {
+                Ok(ServerArtifact {
+                    id: row.get(0)?,
+                    scope_type: row.get(1)?,
+                    scope_id: row.get(2)?,
+                    artifact_name: row.get(3)?,
+                    sha256: row.get(4)?,
+                    size_bytes: row.get(5)?,
+                    storage_path: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            },
+        ).optional()?)
+    }
+
+    pub fn get_server_artifact_by_id(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<ServerArtifact>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT id, scope_type, scope_id, artifact_name, sha256, size_bytes, storage_path, created_at
+             FROM server_artifacts WHERE id = ?1",
+            [artifact_id],
+            |row| {
+                Ok(ServerArtifact {
+                    id: row.get(0)?,
+                    scope_type: row.get(1)?,
+                    scope_id: row.get(2)?,
+                    artifact_name: row.get(3)?,
+                    sha256: row.get(4)?,
+                    size_bytes: row.get(5)?,
+                    storage_path: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            },
+        ).optional()?)
+    }
 }
 
 fn now() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schema_migrations (
+            version INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        );",
+    )?;
+
+    let applied_v2 = conn
+        .query_row(
+            "SELECT 1 FROM schema_migrations WHERE version = 2",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if applied_v2 {
+        return Ok(());
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS repos (
+            id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL,
+            bare_path TEXT NOT NULL,
+            default_branch TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(owner_id, normalized_name),
+            FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS runners (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            base_url TEXT NOT NULL,
+            token_encrypted_or_local_ref TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            last_health_state TEXT NOT NULL,
+            last_seen_at TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS runner_jobs (
+            id TEXT PRIMARY KEY,
+            runner_id TEXT NOT NULL,
+            job_name TEXT NOT NULL,
+            definition_json TEXT NOT NULL,
+            last_refreshed_at TEXT NOT NULL,
+            UNIQUE(runner_id, job_name),
+            FOREIGN KEY(runner_id) REFERENCES runners(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS workflows (
+            id TEXT PRIMARY KEY,
+            repo_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            enabled INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS workflow_versions (
+            id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            trigger_json TEXT NOT NULL,
+            definition_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(workflow_id, version),
+            FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS push_events (
+            id TEXT PRIMARY KEY,
+            repo_id TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            event_key TEXT NOT NULL UNIQUE,
+            processed_at TEXT,
+            FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS push_event_refs (
+            id TEXT PRIMARY KEY,
+            push_event_id TEXT NOT NULL,
+            old_rev TEXT NOT NULL,
+            new_rev TEXT NOT NULL,
+            ref_name TEXT NOT NULL,
+            FOREIGN KEY(push_event_id) REFERENCES push_events(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS pipeline_runs (
+            id TEXT PRIMARY KEY,
+            repo_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            workflow_version_id TEXT NOT NULL,
+            trigger_type TEXT NOT NULL,
+            trigger_ref TEXT,
+            commit_sha TEXT,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            FOREIGN KEY(repo_id) REFERENCES repos(id) ON DELETE CASCADE,
+            FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+            FOREIGN KEY(workflow_version_id) REFERENCES workflow_versions(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS job_runs (
+            id TEXT PRIMARY KEY,
+            pipeline_run_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            job_name TEXT NOT NULL,
+            runner_id TEXT NOT NULL,
+            runner_job_name TEXT NOT NULL,
+            runner_run_id TEXT,
+            status TEXT NOT NULL,
+            allow_failure INTEGER NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            FOREIGN KEY(pipeline_run_id) REFERENCES pipeline_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY(runner_id) REFERENCES runners(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS job_run_dependencies (
+            job_run_id TEXT NOT NULL,
+            depends_on_job_run_id TEXT NOT NULL,
+            PRIMARY KEY(job_run_id, depends_on_job_run_id),
+            FOREIGN KEY(job_run_id) REFERENCES job_runs(id) ON DELETE CASCADE,
+            FOREIGN KEY(depends_on_job_run_id) REFERENCES job_runs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS job_run_artifacts (
+            id TEXT PRIMARY KEY,
+            job_run_id TEXT NOT NULL,
+            artifact_name TEXT NOT NULL,
+            artifact_role TEXT NOT NULL,
+            runner_artifact_id TEXT NOT NULL,
+            sha256 TEXT,
+            size_bytes INTEGER,
+            FOREIGN KEY(job_run_id) REFERENCES job_runs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS job_run_logs (
+            job_run_id TEXT PRIMARY KEY,
+            stdout TEXT NOT NULL,
+            stderr TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(job_run_id) REFERENCES job_runs(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS server_artifacts (
+            id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            artifact_name TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            storage_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(scope_type, scope_id, artifact_name)
+        );
+        "#,
+    )?;
+    let mut stmt = tx.prepare("PRAGMA table_info(job_run_artifacts)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    if !columns.iter().any(|name| name == "server_artifact_id") {
+        tx.execute_batch("ALTER TABLE job_run_artifacts ADD COLUMN server_artifact_id TEXT;")?;
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?1)",
+        [now()],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (2, ?1)",
+        [now()],
+    )?;
+    tx.commit()?;
+    Ok(())
 }

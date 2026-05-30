@@ -10,6 +10,9 @@ public_base_url = "ci.example.internal"
 
 [auth]
 session_secret = "replace-me-with-a-long-random-secret"
+session_ttl_days = 7
+session_cookie_secure = true
+login_rate_limit_per_minute = 10
 
 [auth.bootstrap_admin]
 username = "admin"
@@ -20,4 +23,3 @@ poll_interval_ms = 2000
 
 [runners]
 healthcheck_interval_seconds = 30
-

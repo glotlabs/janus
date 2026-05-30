@@ -35,12 +35,13 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
         .is_ok()
 }
 
-pub fn session_cookie(secret: &str, value: &str) -> Cookie<'static> {
+pub fn session_cookie(secret: &str, value: &str, secure: bool) -> Cookie<'static> {
     let signed_value = format!("{value}.{}", sign(secret, value));
     let mut cookie = Cookie::new(SESSION_COOKIE, signed_value);
     cookie.set_http_only(true);
     cookie.set_path("/");
     cookie.set_same_site(SameSite::Lax);
+    cookie.set_secure(secure);
     cookie
 }
 

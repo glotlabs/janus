@@ -34,6 +34,9 @@ pub struct ServerConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthConfig {
     pub session_secret: String,
+    pub session_ttl_days: u64,
+    pub session_cookie_secure: bool,
+    pub login_rate_limit_per_minute: u64,
     pub bootstrap_admin: BootstrapAdminConfig,
 }
 

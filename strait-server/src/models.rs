@@ -168,6 +168,19 @@ pub struct JobRunArtifact {
     pub artifact_name: String,
     pub artifact_role: String,
     pub runner_artifact_id: String,
+    pub server_artifact_id: Option<String>,
     pub sha256: Option<String>,
     pub size_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerArtifact {
+    pub id: String,
+    pub scope_type: String,
+    pub scope_id: String,
+    pub artifact_name: String,
+    pub sha256: String,
+    pub size_bytes: i64,
+    pub storage_path: String,
+    pub created_at: String,
 }

@@ -1,3 +1,4 @@
+mod artifacts;
 mod auth;
 mod config;
 mod db;
@@ -5,13 +6,15 @@ mod git;
 mod models;
 mod runner;
 mod scheduler;
+mod state_machine;
 
 use std::{
     collections::BTreeMap,
     env, fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::{Duration as StdDuration, Instant},
 };
 
 use auth::{
@@ -19,7 +22,7 @@ use auth::{
     session_cookie, verify_password,
 };
 use axum::{
-    Form, Router,
+    Form, Json, Router,
     extract::{Path as AxumPath, State},
     http::{HeaderMap, StatusCode, header::SET_COOKIE},
     response::{Html, IntoResponse, Redirect, Response, Sse},
@@ -29,14 +32,14 @@ use chrono::{Duration, Utc};
 use config::Config;
 use hmac::{Hmac, Mac};
 use models::{PipelineRun, Repo, User, Workflow, WorkflowDefinition, WorkflowJobDefinition, WorkflowTrigger};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use tokio::time;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::{db::Database, runner::RunnerClient};
+use crate::{artifacts::ArtifactStore, db::Database, runner::RunnerClient};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -44,9 +47,17 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct AppState {
     config: Arc<Config>,
     db: Database,
+    artifacts: ArtifactStore,
     runner_client: RunnerClient,
     config_path: Arc<PathBuf>,
     server_bin: Arc<PathBuf>,
+    login_attempts: Arc<Mutex<BTreeMap<String, LoginWindow>>>,
+}
+
+#[derive(Clone)]
+struct LoginWindow {
+    started_at: Instant,
+    count: u64,
 }
 
 #[tokio::main]
@@ -80,15 +91,18 @@ fn build_state(
     }
 
     let db = Database::open(&config.database.path)?;
+    db.cleanup_expired_sessions()?;
     let admin_hash = hash_password(&config.auth.bootstrap_admin.password)?;
     db.ensure_user(&config.auth.bootstrap_admin.username, &admin_hash, "admin")?;
 
     Ok(Arc::new(AppState {
+        artifacts: ArtifactStore::new(&config.data_dir)?,
         config,
         db,
         runner_client: RunnerClient::new(),
         config_path: Arc::new(config_path),
         server_bin: Arc::new(server_bin),
+        login_attempts: Arc::new(Mutex::new(BTreeMap::new())),
     }))
 }
 
@@ -155,6 +169,13 @@ pub(crate) fn build_router(state: Arc<AppState>) -> Router {
         .route("/pipelines/{pipeline_id}/events", get(pipeline_events))
         .route("/pipelines/{pipeline_id}/rerun", post(rerun_pipeline))
         .route("/pipelines/{pipeline_id}/cancel", post(cancel_pipeline_route))
+        .route("/api/me", get(api_me))
+        .route("/api/repos", get(api_list_repos).post(api_create_repo))
+        .route("/api/runners", get(api_list_runners).post(api_create_runner))
+        .route("/api/workflows", get(api_list_workflows).post(api_create_workflow))
+        .route("/api/workflows/{workflow_id}", get(api_get_workflow).put(api_update_workflow))
+        .route("/api/pipelines", get(api_list_pipelines))
+        .route("/api/pipelines/{pipeline_id}", get(api_get_pipeline))
         .with_state(state)
 }
 
@@ -188,6 +209,13 @@ struct LoginForm {
 }
 
 async fn login(State(state): State<Arc<AppState>>, Form(form): Form<LoginForm>) -> Response {
+    if !state.allow_login_attempt(&form.username) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many login attempts, try again later",
+        )
+            .into_response();
+    }
     let Ok(Some((user, hash))) = state.db.get_user_credentials(&form.username) else {
         return auth::unauthorized();
     };
@@ -195,14 +223,20 @@ async fn login(State(state): State<Arc<AppState>>, Form(form): Form<LoginForm>) 
         return auth::unauthorized();
     }
 
-    let expires_at = (Utc::now() + Duration::days(7)).to_rfc3339();
+    let _ = state.db.cleanup_expired_sessions();
+    let _ = state.db.delete_sessions_for_user(&user.id);
+    let expires_at = (Utc::now() + Duration::days(state.config.auth.session_ttl_days as i64)).to_rfc3339();
     let Ok(session_id) = state.db.create_session(&user.id, &expires_at) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "failed to create session").into_response();
     };
     let mut response = Redirect::to("/repos").into_response();
     response.headers_mut().append(
         SET_COOKIE,
-        session_cookie(&state.config.auth.session_secret, &session_id)
+        session_cookie(
+            &state.config.auth.session_secret,
+            &session_id,
+            state.config.auth.session_cookie_secure,
+        )
             .to_string()
             .parse()
             .expect("cookie header"),
@@ -785,6 +819,210 @@ async fn cancel_pipeline_route(
     }
 }
 
+async fn api_me(
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+) -> Json<SessionInfo> {
+    Json(SessionInfo {
+        csrf_token: csrf_token(&state, &user),
+        user,
+    })
+}
+
+async fn api_list_repos(
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Repo>>, Response> {
+    Ok(Json(visible_repos_for_user(&state, &user)?))
+}
+
+async fn api_create_repo(
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ApiRepoCreateRequest>,
+) -> Result<Json<Repo>, Response> {
+    verify_csrf(&state, &user, &request.csrf_token)?;
+    let owner_id = request.owner_id.unwrap_or_else(|| user.id.clone());
+    if user.role != "admin" && owner_id != user.id {
+        return Err(forbidden("developers can only create their own repos"));
+    }
+    let owner = state
+        .db
+        .get_user(&owner_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| bad_request("owner not found"))?;
+    let normalized = git::validate_repo_name(&request.name).map_err(bad_request)?;
+    validate_branch_name(&request.default_branch)?;
+    let bare_path = PathBuf::from(&state.config.repos_dir).join(format!("{}.git", Uuid::now_v7()));
+    let repo_id = state
+        .db
+        .create_repo(
+            &owner.id,
+            &request.name,
+            &normalized,
+            &bare_path.display().to_string(),
+            &request.default_branch,
+        )
+        .map_err(internal_error)?;
+    let repo = state
+        .db
+        .get_repo(&repo_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| internal_error_text("missing repo after create"))?;
+    git::init_bare_repo(Path::new(&repo.bare_path)).map_err(internal_error_text)?;
+    git::install_post_receive_hook(
+        Path::new(&repo.bare_path),
+        state.server_bin.as_path(),
+        state.config_path.as_path(),
+        &repo.id,
+    )
+    .map_err(internal_error_text)?;
+    Ok(Json(repo))
+}
+
+async fn api_list_runners(
+    _: AdminUser,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<models::Runner>>, Response> {
+    Ok(Json(state.db.list_runners().map_err(internal_error)?))
+}
+
+async fn api_create_runner(
+    _: AdminUser,
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ApiRunnerCreateRequest>,
+) -> Result<Json<models::Runner>, Response> {
+    verify_csrf(&state, &user, &request.csrf_token)?;
+    validate_runner_name(&request.name)?;
+    validate_base_url(&request.base_url)?;
+    let runner_id = state
+        .db
+        .create_runner(&request.name, &request.base_url, &request.token)
+        .map_err(internal_error)?;
+    refresh_single_runner(&state, &runner_id)
+        .await
+        .map_err(internal_error_text)?;
+    let runner = state
+        .db
+        .get_runner(&runner_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("runner"))?;
+    Ok(Json(runner))
+}
+
+async fn api_list_workflows(
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<Workflow>>, Response> {
+    let repos = visible_repos_for_user(&state, &user)?;
+    let repo_ids = repos.into_iter().map(|repo| repo.id).collect::<Vec<_>>();
+    let workflows = state
+        .db
+        .list_workflows()
+        .map_err(internal_error)?
+        .into_iter()
+        .filter(|workflow| repo_ids.iter().any(|id| id == &workflow.repo_id))
+        .collect::<Vec<_>>();
+    Ok(Json(workflows))
+}
+
+async fn api_create_workflow(
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<ApiWorkflowRequest>,
+) -> Result<Json<Workflow>, Response> {
+    verify_csrf(&state, &user, &request.csrf_token)?;
+    let repo = authorized_repo(&state, &user, &request.repo_id)?;
+    let parsed = parse_api_workflow_request(&state, &request)?;
+    state
+        .db
+        .create_workflow(
+            &repo.id,
+            &request.name,
+            request.enabled,
+            &parsed.trigger_json,
+            &parsed.definition_json,
+        )
+        .map_err(internal_error)?;
+    let workflow = state
+        .db
+        .workflows_for_repo(&repo.id)
+        .map_err(internal_error)?
+        .into_iter()
+        .find(|workflow| workflow.name == request.name)
+        .ok_or_else(|| internal_error_text("workflow missing after create"))?;
+    Ok(Json(workflow))
+}
+
+async fn api_get_workflow(
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+    AxumPath(workflow_id): AxumPath<String>,
+) -> Result<Json<Workflow>, Response> {
+    Ok(Json(authorized_workflow(&state, &user, &workflow_id)?))
+}
+
+async fn api_update_workflow(
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+    AxumPath(workflow_id): AxumPath<String>,
+    Json(request): Json<ApiWorkflowRequest>,
+) -> Result<Json<Workflow>, Response> {
+    verify_csrf(&state, &user, &request.csrf_token)?;
+    let workflow = authorized_workflow(&state, &user, &workflow_id)?;
+    if workflow.repo_id != request.repo_id {
+        return Err(bad_request("workflow repo cannot be changed"));
+    }
+    let parsed = parse_api_workflow_request(&state, &request)?;
+    state
+        .db
+        .update_workflow(
+            &workflow.id,
+            &request.name,
+            request.enabled,
+            &parsed.trigger_json,
+            &parsed.definition_json,
+        )
+        .map_err(internal_error)?;
+    Ok(Json(
+        state.db
+            .get_workflow(&workflow.id)
+            .map_err(internal_error)?
+            .ok_or_else(|| not_found("workflow"))?,
+    ))
+}
+
+async fn api_list_pipelines(
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<PipelineRun>>, Response> {
+    let repos = visible_repos_for_user(&state, &user)?;
+    let repo_ids = repos.into_iter().map(|repo| repo.id).collect::<Vec<_>>();
+    let pipelines = state
+        .db
+        .list_pipeline_runs()
+        .map_err(internal_error)?
+        .into_iter()
+        .filter(|pipeline| repo_ids.iter().any(|id| id == &pipeline.repo_id))
+        .collect::<Vec<_>>();
+    Ok(Json(pipelines))
+}
+
+async fn api_get_pipeline(
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+    AxumPath(pipeline_id): AxumPath<String>,
+) -> Result<Json<models::PipelineSnapshot>, Response> {
+    let pipeline = authorized_pipeline(&state, &user, &pipeline_id)?;
+    Ok(Json(
+        state.db
+            .pipeline_snapshot(&pipeline.id)
+            .map_err(internal_error)?
+            .ok_or_else(|| not_found("pipeline"))?,
+    ))
+}
+
 async fn refresh_single_runner(state: &Arc<AppState>, runner_id: &str) -> Result<(), String> {
     let runner = state
         .db
@@ -821,6 +1059,53 @@ struct ParsedWorkflow {
     definition_json: String,
 }
 
+#[derive(Serialize)]
+struct SessionInfo {
+    user: User,
+    csrf_token: String,
+}
+
+#[derive(Deserialize)]
+struct ApiRepoCreateRequest {
+    owner_id: Option<String>,
+    name: String,
+    default_branch: String,
+    csrf_token: String,
+}
+
+#[derive(Deserialize)]
+struct ApiRunnerCreateRequest {
+    name: String,
+    base_url: String,
+    token: String,
+    csrf_token: String,
+}
+
+#[derive(Deserialize)]
+struct ApiWorkflowRequest {
+    csrf_token: String,
+    repo_id: String,
+    name: String,
+    enabled: bool,
+    trigger_kind: String,
+    branches: Vec<String>,
+    jobs: Vec<ApiWorkflowJob>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ApiWorkflowJob {
+    id: String,
+    name: String,
+    runner_id: String,
+    runner_job_name: String,
+    #[serde(default)]
+    needs: Vec<String>,
+    #[serde(default)]
+    inputs: BTreeMap<String, Value>,
+    #[serde(default)]
+    allow_failure: bool,
+}
+
 fn parse_workflow_form(state: &Arc<AppState>, form: &WorkflowForm) -> Result<ParsedWorkflow, Response> {
     if form.name.trim().is_empty() {
         return Err(bad_request("workflow name cannot be empty"));
@@ -835,6 +1120,43 @@ fn parse_workflow_form(state: &Arc<AppState>, form: &WorkflowForm) -> Result<Par
         branches,
     };
     let jobs = parse_job_specs(&form.jobs_spec)?;
+    let definition = WorkflowDefinition { jobs };
+    definition.validate().map_err(bad_request)?;
+    validate_workflow_runners(state, &definition)?;
+    Ok(ParsedWorkflow {
+        trigger_json: serde_json::to_string(&trigger).map_err(internal_error_text)?,
+        definition_json: serde_json::to_string(&definition).map_err(internal_error_text)?,
+    })
+}
+
+fn parse_api_workflow_request(
+    state: &Arc<AppState>,
+    request: &ApiWorkflowRequest,
+) -> Result<ParsedWorkflow, Response> {
+    if request.name.trim().is_empty() {
+        return Err(bad_request("workflow name cannot be empty"));
+    }
+    if !matches!(request.trigger_kind.as_str(), "push" | "manual") {
+        return Err(bad_request("trigger kind must be push or manual"));
+    }
+    let trigger = WorkflowTrigger {
+        kind: request.trigger_kind.clone(),
+        branches: request.branches.clone(),
+    };
+    let jobs = request
+        .jobs
+        .iter()
+        .map(|job| WorkflowJobDefinition {
+            id: job.id.clone(),
+            name: job.name.clone(),
+            runner_id: job.runner_id.clone(),
+            runner_job_name: job.runner_job_name.clone(),
+            needs: job.needs.clone(),
+            inputs: job.inputs.clone(),
+            artifacts_from: Vec::new(),
+            allow_failure: job.allow_failure,
+        })
+        .collect::<Vec<_>>();
     let definition = WorkflowDefinition { jobs };
     definition.validate().map_err(bad_request)?;
     validate_workflow_runners(state, &definition)?;
@@ -1137,6 +1459,29 @@ fn csrf_token(state: &Arc<AppState>, user: &User) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+impl AppState {
+    fn allow_login_attempt(&self, username: &str) -> bool {
+        let mut windows = self
+            .login_attempts
+            .lock()
+            .expect("login attempt mutex poisoned");
+        let now = Instant::now();
+        let window = windows.entry(username.to_string()).or_insert(LoginWindow {
+            started_at: now,
+            count: 0,
+        });
+        if now.duration_since(window.started_at) >= StdDuration::from_secs(60) {
+            window.started_at = now;
+            window.count = 0;
+        }
+        if window.count >= self.config.auth.login_rate_limit_per_minute {
+            return false;
+        }
+        window.count += 1;
+        true
+    }
+}
+
 fn verify_csrf(state: &Arc<AppState>, user: &User, token: &str) -> Result<(), Response> {
     if token == csrf_token(state, user) {
         Ok(())
@@ -1266,7 +1611,17 @@ impl Cli {
         }
         let mut index = 0;
         let command = match args.get(index).map(String::as_str) {
-            Some("serve") => Command::Serve,
+            Some("serve") => {
+                index += 1;
+                while index < args.len() {
+                    if args[index] == "--config" {
+                        index += 1;
+                        config_path = PathBuf::from(args.get(index).ok_or("missing config path")?);
+                    }
+                    index += 1;
+                }
+                Command::Serve
+            }
             Some("hook") if args.get(index + 1).map(String::as_str) == Some("post-receive") => {
                 index += 2;
                 let mut repo_id = None;
@@ -1503,7 +1858,11 @@ mod tests {
             .create_session(&user.id, &(Utc::now() + Duration::days(1)).to_rfc3339())
             .expect("session");
         let app = build_router(Arc::clone(&state));
-        let _cookie = session_cookie(&state.config.auth.session_secret, &session_id);
+        let _cookie = session_cookie(
+            &state.config.auth.session_secret,
+            &session_id,
+            state.config.auth.session_cookie_secure,
+        );
         TestFixture {
             state,
             app,
@@ -1566,6 +1925,9 @@ public_base_url = "ci.test"
 
 [auth]
 session_secret = "test-secret"
+session_ttl_days = 1
+session_cookie_secure = false
+login_rate_limit_per_minute = 100
 
 [auth.bootstrap_admin]
 username = "admin"
@@ -1601,7 +1963,12 @@ healthcheck_interval_seconds = 60
             .db
             .create_session(user_id, &(Utc::now() + Duration::days(1)).to_rfc3339())
             .expect("session");
-        session_cookie(&state.config.auth.session_secret, &session_id).to_string()
+        session_cookie(
+            &state.config.auth.session_secret,
+            &session_id,
+            state.config.auth.session_cookie_secure,
+        )
+        .to_string()
     }
 
     struct MockRunnerState {
