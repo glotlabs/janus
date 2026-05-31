@@ -18,7 +18,11 @@ Commands:
 cargo run -p strait-server -- serve
 cargo run -p strait-server -- admin seed-user --username alice --password secret --role developer
 cargo run -p strait-server -- admin reconcile-hooks
+cargo run -p strait-server -- admin runner-key show --config server.toml
+cargo run -p strait-server -- admin runner-key rotate --config server.toml
 ```
+
+Runner signing key rotation generates a new key ID, writes a new Ed25519 keypair, updates `[runner_auth]` in the server config, and leaves existing public key files in place for rollout. Add the new public key to every runner as another `[[auth.servers]]` entry before restarting the server with the new key; remove the old runner entry after old in-flight requests have drained.
 
 JavaScript asset tests use Node's built-in test runner and do not require a package manager:
 

@@ -173,6 +173,8 @@ pub(crate) enum Command {
         password: String,
         role: String,
     },
+    AdminRunnerKeyShow,
+    AdminRunnerKeyRotate,
 }
 
 impl Cli {
@@ -263,6 +265,27 @@ impl Cli {
                     username: username.ok_or("missing --username")?,
                     password: password.ok_or("missing --password")?,
                     role: role.unwrap_or_else(|| "developer".to_string()),
+                }
+            }
+            Some("admin") if args.get(index + 1).map(String::as_str) == Some("runner-key") => {
+                index += 2;
+                let action = args.get(index).map(String::as_str).unwrap_or("show");
+                index += 1;
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--config" => {
+                            index += 1;
+                            config_path =
+                                PathBuf::from(args.get(index).ok_or("missing config path")?);
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                match action {
+                    "show" => Command::AdminRunnerKeyShow,
+                    "rotate" => Command::AdminRunnerKeyRotate,
+                    _ => return Err(format!("unknown runner-key action: {action}").into()),
                 }
             }
             _ => Command::Serve,

@@ -186,6 +186,8 @@ Each trusted server has:
 - `public_key`: base64-encoded Ed25519 public key
 - `permissions`: a list of allowed capabilities
 
+During server key rotation, keep both the old and new public keys configured as separate `[[auth.servers]]` entries. Remove the old entry only after the server is signing with the new key everywhere and old in-flight requests have drained.
+
 Supported permissions:
 
 - `artifacts:write`
