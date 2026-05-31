@@ -114,8 +114,8 @@ async fn git_push_triggers_pipeline_end_to_end() {
                     "runner_id": runner_id,
                     "runner_job_name": "build-app",
                     "inputs": {
-                        "commit": "$commit",
-                        "branch": "$branch"
+                        "commit": { "kind": "commit" },
+                        "branch": { "kind": "branch" }
                     },
                     "allow_failure": false
                 }

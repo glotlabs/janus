@@ -27,8 +27,8 @@ use crate::{
     },
     git,
     models::{
-        self, PipelineRun, Repo, User, Workflow, WorkflowDefinition, WorkflowJobDefinition,
-        WorkflowTrigger, parse_job_output_binding,
+        self, PipelineRun, Repo, User, Workflow, WorkflowDefinition, WorkflowInputBinding,
+        WorkflowJobDefinition, WorkflowTrigger, parse_job_output_binding,
     },
     scheduler,
 };
@@ -816,7 +816,7 @@ struct ApiWorkflowJob {
     runner_id: String,
     runner_job_name: String,
     #[serde(default)]
-    inputs: BTreeMap<String, Value>,
+    inputs: BTreeMap<String, WorkflowInputBinding>,
     #[serde(default)]
     allow_failure: bool,
 }
@@ -1137,7 +1137,7 @@ struct SubmittedWorkflowJob {
     runner_id: String,
     runner_job_name: String,
     #[serde(default)]
-    inputs: BTreeMap<String, Value>,
+    inputs: BTreeMap<String, WorkflowInputBinding>,
     #[serde(default)]
     allow_failure: bool,
 }
@@ -1211,23 +1211,33 @@ fn validate_workflow_runners(
                         job.runner_job_name
                     ))
                 })?;
-            if let Value::String(raw) = value {
-                if raw == "$commit" || raw == "$branch" {
+            match value {
+                WorkflowInputBinding::Commit | WorkflowInputBinding::Branch => {
                     if expected_kind != "string" {
                         return Err(bad_request(format!(
-                            "workflow input {input_name} expects {expected_kind} but {raw} is string"
+                            "workflow input {input_name} expects {expected_kind} but built-in binding is string"
                         )));
                     }
                     continue;
                 }
-                if raw == "$source" {
+                WorkflowInputBinding::SourceArtifact => {
                     if expected_kind != "artifact" {
                         return Err(bad_request(format!(
-                            "workflow input {input_name} expects {expected_kind} but $source is artifact"
+                            "workflow input {input_name} expects {expected_kind} but source binding is artifact"
                         )));
                     }
                     continue;
                 }
+                WorkflowInputBinding::Literal { value } => {
+                    if !value_matches_input_kind(value, expected_kind) {
+                        return Err(bad_request(format!(
+                            "workflow input {input_name} expects {expected_kind} but got {}",
+                            describe_json_value_kind(value)
+                        )));
+                    }
+                    continue;
+                }
+                WorkflowInputBinding::JobOutput { .. } => {}
             }
             if let Some(binding) = parse_job_output_binding(value) {
                 if binding.job_index >= definition.jobs.len() {
@@ -1265,12 +1275,6 @@ fn validate_workflow_runners(
                     )));
                 }
                 continue;
-            }
-            if !value_matches_input_kind(value, expected_kind) {
-                return Err(bad_request(format!(
-                    "workflow input {input_name} expects {expected_kind} but got {}",
-                    describe_json_value_kind(value)
-                )));
             }
         }
     }
@@ -1317,7 +1321,7 @@ struct WorkflowEditorJob {
     runner_job_name: String,
     allow_failure: bool,
     #[serde(default)]
-    inputs: BTreeMap<String, Value>,
+    inputs: BTreeMap<String, WorkflowInputBinding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1608,7 +1612,7 @@ fn workflow_form_fields(
 
   function inferBinding(inputName, kind, rawValue) {{
     if (kind === 'artifact') {{
-      if (rawValue === '$source') return {{ mode: 'source_artifact', value: 'source.tar.gz' }};
+      if (rawValue && rawValue.kind === 'source_artifact') return {{ mode: 'source_artifact', value: 'source.tar.gz' }};
       if (rawValue && typeof rawValue === 'object' && rawValue.kind === 'job_output') {{
         return {{ mode: 'output_artifact', value: JSON.stringify(rawValue) }};
       }}
@@ -1616,24 +1620,25 @@ fn workflow_form_fields(
       return {{ mode: 'source_artifact', value: 'source.tar.gz' }};
     }}
     if (kind === 'string') {{
-      if (rawValue === '$commit') return {{ mode: 'commit', value: '' }};
-      if (rawValue === '$branch') return {{ mode: 'branch', value: '' }};
+      if (rawValue && rawValue.kind === 'commit') return {{ mode: 'commit', value: '' }};
+      if (rawValue && rawValue.kind === 'branch') return {{ mode: 'branch', value: '' }};
       if (rawValue && typeof rawValue === 'object' && rawValue.kind === 'job_output') {{
         return {{ mode: 'output_value', value: JSON.stringify(rawValue) }};
       }}
       if (inputName === 'commit') return {{ mode: 'commit', value: '' }};
       if (inputName === 'branch') return {{ mode: 'branch', value: '' }};
-      return {{ mode: 'literal', value: typeof rawValue === 'string' ? rawValue : '' }};
+      if (rawValue && rawValue.kind === 'literal') return {{ mode: 'literal', value: typeof rawValue.value === 'string' ? rawValue.value : '' }};
+      return {{ mode: 'literal', value: '' }};
     }}
     if ((kind === 'boolean' || kind === 'integer' || kind === 'json')
       && rawValue && typeof rawValue === 'object'
       && rawValue.kind === 'job_output') {{
       return {{ mode: 'output_value', value: JSON.stringify(rawValue) }};
     }}
-    if (kind === 'boolean') return {{ mode: 'literal', value: rawValue === true ? 'true' : 'false' }};
-    if (kind === 'integer') return {{ mode: 'literal', value: rawValue == null ? '' : String(rawValue) }};
-    if (kind === 'json') return {{ mode: 'literal', value: rawValue == null ? '' : JSON.stringify(rawValue) }};
-    return {{ mode: 'literal', value: rawValue == null ? '' : String(rawValue) }};
+    if (kind === 'boolean') return {{ mode: 'literal', value: rawValue && rawValue.kind === 'literal' && rawValue.value === true ? 'true' : 'false' }};
+    if (kind === 'integer') return {{ mode: 'literal', value: rawValue && rawValue.kind === 'literal' ? String(rawValue.value ?? '') : '' }};
+    if (kind === 'json') return {{ mode: 'literal', value: rawValue && rawValue.kind === 'literal' ? JSON.stringify(rawValue.value) : '' }};
+    return {{ mode: 'literal', value: rawValue && rawValue.kind === 'literal' ? String(rawValue.value ?? '') : '' }};
   }}
 
   function readInputBinding(inputRow) {{
@@ -1643,36 +1648,36 @@ fn workflow_form_fields(
     const valueField = inputRow.querySelector('[data-binding-value]');
     const mode = modeSelect ? modeSelect.value : 'literal';
     if (kind === 'artifact') {{
-      if (mode === 'source_artifact') return [name, '$source'];
+      if (mode === 'source_artifact') return [name, {{ kind: 'source_artifact' }}];
       return [name, JSON.parse(valueField.value)];
     }}
     if (kind === 'string') {{
-      if (mode === 'commit') return [name, '$commit'];
-      if (mode === 'branch') return [name, '$branch'];
+      if (mode === 'commit') return [name, {{ kind: 'commit' }}];
+      if (mode === 'branch') return [name, {{ kind: 'branch' }}];
       if (mode === 'output_value') return [name, JSON.parse(valueField.value)];
-      return [name, valueField ? valueField.value : ''];
+      return [name, {{ kind: 'literal', value: valueField ? valueField.value : '' }}];
     }}
     if (mode === 'output_value') {{
       return [name, JSON.parse(valueField.value)];
     }}
     if (kind === 'boolean') {{
-      return [name, valueField.value === 'true'];
+      return [name, {{ kind: 'literal', value: valueField.value === 'true' }}];
     }}
     if (kind === 'integer') {{
       const raw = valueField.value.trim();
       const parsed = Number.parseInt(raw, 10);
-      return [name, Number.isFinite(parsed) ? parsed : raw];
+      return [name, {{ kind: 'literal', value: Number.isFinite(parsed) ? parsed : raw }}];
     }}
     if (kind === 'json') {{
       const raw = valueField.value.trim();
-      if (!raw) return [name, {{}}];
+      if (!raw) return [name, {{ kind: 'literal', value: {{}} }}];
       try {{
-        return [name, JSON.parse(raw)];
+        return [name, {{ kind: 'literal', value: JSON.parse(raw) }}];
       }} catch (_error) {{
-        return [name, raw];
+        return [name, {{ kind: 'literal', value: raw }}];
       }}
     }}
-    return [name, valueField ? valueField.value : ''];
+    return [name, {{ kind: 'literal', value: valueField ? valueField.value : '' }}];
   }}
 
   function syncJobsJson() {{

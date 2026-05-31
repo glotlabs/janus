@@ -3,7 +3,10 @@ use crate::{
     app::build_state,
     auth::{hash_password, session_cookie},
     git,
-    models::{Repo, User, WorkflowDefinition, WorkflowJobDefinition, WorkflowTrigger},
+    models::{
+        Repo, User, WorkflowDefinition, WorkflowInputBinding, WorkflowJobDefinition,
+        WorkflowTrigger,
+    },
     scheduler,
 };
 use axum::{
@@ -122,9 +125,9 @@ async fn workflow_form_submission_accepts_structured_jobs_json() {
         "runner_id": fixture.runner_id,
         "runner_job_name": "build-app",
         "inputs": {
-            "commit": "$commit",
-            "branch": "$branch",
-            "source": "$source"
+            "commit": { "kind": "commit" },
+            "branch": { "kind": "branch" },
+            "source": { "kind": "source_artifact" }
         },
         "allow_failure": false
     })])
@@ -166,7 +169,7 @@ async fn workflow_form_submission_accepts_structured_jobs_json() {
     assert_eq!(definition.jobs[0].runner_job_name, "build-app");
     assert_eq!(
         definition.jobs[0].inputs.get("source"),
-        Some(&json!("$source"))
+        Some(&WorkflowInputBinding::SourceArtifact)
     );
 }
 
@@ -333,7 +336,7 @@ async fn workflow_form_rejects_literal_input_type_mismatch() {
         "runner_id": fixture.runner_id,
         "runner_job_name": "build-app",
         "inputs": {
-            "published": "true"
+            "published": { "kind": "literal", "value": "true" }
         },
         "allow_failure": false
     })])
@@ -377,7 +380,7 @@ async fn workflow_form_rejects_unknown_literal_input_name() {
         "runner_id": fixture.runner_id,
         "runner_job_name": "build-app",
         "inputs": {
-            "bogus": 123
+            "bogus": { "kind": "literal", "value": 123 }
         },
         "allow_failure": false
     })])
@@ -544,19 +547,27 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
                 inputs: BTreeMap::from([
                     (
                         "version".to_string(),
-                        json!({ "kind": "job_output", "job_index": 0, "output_name": "version" }),
+                        binding(
+                            json!({ "kind": "job_output", "job_index": 0, "output_name": "version" }),
+                        ),
                     ),
                     (
                         "build_number".to_string(),
-                        json!({ "kind": "job_output", "job_index": 0, "output_name": "build_number" }),
+                        binding(
+                            json!({ "kind": "job_output", "job_index": 0, "output_name": "build_number" }),
+                        ),
                     ),
                     (
                         "published".to_string(),
-                        json!({ "kind": "job_output", "job_index": 0, "output_name": "published" }),
+                        binding(
+                            json!({ "kind": "job_output", "job_index": 0, "output_name": "published" }),
+                        ),
                     ),
                     (
                         "metadata".to_string(),
-                        json!({ "kind": "job_output", "job_index": 0, "output_name": "metadata" }),
+                        binding(
+                            json!({ "kind": "job_output", "job_index": 0, "output_name": "metadata" }),
+                        ),
                     ),
                 ]),
                 allow_failure: false,
@@ -654,7 +665,9 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
                 runner_job_name: "consume-string".to_string(),
                 inputs: BTreeMap::from([(
                     "build_number".to_string(),
-                    json!({ "kind": "job_output", "job_index": 0, "output_name": "build_number" }),
+                    binding(
+                        json!({ "kind": "job_output", "job_index": 0, "output_name": "build_number" }),
+                    ),
                 )]),
                 allow_failure: false,
             },
@@ -683,9 +696,11 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
     let error = scheduler::reconcile_once(Arc::clone(&fixture.state))
         .await
         .expect_err("mismatch should fail before dispatch");
-    assert!(error.to_string().contains(
-        "workflow input build_number expects string but job-1.build_number is integer"
-    ));
+    assert!(
+        error.to_string().contains(
+            "workflow input build_number expects string but job-1.build_number is integer"
+        )
+    );
     assert!(mock.requests_for("consume-string").is_empty());
 }
 
@@ -1334,8 +1349,8 @@ fn create_workflow_direct(state: &Arc<crate::app::AppState>, repo_id: &str, runn
             runner_id: runner_id.to_string(),
             runner_job_name: "build-app".to_string(),
             inputs: BTreeMap::from([
-                ("commit".to_string(), json!("$commit")),
-                ("branch".to_string(), json!("$branch")),
+                ("commit".to_string(), WorkflowInputBinding::Commit),
+                ("branch".to_string(), WorkflowInputBinding::Branch),
             ]),
             allow_failure: false,
         }],
@@ -1362,6 +1377,10 @@ fn create_workflow_with_jobs_direct(
         .db
         .create_workflow(repo_id, "wf", true, &trigger, &definition)
         .expect("workflow");
+}
+
+fn binding(value: JsonValue) -> WorkflowInputBinding {
+    serde_json::from_value(value).expect("workflow input binding")
 }
 
 fn write_test_config(dir: &Path) -> PathBuf {

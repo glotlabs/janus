@@ -128,7 +128,7 @@ pub struct WorkflowJobDefinition {
     pub runner_id: String,
     pub runner_job_name: String,
     #[serde(default)]
-    pub inputs: BTreeMap<String, Value>,
+    pub inputs: BTreeMap<String, WorkflowInputBinding>,
     #[serde(default)]
     pub allow_failure: bool,
 }
@@ -154,25 +154,41 @@ impl JobRun {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowInputBinding {
+    Literal {
+        value: Value,
+    },
+    Commit,
+    Branch,
+    SourceArtifact,
+    JobOutput {
+        job_index: usize,
+        output_name: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobOutputBinding {
     pub job_index: usize,
     pub output_name: String,
 }
 
-pub fn parse_job_output_binding(value: &Value) -> Option<JobOutputBinding> {
-    let object = value.as_object()?;
-    if object.get("kind")?.as_str()? != "job_output" {
+pub fn parse_job_output_binding(value: &WorkflowInputBinding) -> Option<JobOutputBinding> {
+    let WorkflowInputBinding::JobOutput {
+        job_index,
+        output_name,
+    } = value
+    else {
         return None;
-    }
-    let job_index = object.get("job_index")?.as_u64()? as usize;
-    let output_name = object.get("output_name")?.as_str()?.to_string();
+    };
     if output_name.is_empty() {
         return None;
     }
     Some(JobOutputBinding {
-        job_index,
-        output_name,
+        job_index: *job_index,
+        output_name: output_name.clone(),
     })
 }
 

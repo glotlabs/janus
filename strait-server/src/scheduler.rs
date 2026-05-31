@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 use crate::{
     app::AppState,
     git,
-    models::{WorkflowDefinition, WorkflowTrigger, parse_job_output_binding},
+    models::{WorkflowDefinition, WorkflowInputBinding, WorkflowTrigger},
     state_machine::{self, JobStatus, PipelineStatus},
 };
 
@@ -449,26 +449,32 @@ async fn resolve_job_inputs(
             .get(key)
             .map(|item| item.kind.as_str());
         match value {
-            Value::String(raw) if raw == "$commit" => {
+            WorkflowInputBinding::Commit => {
                 resolved.insert(
                     key.clone(),
                     json!(pipeline.commit_sha.clone().unwrap_or_default()),
                 );
             }
-            Value::String(raw) if raw == "$branch" => {
+            WorkflowInputBinding::Branch => {
                 resolved.insert(
                     key.clone(),
                     json!(pipeline.trigger_ref.clone().unwrap_or_default()),
                 );
             }
-            Value::String(raw) if raw == "$source" => {
+            WorkflowInputBinding::SourceArtifact => {
                 let artifact_id =
                     ensure_source_artifact(Arc::clone(&state), pipeline, &job_definition.runner_id)
                         .await?;
                 resolved.insert(key.clone(), json!(artifact_id));
             }
-            _ if parse_job_output_binding(value).is_some() => {
-                let binding = parse_job_output_binding(value).expect("binding checked");
+            WorkflowInputBinding::JobOutput {
+                job_index,
+                output_name,
+            } => {
+                let binding = crate::models::JobOutputBinding {
+                    job_index: *job_index,
+                    output_name: output_name.clone(),
+                };
                 let upstream_run_id =
                     find_job_run_id(Arc::clone(&state), &pipeline.id, binding.job_index)?;
                 let output = state
@@ -519,8 +525,8 @@ async fn resolve_job_inputs(
                     );
                 }
             }
-            other => {
-                resolved.insert(key.clone(), other.clone());
+            WorkflowInputBinding::Literal { value } => {
+                resolved.insert(key.clone(), value.clone());
             }
         }
     }
