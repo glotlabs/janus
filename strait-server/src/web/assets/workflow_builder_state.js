@@ -103,6 +103,23 @@ export function readInputBinding(inputRow) {
   return [name, { kind: 'literal', value: valueField ? valueField.value : '' }];
 }
 
+export function serializeJobs(derivedJobs, readBinding = readInputBinding) {
+  return derivedJobs.map((job) => {
+    const inputsMap = [...job.row.querySelectorAll('[data-input-row]')]
+      .map(readBinding)
+      .reduce((acc, [key, value]) => {
+        acc[key] = value;
+        return acc;
+      }, {});
+    return {
+      runner_id: job.runnerId,
+      runner_job_name: job.runnerJobName,
+      inputs: inputsMap,
+      allow_failure: Boolean(job.row._allowFailure)
+    };
+  }).filter((job) => job.runner_id || job.runner_job_name || Object.keys(job.inputs).length > 0);
+}
+
 export function outputOptionsFor(currentRow, derivedJobs, expectedKind, getJobDefinition) {
   const options = [];
   const currentIndex = derivedJobs.findIndex((job) => job.row === currentRow);

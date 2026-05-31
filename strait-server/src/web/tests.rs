@@ -123,6 +123,42 @@ async fn workflows_page_renders_runner_job_builder() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/assets/workflow_builder_bindings.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/assets/workflow_builder_tables.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/assets/workflow_builder_rows.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

@@ -61,6 +61,18 @@ pub(crate) fn build_router(state: Arc<AppState>) -> Router {
             get(asset_workflow_builder_dom_js),
         )
         .route(
+            "/assets/workflow_builder_bindings.js",
+            get(asset_workflow_builder_bindings_js),
+        )
+        .route(
+            "/assets/workflow_builder_tables.js",
+            get(asset_workflow_builder_tables_js),
+        )
+        .route(
+            "/assets/workflow_builder_rows.js",
+            get(asset_workflow_builder_rows_js),
+        )
+        .route(
             "/assets/workflow_builder_state.js",
             get(asset_workflow_builder_state_js),
         )
@@ -138,6 +150,24 @@ async fn asset_workflow_builder_dom_js() -> EmbeddedAsset {
     embedded_asset(
         "text/javascript; charset=utf-8",
         include_str!("assets/workflow_builder_dom.js"),
+    )
+}
+async fn asset_workflow_builder_bindings_js() -> EmbeddedAsset {
+    embedded_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("assets/workflow_builder_bindings.js"),
+    )
+}
+async fn asset_workflow_builder_tables_js() -> EmbeddedAsset {
+    embedded_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("assets/workflow_builder_tables.js"),
+    )
+}
+async fn asset_workflow_builder_rows_js() -> EmbeddedAsset {
+    embedded_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("assets/workflow_builder_rows.js"),
     )
 }
 async fn asset_workflow_builder_state_js() -> EmbeddedAsset {

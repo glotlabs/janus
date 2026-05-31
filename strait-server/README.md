@@ -20,6 +20,12 @@ cargo run -p strait-server -- admin seed-user --username alice --password secret
 cargo run -p strait-server -- admin reconcile-hooks
 ```
 
+JavaScript asset tests use Node's built-in test runner and do not require a package manager:
+
+```bash
+./test_js.sh
+```
+
 Configuration:
 
 - Start from [`server.example.toml`](/Users/petter/dev/Projects/strait-ci/strait-server/server.example.toml)
