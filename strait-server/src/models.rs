@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -88,8 +88,7 @@ pub struct PipelineRun {
 pub struct JobRun {
     pub id: String,
     pub pipeline_run_id: String,
-    pub job_id: String,
-    pub job_name: String,
+    pub job_index: i64,
     pub runner_id: String,
     pub runner_job_name: String,
     pub dispatch_idempotency_key: String,
@@ -126,7 +125,6 @@ pub struct WorkflowDefinition {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowJobDefinition {
-    pub id: String,
     pub runner_id: String,
     pub runner_job_name: String,
     #[serde(default)]
@@ -140,20 +138,42 @@ impl WorkflowDefinition {
         if self.jobs.is_empty() {
             return Err("workflow must contain at least one job".to_string());
         }
-
-        let ids: BTreeSet<_> = self.jobs.iter().map(|job| job.id.as_str()).collect();
-        if ids.len() != self.jobs.len() {
-            return Err("workflow job ids must be unique".to_string());
-        }
-
         Ok(())
     }
 }
 
 impl WorkflowJobDefinition {
-    pub fn display_name(&self) -> String {
-        format!("{} / {}", self.id, self.runner_job_name)
+    pub fn display_name(&self, job_index: usize) -> String {
+        format!("job-{} / {}", job_index + 1, self.runner_job_name)
     }
+}
+
+impl JobRun {
+    pub fn display_name(&self) -> String {
+        format!("job-{} / {}", self.job_index + 1, self.runner_job_name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobOutputBinding {
+    pub job_index: usize,
+    pub output_name: String,
+}
+
+pub fn parse_job_output_binding(value: &Value) -> Option<JobOutputBinding> {
+    let object = value.as_object()?;
+    if object.get("kind")?.as_str()? != "job_output" {
+        return None;
+    }
+    let job_index = object.get("job_index")?.as_u64()? as usize;
+    let output_name = object.get("output_name")?.as_str()?.to_string();
+    if output_name.is_empty() {
+        return None;
+    }
+    Some(JobOutputBinding {
+        job_index,
+        output_name,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

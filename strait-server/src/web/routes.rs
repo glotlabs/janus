@@ -28,7 +28,7 @@ use crate::{
     git,
     models::{
         self, PipelineRun, Repo, User, Workflow, WorkflowDefinition, WorkflowJobDefinition,
-        WorkflowTrigger,
+        WorkflowTrigger, parse_job_output_binding,
     },
     scheduler,
 };
@@ -684,7 +684,7 @@ async fn pipeline_detail(
     for job in snapshot.jobs {
         body.push_str(&format!(
             r#"<article class="job-card"><div class="entity-head"><div><h3>{}</h3><p class="muted">Runner job: <code>{}</code></p></div><div class="badge-row">{}</div></div><div class="meta-grid"><div class="meta-pair"><span>Failure category</span><strong>{}</strong></div><div class="meta-pair"><span>Terminal reason</span><strong>{}</strong></div><div class="meta-pair"><span>Exit code</span><strong>{}</strong></div><div class="meta-pair"><span>Duration ms</span><strong>{}</strong></div><div class="meta-pair"><span>Cancel reason</span><strong>{}</strong></div><div class="meta-pair"><span>Cancel requested</span><strong>{}</strong></div><div class="meta-pair"><span>Cancel started</span><strong>{}</strong></div><div class="meta-pair"><span>Cancel retries</span><strong>{}</strong></div><div class="meta-pair"><span>Last cancel retry</span><strong>{}</strong></div><div class="meta-pair"><span>Infra retries</span><strong>{}</strong></div><div class="meta-pair"><span>Last infra retry</span><strong>{}</strong></div><div class="meta-pair"><span>Stdout</span><strong>{}B · truncated={}</strong></div><div class="meta-pair"><span>Stderr</span><strong>{}B · truncated={}</strong></div><div class="meta-pair"><span>Artifacts</span><strong>{} files · {}B</strong></div></div><div class="log-grid"><div class="log-panel"><span class="subsection-title">Stdout</span><pre>{}</pre></div><div class="log-panel"><span class="subsection-title">Stderr</span><pre>{}</pre></div></div></article>"#,
-            html_escape(&job.run.job_name),
+            html_escape(&job.run.display_name()),
             html_escape(&job.run.runner_job_name),
             badge(&display_status(&job.run.status), status_tone(&job.run.status)),
             html_escape(&render_optional(job.run.failure_category.as_deref())),
@@ -1116,9 +1116,7 @@ fn parse_api_workflow_request(
     let jobs = request
         .jobs
         .iter()
-        .enumerate()
-        .map(|(index, job)| WorkflowJobDefinition {
-            id: format!("job-{}", index + 1),
+        .map(|job| WorkflowJobDefinition {
             runner_id: job.runner_id.clone(),
             runner_job_name: job.runner_job_name.clone(),
             inputs: job.inputs.clone(),
@@ -1152,9 +1150,7 @@ fn parse_workflow_form_jobs(input: &str) -> Result<Vec<WorkflowJobDefinition>, R
     }
     Ok(jobs
         .into_iter()
-        .enumerate()
-        .map(|(index, job)| WorkflowJobDefinition {
-            id: format!("job-{}", index + 1),
+        .map(|job| WorkflowJobDefinition {
             runner_id: job.runner_id,
             runner_job_name: job.runner_job_name,
             inputs: job.inputs,
@@ -1168,7 +1164,7 @@ fn validate_workflow_runners(
     definition: &WorkflowDefinition,
 ) -> Result<(), Response> {
     let mut runner_job_defs = BTreeMap::new();
-    for job in &definition.jobs {
+    for (job_index, job) in definition.jobs.iter().enumerate() {
         let runner = state
             .db
             .get_runner(&job.runner_id)
@@ -1195,12 +1191,12 @@ fn validate_workflow_runners(
                     job.runner_job_name
                 ))
             })?;
-        runner_job_defs.insert(job.id.clone(), runner_job);
+        runner_job_defs.insert(job_index, runner_job);
     }
 
     for (job_index, job) in definition.jobs.iter().enumerate() {
         let runner_job = runner_job_defs
-            .get(&job.id)
+            .get(&job_index)
             .ok_or_else(|| internal_error("missing parsed runner job definition"))?;
         for (input_name, value) in &job.inputs {
             let expected_kind = runner_job
@@ -1210,7 +1206,9 @@ fn validate_workflow_runners(
                 .ok_or_else(|| {
                     bad_request(format!(
                         "workflow job {} provides unknown input {} for runner job {}",
-                        job.id, input_name, job.runner_job_name
+                        job_index + 1,
+                        input_name,
+                        job.runner_job_name
                     ))
                 })?;
             if let Value::String(raw) = value {
@@ -1230,56 +1228,43 @@ fn validate_workflow_runners(
                     }
                     continue;
                 }
-                if raw.starts_with("$job.") {
-                    let mut parts = raw.trim_start_matches("$job.").split('.');
-                    let source_job_id = parts.next().unwrap_or_default();
-                    let output_name = parts.next().unwrap_or_default();
-                    if source_job_id.is_empty() || output_name.is_empty() || parts.next().is_some()
-                    {
-                        return Err(bad_request(format!(
-                            "workflow input {input_name} has invalid job output reference {raw}"
-                        )));
-                    }
-                    let upstream_job = definition
-                        .jobs
-                        .iter()
-                        .find(|candidate| candidate.id == source_job_id)
-                        .ok_or_else(|| {
-                            bad_request(format!(
-                                "workflow input {input_name} references unknown job {source_job_id}"
-                            ))
-                        })?;
-                    let Some(upstream_index) = definition
-                        .jobs
-                        .iter()
-                        .position(|candidate| candidate.id == upstream_job.id)
-                    else {
-                        return Err(internal_error("failed to locate upstream job index"));
-                    };
-                    if upstream_index >= job_index {
-                        return Err(bad_request(format!(
-                            "workflow input {input_name} references {source_job_id}.{output_name} but only earlier jobs can be referenced"
-                        )));
-                    }
-                    let upstream_runner_job = runner_job_defs
-                        .get(&upstream_job.id)
-                        .ok_or_else(|| internal_error("missing upstream runner job definition"))?;
-                    let output = upstream_runner_job
-                        .outputs
-                        .get(output_name)
-                        .ok_or_else(|| {
-                            bad_request(format!(
-                                "workflow input {input_name} references missing output {source_job_id}.{output_name}"
-                            ))
-                        })?;
-                    if output.kind != expected_kind {
-                        return Err(bad_request(format!(
-                            "workflow input {input_name} expects {expected_kind} but {source_job_id}.{output_name} is {}",
-                            output.kind
-                        )));
-                    }
-                    continue;
+            }
+            if let Some(binding) = parse_job_output_binding(value) {
+                if binding.job_index >= definition.jobs.len() {
+                    return Err(bad_request(format!(
+                        "workflow input {input_name} references unknown job job-{}",
+                        binding.job_index + 1
+                    )));
                 }
+                if binding.job_index >= job_index {
+                    return Err(bad_request(format!(
+                        "workflow input {input_name} references job-{}.{} but only earlier jobs can be referenced",
+                        binding.job_index + 1,
+                        binding.output_name
+                    )));
+                }
+                let upstream_runner_job = runner_job_defs
+                    .get(&binding.job_index)
+                    .ok_or_else(|| internal_error("missing upstream runner job definition"))?;
+                let output = upstream_runner_job
+                    .outputs
+                    .get(&binding.output_name)
+                    .ok_or_else(|| {
+                        bad_request(format!(
+                            "workflow input {input_name} references missing output job-{}.{}",
+                            binding.job_index + 1,
+                            binding.output_name
+                        ))
+                    })?;
+                if output.kind != expected_kind {
+                    return Err(bad_request(format!(
+                        "workflow input {input_name} expects {expected_kind} but job-{}.{} is {}",
+                        binding.job_index + 1,
+                        binding.output_name,
+                        output.kind
+                    )));
+                }
+                continue;
             }
             if !value_matches_input_kind(value, expected_kind) {
                 return Err(bad_request(format!(
@@ -1610,14 +1595,13 @@ fn workflow_form_fields(
       const runnerId = row.querySelector('[data-field="runner_id"]').value.trim();
       const runnerJobName = row.querySelector('[data-field="runner_job_name"]').value.trim();
       const runner = getRunner(runnerId);
-      const derivedId = `job-${{index + 1}}`;
       return {{
         row,
         runner,
+        jobIndex: index,
         runnerId,
         runnerJobName,
-        id: derivedId,
-        name: runner && runnerJobName ? `${{runner.name}} / ${{runnerJobName}}` : (runnerJobName || derivedId)
+        name: runner && runnerJobName ? `${{runner.name}} / ${{runnerJobName}}` : (runnerJobName || `job-${{index + 1}}`)
       }};
     }});
   }}
@@ -1625,8 +1609,8 @@ fn workflow_form_fields(
   function inferBinding(inputName, kind, rawValue) {{
     if (kind === 'artifact') {{
       if (rawValue === '$source') return {{ mode: 'source_artifact', value: 'source.tar.gz' }};
-      if (typeof rawValue === 'string' && rawValue.startsWith('$job.')) {{
-        return {{ mode: 'output_artifact', value: rawValue.slice(5) }};
+      if (rawValue && typeof rawValue === 'object' && rawValue.kind === 'job_output') {{
+        return {{ mode: 'output_artifact', value: JSON.stringify(rawValue) }};
       }}
       if (inputName === 'source') return {{ mode: 'source_artifact', value: 'source.tar.gz' }};
       return {{ mode: 'source_artifact', value: 'source.tar.gz' }};
@@ -1634,17 +1618,17 @@ fn workflow_form_fields(
     if (kind === 'string') {{
       if (rawValue === '$commit') return {{ mode: 'commit', value: '' }};
       if (rawValue === '$branch') return {{ mode: 'branch', value: '' }};
-      if (typeof rawValue === 'string' && rawValue.startsWith('$job.')) {{
-        return {{ mode: 'output_value', value: rawValue.slice(5) }};
+      if (rawValue && typeof rawValue === 'object' && rawValue.kind === 'job_output') {{
+        return {{ mode: 'output_value', value: JSON.stringify(rawValue) }};
       }}
       if (inputName === 'commit') return {{ mode: 'commit', value: '' }};
       if (inputName === 'branch') return {{ mode: 'branch', value: '' }};
       return {{ mode: 'literal', value: typeof rawValue === 'string' ? rawValue : '' }};
     }}
     if ((kind === 'boolean' || kind === 'integer' || kind === 'json')
-      && typeof rawValue === 'string'
-      && rawValue.startsWith('$job.')) {{
-      return {{ mode: 'output_value', value: rawValue.slice(5) }};
+      && rawValue && typeof rawValue === 'object'
+      && rawValue.kind === 'job_output') {{
+      return {{ mode: 'output_value', value: JSON.stringify(rawValue) }};
     }}
     if (kind === 'boolean') return {{ mode: 'literal', value: rawValue === true ? 'true' : 'false' }};
     if (kind === 'integer') return {{ mode: 'literal', value: rawValue == null ? '' : String(rawValue) }};
@@ -1660,16 +1644,16 @@ fn workflow_form_fields(
     const mode = modeSelect ? modeSelect.value : 'literal';
     if (kind === 'artifact') {{
       if (mode === 'source_artifact') return [name, '$source'];
-      return [name, `$job.${{valueField.value}}`];
+      return [name, JSON.parse(valueField.value)];
     }}
     if (kind === 'string') {{
       if (mode === 'commit') return [name, '$commit'];
       if (mode === 'branch') return [name, '$branch'];
-      if (mode === 'output_value') return [name, `$job.${{valueField.value}}`];
+      if (mode === 'output_value') return [name, JSON.parse(valueField.value)];
       return [name, valueField ? valueField.value : ''];
     }}
     if (mode === 'output_value') {{
-      return [name, `$job.${{valueField.value}}`];
+      return [name, JSON.parse(valueField.value)];
     }}
     if (kind === 'boolean') {{
       return [name, valueField.value === 'true'];
@@ -1733,7 +1717,7 @@ fn workflow_form_fields(
       for (const [outputName, outputDef] of outputs) {{
         if ((outputDef.type || '') !== expectedKind) continue;
         options.push({{
-          value: `${{job.id}}.${{outputName}}`,
+          value: JSON.stringify({{ kind: 'job_output', job_index: job.jobIndex, output_name: outputName }}),
           label: `${{job.name}} -> ${{outputName}}`
         }});
       }}
@@ -1741,8 +1725,17 @@ fn workflow_form_fields(
     return options;
   }}
 
-  function findDerivedJobById(derivedJobs, jobId) {{
-    return derivedJobs.find((job) => job.id === jobId) || null;
+  function parseOutputBinding(value) {{
+    if (!value) return null;
+    try {{
+      return JSON.parse(value);
+    }} catch (_error) {{
+      return null;
+    }}
+  }}
+
+  function findDerivedJobByIndex(derivedJobs, jobIndex) {{
+    return derivedJobs.find((job) => job.jobIndex === jobIndex) || null;
   }}
 
   function literalHintFor(kind, mode) {{
@@ -1764,8 +1757,8 @@ fn workflow_form_fields(
       return `No earlier jobs expose matching ${{expectedKind}} outputs yet.`;
     }}
     if (!reference) return `Select a ${{expectedKind}} output from an earlier job.`;
-    const [sourceJobId] = reference.split('.', 1);
-    const sourceJob = findDerivedJobById(derivedJobs, sourceJobId);
+    const binding = parseOutputBinding(reference);
+    const sourceJob = binding ? findDerivedJobByIndex(derivedJobs, binding.job_index) : null;
     if (sourceJob) {{
       return `Binding to ${{sourceJob.name}}.`;
     }}
@@ -2343,10 +2336,11 @@ fn render_workflow_job_chips(definition: &WorkflowDefinition) -> String {
     definition
         .jobs
         .iter()
-        .map(|job| {
+        .enumerate()
+        .map(|(index, job)| {
             format!(
                 r#"<span class="chip">{}</span>"#,
-                html_escape(&job.display_name())
+                html_escape(&job.display_name(index))
             )
         })
         .collect::<Vec<_>>()

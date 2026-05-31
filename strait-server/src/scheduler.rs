@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 use crate::{
     app::AppState,
     git,
-    models::{WorkflowDefinition, WorkflowTrigger},
+    models::{WorkflowDefinition, WorkflowTrigger, parse_job_output_binding},
     state_machine::{self, JobStatus, PipelineStatus},
 };
 
@@ -88,25 +88,19 @@ pub(crate) fn enqueue_workflow_run(
         trigger_ref,
         commit_sha,
     )?;
-    let mut run_ids = BTreeMap::new();
-    for job in &definition.jobs {
+    let mut previous_run_id: Option<String> = None;
+    for (job_index, job) in definition.jobs.iter().enumerate() {
         let run_id = state.db.create_job_run(
             &pipeline_id,
-            &job.id,
-            &job.display_name(),
+            job_index as i64,
             &job.runner_id,
             &job.runner_job_name,
             job.allow_failure,
         )?;
-        run_ids.insert(job.id.clone(), run_id);
-    }
-    for window in definition.jobs.windows(2) {
-        if let [previous, current] = window
-            && let (Some(job_run_id), Some(dep_run_id)) =
-                (run_ids.get(&current.id), run_ids.get(&previous.id))
-        {
-            state.db.add_previous_job(job_run_id, dep_run_id)?;
+        if let Some(previous) = previous_run_id.as_deref() {
+            state.db.add_previous_job(&run_id, previous)?;
         }
+        previous_run_id = Some(run_id);
     }
     Ok(pipeline_id)
 }
@@ -228,7 +222,7 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
             .db
             .workflow_definition_json(&pipeline.workflow_version_id)?;
         let definition: WorkflowDefinition = serde_json::from_str(&definition_json)?;
-        let Some(job_definition) = definition.jobs.iter().find(|item| item.id == job.job_id) else {
+        let Some(job_definition) = definition.jobs.get(job.job_index as usize) else {
             continue;
         };
         let runner_job_definition =
@@ -473,31 +467,40 @@ async fn resolve_job_inputs(
                         .await?;
                 resolved.insert(key.clone(), json!(artifact_id));
             }
-            Value::String(raw) if raw.starts_with("$job.") => {
-                let mut parts = raw.trim_start_matches("$job.").split('.');
-                let source_job = parts.next().unwrap_or_default();
-                let output_name = parts.next().unwrap_or_default();
+            _ if parse_job_output_binding(value).is_some() => {
+                let binding = parse_job_output_binding(value).expect("binding checked");
                 let upstream_run_id =
-                    find_job_run_id(Arc::clone(&state), &pipeline.id, source_job)?;
+                    find_job_run_id(Arc::clone(&state), &pipeline.id, binding.job_index)?;
                 let output = state
                     .db
                     .job_outputs(&upstream_run_id)?
                     .into_iter()
-                    .find(|item| item.output_name == output_name)
-                    .ok_or_else(|| format!("missing output {output_name} from {source_job}"))?;
+                    .find(|item| item.output_name == binding.output_name)
+                    .ok_or_else(|| {
+                        format!(
+                            "missing output {} from job-{}",
+                            binding.output_name,
+                            binding.job_index + 1
+                        )
+                    })?;
                 if let Some(expected_input_kind) = expected_input_kind
                     && output.kind != expected_input_kind
                 {
                     return Err(format!(
-                        "workflow input {key} expects {expected_input_kind} but {source_job}.{output_name} is {}",
-                        output.kind
+                        "workflow input {key} expects {expected_input_kind} but job-{}.{} is {}",
+                        binding.job_index + 1,
+                        binding.output_name,
+                        output.kind,
                     )
                     .into());
                 }
                 if output.kind == "artifact" {
                     let source_artifact_id =
                         output.runner_artifact_id.as_deref().ok_or_else(|| {
-                            format!("artifact output {output_name} missing artifact id")
+                            format!(
+                                "artifact output {} missing artifact id",
+                                binding.output_name
+                            )
                         })?;
                     let artifact_id = ensure_runner_has_artifact(
                         Arc::clone(&state),
@@ -510,9 +513,9 @@ async fn resolve_job_inputs(
                 } else {
                     resolved.insert(
                         key.clone(),
-                        output
-                            .value
-                            .ok_or_else(|| format!("typed output {output_name} missing value"))?,
+                        output.value.ok_or_else(|| {
+                            format!("typed output {} missing value", binding.output_name)
+                        })?,
                     );
                 }
             }
@@ -531,7 +534,7 @@ async fn resolve_job_inputs(
 fn find_job_run_id(
     state: Arc<AppState>,
     pipeline_id: &str,
-    job_id: &str,
+    job_index: usize,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let snapshot = state
         .db
@@ -540,9 +543,9 @@ fn find_job_run_id(
     snapshot
         .jobs
         .into_iter()
-        .find(|item| item.run.job_id == job_id)
+        .find(|item| item.run.job_index == job_index as i64)
         .map(|item| item.run.id)
-        .ok_or_else(|| format!("missing upstream job {job_id}").into())
+        .ok_or_else(|| format!("missing upstream job-{}", job_index + 1).into())
 }
 
 fn load_runner_job_definition(

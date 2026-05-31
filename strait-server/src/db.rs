@@ -642,8 +642,7 @@ impl Database {
     pub fn create_job_run(
         &self,
         pipeline_run_id: &str,
-        job_id: &str,
-        job_name: &str,
+        job_index: i64,
         runner_id: &str,
         runner_job_name: &str,
         allow_failure: bool,
@@ -652,13 +651,12 @@ impl Database {
         let dispatch_idempotency_key = next_dispatch_idempotency_key();
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
-            "INSERT INTO job_runs (id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, status, allow_failure)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)",
+            "INSERT INTO job_runs (id, pipeline_run_id, job_index, runner_id, runner_job_name, dispatch_idempotency_key, status, allow_failure)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
             params![
                 id,
                 pipeline_run_id,
-                job_id,
-                job_name,
+                job_index,
                 runner_id,
                 runner_job_name,
                 dispatch_idempotency_key,
@@ -773,36 +771,35 @@ impl Database {
             return Ok(None);
         };
         let mut stmt = conn.prepare(
-            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json
-             FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY CAST(SUBSTR(job_id, 5) AS INTEGER), job_id",
+            "SELECT id, pipeline_run_id, job_index, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json
+             FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_index",
         )?;
         let job_rows = stmt
             .query_map([pipeline_id], |row| {
                 Ok(JobRun {
                     id: row.get(0)?,
                     pipeline_run_id: row.get(1)?,
-                    job_id: row.get(2)?,
-                    job_name: row.get(3)?,
-                    runner_id: row.get(4)?,
-                    runner_job_name: row.get(5)?,
-                    dispatch_idempotency_key: row.get(6)?,
-                    runner_run_id: row.get(7)?,
-                    status: row.get(8)?,
-                    allow_failure: row.get::<_, i64>(9)? != 0,
-                    started_at: row.get(10)?,
-                    duration_ms: row.get(11)?,
-                    exit_code: row.get(12)?,
-                    terminal_reason: row.get(13)?,
-                    failure_category: row.get(14)?,
-                    cancel_reason: row.get(15)?,
-                    cancel_requested_at: row.get(16)?,
-                    cancel_started_at: row.get(17)?,
-                    cancel_retry_count: row.get(18)?,
-                    last_cancel_retry_at: row.get(19)?,
-                    infra_retry_count: row.get(20)?,
-                    last_infra_retry_at: row.get(21)?,
-                    finished_at: row.get(22)?,
-                    output_metadata: parse_output_metadata(row.get(23)?),
+                    job_index: row.get(2)?,
+                    runner_id: row.get(3)?,
+                    runner_job_name: row.get(4)?,
+                    dispatch_idempotency_key: row.get(5)?,
+                    runner_run_id: row.get(6)?,
+                    status: row.get(7)?,
+                    allow_failure: row.get::<_, i64>(8)? != 0,
+                    started_at: row.get(9)?,
+                    duration_ms: row.get(10)?,
+                    exit_code: row.get(11)?,
+                    terminal_reason: row.get(12)?,
+                    failure_category: row.get(13)?,
+                    cancel_reason: row.get(14)?,
+                    cancel_requested_at: row.get(15)?,
+                    cancel_started_at: row.get(16)?,
+                    cancel_retry_count: row.get(17)?,
+                    last_cancel_retry_at: row.get(18)?,
+                    infra_retry_count: row.get(19)?,
+                    last_infra_retry_at: row.get(20)?,
+                    finished_at: row.get(21)?,
+                    output_metadata: parse_output_metadata(row.get(22)?),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -843,7 +840,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut query = String::from(
-            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json FROM job_runs WHERE status IN (",
+            "SELECT id, pipeline_run_id, job_index, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json FROM job_runs WHERE status IN (",
         );
         for idx in 0..statuses.len() {
             if idx > 0 {
@@ -860,28 +857,27 @@ impl Database {
                 Ok(JobRun {
                     id: row.get(0)?,
                     pipeline_run_id: row.get(1)?,
-                    job_id: row.get(2)?,
-                    job_name: row.get(3)?,
-                    runner_id: row.get(4)?,
-                    runner_job_name: row.get(5)?,
-                    dispatch_idempotency_key: row.get(6)?,
-                    runner_run_id: row.get(7)?,
-                    status: row.get(8)?,
-                    allow_failure: row.get::<_, i64>(9)? != 0,
-                    started_at: row.get(10)?,
-                    duration_ms: row.get(11)?,
-                    exit_code: row.get(12)?,
-                    terminal_reason: row.get(13)?,
-                    failure_category: row.get(14)?,
-                    cancel_reason: row.get(15)?,
-                    cancel_requested_at: row.get(16)?,
-                    cancel_started_at: row.get(17)?,
-                    cancel_retry_count: row.get(18)?,
-                    last_cancel_retry_at: row.get(19)?,
-                    infra_retry_count: row.get(20)?,
-                    last_infra_retry_at: row.get(21)?,
-                    finished_at: row.get(22)?,
-                    output_metadata: parse_output_metadata(row.get(23)?),
+                    job_index: row.get(2)?,
+                    runner_id: row.get(3)?,
+                    runner_job_name: row.get(4)?,
+                    dispatch_idempotency_key: row.get(5)?,
+                    runner_run_id: row.get(6)?,
+                    status: row.get(7)?,
+                    allow_failure: row.get::<_, i64>(8)? != 0,
+                    started_at: row.get(9)?,
+                    duration_ms: row.get(10)?,
+                    exit_code: row.get(11)?,
+                    terminal_reason: row.get(12)?,
+                    failure_category: row.get(13)?,
+                    cancel_reason: row.get(14)?,
+                    cancel_requested_at: row.get(15)?,
+                    cancel_started_at: row.get(16)?,
+                    cancel_retry_count: row.get(17)?,
+                    last_cancel_retry_at: row.get(18)?,
+                    infra_retry_count: row.get(19)?,
+                    last_infra_retry_at: row.get(20)?,
+                    finished_at: row.get(21)?,
+                    output_metadata: parse_output_metadata(row.get(22)?),
                 })
             },
         )?;
@@ -894,37 +890,37 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT jr.id, jr.pipeline_run_id, jr.job_id, jr.job_name, jr.runner_id, jr.runner_job_name, jr.dispatch_idempotency_key, jr.runner_run_id, jr.status, jr.allow_failure, jr.started_at, jr.duration_ms, jr.exit_code, jr.terminal_reason, jr.failure_category, jr.cancel_reason, jr.cancel_requested_at, jr.cancel_started_at, jr.cancel_retry_count, jr.last_cancel_retry_at, jr.infra_retry_count, jr.last_infra_retry_at, jr.finished_at, jr.output_metadata_json
+            "SELECT jr.id, jr.pipeline_run_id, jr.job_index, jr.runner_id, jr.runner_job_name, jr.dispatch_idempotency_key, jr.runner_run_id, jr.status, jr.allow_failure, jr.started_at, jr.duration_ms, jr.exit_code, jr.terminal_reason, jr.failure_category, jr.cancel_reason, jr.cancel_requested_at, jr.cancel_started_at, jr.cancel_retry_count, jr.last_cancel_retry_at, jr.infra_retry_count, jr.last_infra_retry_at, jr.finished_at, jr.output_metadata_json
              FROM job_run_previous d
              JOIN job_runs jr ON jr.id = d.previous_job_run_id
-             WHERE d.job_run_id = ?1",
+             WHERE d.job_run_id = ?1
+             ORDER BY jr.job_index",
         )?;
         let rows = stmt.query_map([job_run_id], |row| {
             Ok(JobRun {
                 id: row.get(0)?,
                 pipeline_run_id: row.get(1)?,
-                job_id: row.get(2)?,
-                job_name: row.get(3)?,
-                runner_id: row.get(4)?,
-                runner_job_name: row.get(5)?,
-                dispatch_idempotency_key: row.get(6)?,
-                runner_run_id: row.get(7)?,
-                status: row.get(8)?,
-                allow_failure: row.get::<_, i64>(9)? != 0,
-                started_at: row.get(10)?,
-                duration_ms: row.get(11)?,
-                exit_code: row.get(12)?,
-                terminal_reason: row.get(13)?,
-                failure_category: row.get(14)?,
-                cancel_reason: row.get(15)?,
-                cancel_requested_at: row.get(16)?,
-                cancel_started_at: row.get(17)?,
-                cancel_retry_count: row.get(18)?,
-                last_cancel_retry_at: row.get(19)?,
-                infra_retry_count: row.get(20)?,
-                last_infra_retry_at: row.get(21)?,
-                finished_at: row.get(22)?,
-                output_metadata: parse_output_metadata(row.get(23)?),
+                job_index: row.get(2)?,
+                runner_id: row.get(3)?,
+                runner_job_name: row.get(4)?,
+                dispatch_idempotency_key: row.get(5)?,
+                runner_run_id: row.get(6)?,
+                status: row.get(7)?,
+                allow_failure: row.get::<_, i64>(8)? != 0,
+                started_at: row.get(9)?,
+                duration_ms: row.get(10)?,
+                exit_code: row.get(11)?,
+                terminal_reason: row.get(12)?,
+                failure_category: row.get(13)?,
+                cancel_reason: row.get(14)?,
+                cancel_requested_at: row.get(15)?,
+                cancel_started_at: row.get(16)?,
+                cancel_retry_count: row.get(17)?,
+                last_cancel_retry_at: row.get(18)?,
+                infra_retry_count: row.get(19)?,
+                last_infra_retry_at: row.get(20)?,
+                finished_at: row.get(21)?,
+                output_metadata: parse_output_metadata(row.get(22)?),
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1213,35 +1209,34 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json
-             FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY CAST(SUBSTR(job_id, 5) AS INTEGER), job_id",
+            "SELECT id, pipeline_run_id, job_index, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json
+             FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_index",
         )?;
         let rows = stmt.query_map([pipeline_id], |row| {
             Ok(JobRun {
                 id: row.get(0)?,
                 pipeline_run_id: row.get(1)?,
-                job_id: row.get(2)?,
-                job_name: row.get(3)?,
-                runner_id: row.get(4)?,
-                runner_job_name: row.get(5)?,
-                dispatch_idempotency_key: row.get(6)?,
-                runner_run_id: row.get(7)?,
-                status: row.get(8)?,
-                allow_failure: row.get::<_, i64>(9)? != 0,
-                started_at: row.get(10)?,
-                duration_ms: row.get(11)?,
-                exit_code: row.get(12)?,
-                terminal_reason: row.get(13)?,
-                failure_category: row.get(14)?,
-                cancel_reason: row.get(15)?,
-                cancel_requested_at: row.get(16)?,
-                cancel_started_at: row.get(17)?,
-                cancel_retry_count: row.get(18)?,
-                last_cancel_retry_at: row.get(19)?,
-                infra_retry_count: row.get(20)?,
-                last_infra_retry_at: row.get(21)?,
-                finished_at: row.get(22)?,
-                output_metadata: parse_output_metadata(row.get(23)?),
+                job_index: row.get(2)?,
+                runner_id: row.get(3)?,
+                runner_job_name: row.get(4)?,
+                dispatch_idempotency_key: row.get(5)?,
+                runner_run_id: row.get(6)?,
+                status: row.get(7)?,
+                allow_failure: row.get::<_, i64>(8)? != 0,
+                started_at: row.get(9)?,
+                duration_ms: row.get(10)?,
+                exit_code: row.get(11)?,
+                terminal_reason: row.get(12)?,
+                failure_category: row.get(13)?,
+                cancel_reason: row.get(14)?,
+                cancel_requested_at: row.get(15)?,
+                cancel_started_at: row.get(16)?,
+                cancel_retry_count: row.get(17)?,
+                last_cancel_retry_at: row.get(18)?,
+                infra_retry_count: row.get(19)?,
+                last_infra_retry_at: row.get(20)?,
+                finished_at: row.get(21)?,
+                output_metadata: parse_output_metadata(row.get(22)?),
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1616,8 +1611,7 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
         CREATE TABLE IF NOT EXISTS job_runs (
             id TEXT PRIMARY KEY,
             pipeline_run_id TEXT NOT NULL,
-            job_id TEXT NOT NULL,
-            job_name TEXT NOT NULL,
+            job_index INTEGER NOT NULL,
             runner_id TEXT NOT NULL,
             runner_job_name TEXT NOT NULL,
             dispatch_idempotency_key TEXT NOT NULL,

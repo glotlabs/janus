@@ -163,7 +163,6 @@ async fn workflow_form_submission_accepts_structured_jobs_json() {
     let definition: WorkflowDefinition =
         serde_json::from_str(&workflow.definition_json).expect("definition");
     assert_eq!(definition.jobs.len(), 1);
-    assert_eq!(definition.jobs[0].id, "job-1");
     assert_eq!(definition.jobs[0].runner_job_name, "build-app");
     assert_eq!(
         definition.jobs[0].inputs.get("source"),
@@ -205,7 +204,7 @@ async fn workflow_form_rejects_missing_job_output_reference() {
             "runner_id": fixture.runner_id,
             "runner_job_name": "consume",
             "inputs": {
-                "version": "$job.job-1.missing"
+                "version": { "kind": "job_output", "job_index": 0, "output_name": "missing" }
             },
             "allow_failure": false
         }),
@@ -274,7 +273,7 @@ async fn workflow_form_rejects_typed_output_input_mismatch() {
             "runner_id": fixture.runner_id,
             "runner_job_name": "consume",
             "inputs": {
-                "build_number": "$job.job-1.build_number"
+                "build_number": { "kind": "job_output", "job_index": 0, "output_name": "build_number" }
             },
             "allow_failure": false
         }),
@@ -409,9 +408,7 @@ async fn workflow_form_rejects_unknown_literal_input_name() {
         .await
         .expect("body");
     let text = String::from_utf8(body.to_vec()).expect("text");
-    assert!(
-        text.contains("workflow job job-1 provides unknown input bogus for runner job build-app")
-    );
+    assert!(text.contains("workflow job 1 provides unknown input bogus for runner job build-app"));
 }
 
 #[test]
@@ -536,24 +533,31 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
         &repo.id,
         vec![
             WorkflowJobDefinition {
-                id: "produce".to_string(),
                 runner_id: producer_runner_id,
                 runner_job_name: "produce-typed".to_string(),
                 inputs: BTreeMap::new(),
                 allow_failure: false,
             },
             WorkflowJobDefinition {
-                id: "consume".to_string(),
                 runner_id: consumer_runner_id,
                 runner_job_name: "consume-typed".to_string(),
                 inputs: BTreeMap::from([
-                    ("version".to_string(), json!("$job.produce.version")),
+                    (
+                        "version".to_string(),
+                        json!({ "kind": "job_output", "job_index": 0, "output_name": "version" }),
+                    ),
                     (
                         "build_number".to_string(),
-                        json!("$job.produce.build_number"),
+                        json!({ "kind": "job_output", "job_index": 0, "output_name": "build_number" }),
                     ),
-                    ("published".to_string(), json!("$job.produce.published")),
-                    ("metadata".to_string(), json!("$job.produce.metadata")),
+                    (
+                        "published".to_string(),
+                        json!({ "kind": "job_output", "job_index": 0, "output_name": "published" }),
+                    ),
+                    (
+                        "metadata".to_string(),
+                        json!({ "kind": "job_output", "job_index": 0, "output_name": "metadata" }),
+                    ),
                 ]),
                 allow_failure: false,
             },
@@ -640,19 +644,17 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
         &repo.id,
         vec![
             WorkflowJobDefinition {
-                id: "produce".to_string(),
                 runner_id: producer_runner_id,
                 runner_job_name: "produce-int".to_string(),
                 inputs: BTreeMap::new(),
                 allow_failure: false,
             },
             WorkflowJobDefinition {
-                id: "consume".to_string(),
                 runner_id: consumer_runner_id,
                 runner_job_name: "consume-string".to_string(),
                 inputs: BTreeMap::from([(
                     "build_number".to_string(),
-                    json!("$job.produce.build_number"),
+                    json!({ "kind": "job_output", "job_index": 0, "output_name": "build_number" }),
                 )]),
                 allow_failure: false,
             },
@@ -682,7 +684,7 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
         .await
         .expect_err("mismatch should fail before dispatch");
     assert!(error.to_string().contains(
-        "workflow input build_number expects string but produce.build_number is integer"
+        "workflow input build_number expects string but job-1.build_number is integer"
     ));
     assert!(mock.requests_for("consume-string").is_empty());
 }
@@ -1329,7 +1331,6 @@ fn create_workflow_direct(state: &Arc<crate::app::AppState>, repo_id: &str, runn
     .expect("trigger");
     let definition = serde_json::to_string(&WorkflowDefinition {
         jobs: vec![WorkflowJobDefinition {
-            id: "build".to_string(),
             runner_id: runner_id.to_string(),
             runner_job_name: "build-app".to_string(),
             inputs: BTreeMap::from([
