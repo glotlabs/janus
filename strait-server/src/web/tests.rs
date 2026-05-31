@@ -72,13 +72,11 @@ async fn workflows_page_renders_runner_job_builder() {
         .replace_runner_jobs(
             &fixture.runner_id,
             &[
-                (
-                    "build-app".to_string(),
-                    r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true}},"outputs":{"app":{"type":"artifact","required":true}}}"#.to_string(),
+                runner_job_schema(
+                    r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
                 ),
-                (
-                    "test-app".to_string(),
-                    r#"{"name":"test-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true}},"outputs":{}}"#.to_string(),
+                runner_job_schema(
+                    r#"{"name":"test-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true}},"outputs":{}}"#,
                 ),
             ],
         )
@@ -125,9 +123,8 @@ async fn workflows_page_marks_stale_workflow_schemas() {
         .db
         .replace_runner_jobs(
             &fixture.runner_id,
-            &[(
-                "build-app".to_string(),
-                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true},"published":{"type":"boolean","required":false}},"outputs":{"app":{"type":"artifact","required":true}}}"#.to_string(),
+            &[runner_job_schema(
+                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true},"published":{"type":"boolean","required":false}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
             )],
         )
         .expect("runner jobs");
@@ -163,9 +160,8 @@ async fn api_workflow_includes_schema_status() {
         .db
         .replace_runner_jobs(
             &fixture.runner_id,
-            &[(
-                "build-app".to_string(),
-                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true}},"outputs":{}}"#.to_string(),
+            &[runner_job_schema(
+                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true}},"outputs":{}}"#,
             )],
         )
         .expect("runner jobs");
@@ -267,13 +263,11 @@ async fn workflow_form_rejects_missing_job_output_reference() {
         .replace_runner_jobs(
             &fixture.runner_id,
             &[
-                (
-                    "produce".to_string(),
-                    r#"{"name":"produce","timeout_seconds":60,"inputs":{},"outputs":{"version":{"type":"string","required":true}}}"#.to_string(),
+                runner_job_schema(
+                    r#"{"name":"produce","timeout_seconds":60,"inputs":{},"outputs":{"version":{"type":"string","required":true}}}"#,
                 ),
-                (
-                    "consume".to_string(),
-                    r#"{"name":"consume","timeout_seconds":60,"inputs":{"version":{"type":"string","required":true}},"outputs":{}}"#.to_string(),
+                runner_job_schema(
+                    r#"{"name":"consume","timeout_seconds":60,"inputs":{"version":{"type":"string","required":true}},"outputs":{}}"#,
                 ),
             ],
         )
@@ -336,13 +330,11 @@ async fn workflow_form_rejects_typed_output_input_mismatch() {
         .replace_runner_jobs(
             &fixture.runner_id,
             &[
-                (
-                    "produce".to_string(),
-                    r#"{"name":"produce","timeout_seconds":60,"inputs":{},"outputs":{"build_number":{"type":"integer","required":true}}}"#.to_string(),
+                runner_job_schema(
+                    r#"{"name":"produce","timeout_seconds":60,"inputs":{},"outputs":{"build_number":{"type":"integer","required":true}}}"#,
                 ),
-                (
-                    "consume".to_string(),
-                    r#"{"name":"consume","timeout_seconds":60,"inputs":{"build_number":{"type":"string","required":true}},"outputs":{}}"#.to_string(),
+                runner_job_schema(
+                    r#"{"name":"consume","timeout_seconds":60,"inputs":{"build_number":{"type":"string","required":true}},"outputs":{}}"#,
                 ),
             ],
         )
@@ -408,9 +400,8 @@ async fn workflow_form_rejects_literal_input_type_mismatch() {
         .db
         .replace_runner_jobs(
             &fixture.runner_id,
-            &[(
-                "build-app".to_string(),
-                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"published":{"type":"boolean","required":true}},"outputs":{}}"#.to_string(),
+            &[runner_job_schema(
+                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"published":{"type":"boolean","required":true}},"outputs":{}}"#,
             )],
         )
         .expect("runner jobs");
@@ -587,9 +578,8 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
         .db
         .replace_runner_jobs(
             &producer_runner_id,
-            &[(
-                "produce-typed".to_string(),
-                r#"{"name":"produce-typed","timeout_seconds":60,"inputs":{},"outputs":{"version":{"type":"string","required":true},"build_number":{"type":"integer","required":true},"published":{"type":"boolean","required":true},"metadata":{"type":"json","required":true}}}"#.to_string(),
+            &[runner_job_schema(
+                r#"{"name":"produce-typed","timeout_seconds":60,"inputs":{},"outputs":{"version":{"type":"string","required":true},"build_number":{"type":"integer","required":true},"published":{"type":"boolean","required":true},"metadata":{"type":"json","required":true}}}"#,
             )],
         )
         .expect("producer jobs");
@@ -603,9 +593,8 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
         .db
         .replace_runner_jobs(
             &consumer_runner_id,
-            &[(
-                "consume-typed".to_string(),
-                r#"{"name":"consume-typed","timeout_seconds":60,"inputs":{"version":{"type":"string","required":true},"build_number":{"type":"integer","required":true},"published":{"type":"boolean","required":true},"metadata":{"type":"json","required":true}},"outputs":{}}"#.to_string(),
+            &[runner_job_schema(
+                r#"{"name":"consume-typed","timeout_seconds":60,"inputs":{"version":{"type":"string","required":true},"build_number":{"type":"integer","required":true},"published":{"type":"boolean","required":true},"metadata":{"type":"json","required":true}},"outputs":{}}"#,
             )],
         )
         .expect("consumer jobs");
@@ -706,9 +695,8 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
         .db
         .replace_runner_jobs(
             &producer_runner_id,
-            &[(
-                "produce-int".to_string(),
-                r#"{"name":"produce-int","timeout_seconds":60,"inputs":{},"outputs":{"build_number":{"type":"integer","required":true}}}"#.to_string(),
+            &[runner_job_schema(
+                r#"{"name":"produce-int","timeout_seconds":60,"inputs":{},"outputs":{"build_number":{"type":"integer","required":true}}}"#,
             )],
         )
         .expect("producer jobs");
@@ -722,9 +710,8 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
         .db
         .replace_runner_jobs(
             &consumer_runner_id,
-            &[(
-                "consume-string".to_string(),
-                r#"{"name":"consume-string","timeout_seconds":60,"inputs":{"build_number":{"type":"string","required":true}},"outputs":{}}"#.to_string(),
+            &[runner_job_schema(
+                r#"{"name":"consume-string","timeout_seconds":60,"inputs":{"build_number":{"type":"string","required":true}},"outputs":{}}"#,
             )],
         )
         .expect("consumer jobs");
@@ -1009,9 +996,8 @@ async fn enqueue_workflow_run_allows_stale_schema() {
         .db
         .replace_runner_jobs(
             &fixture.runner_id,
-            &[(
-                "build-app".to_string(),
-                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true},"published":{"type":"boolean","required":false}},"outputs":{"app":{"type":"artifact","required":true}}}"#.to_string(),
+            &[runner_job_schema(
+                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true},"published":{"type":"boolean","required":false}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
             )],
         )
         .expect("runner jobs");
@@ -1453,9 +1439,8 @@ async fn test_fixture_with_runner(base_url: &str) -> TestFixture {
             .db
             .replace_runner_jobs(
                 &runner_id,
-                &[(
-                    "build-app".to_string(),
-                    r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true}},"outputs":{"app":{"type":"artifact","required":true}}}"#.to_string(),
+                &[runner_job_schema(
+                    r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
                 )],
             )
             .expect("runner jobs");
@@ -1508,17 +1493,10 @@ fn create_workflow_direct(state: &Arc<crate::app::AppState>, repo_id: &str, runn
     }];
     let definition =
         serde_json::to_string(&WorkflowDefinition { jobs: jobs.clone() }).expect("definition");
-    let job_schemas_json = workflow_job_schemas_json(state, &jobs);
+    let job_schemas = workflow_job_schemas(state, &jobs);
     state
         .db
-        .create_workflow(
-            repo_id,
-            "wf",
-            true,
-            &trigger,
-            &definition,
-            &job_schemas_json,
-        )
+        .create_workflow(repo_id, "wf", true, &trigger, &definition, &job_schemas)
         .expect("workflow");
 }
 
@@ -1534,17 +1512,10 @@ fn create_workflow_with_jobs_direct(
     .expect("trigger");
     let definition =
         serde_json::to_string(&WorkflowDefinition { jobs: jobs.clone() }).expect("definition");
-    let job_schemas_json = workflow_job_schemas_json(state, &jobs);
+    let job_schemas = workflow_job_schemas(state, &jobs);
     state
         .db
-        .create_workflow(
-            repo_id,
-            "wf",
-            true,
-            &trigger,
-            &definition,
-            &job_schemas_json,
-        )
+        .create_workflow(repo_id, "wf", true, &trigger, &definition, &job_schemas)
         .expect("workflow");
 }
 
@@ -1552,27 +1523,25 @@ fn binding(value: JsonValue) -> WorkflowInputBinding {
     serde_json::from_value(value).expect("workflow input binding")
 }
 
-fn workflow_job_schemas_json(
+fn workflow_job_schemas(
     state: &Arc<crate::app::AppState>,
     jobs: &[WorkflowJobDefinition],
-) -> String {
-    let schemas = jobs
-        .iter()
+) -> Vec<RunnerJobSchema> {
+    jobs.iter()
         .map(|job| {
             state
                 .db
                 .list_runner_jobs(&job.runner_id)
                 .expect("runner jobs")
                 .into_iter()
-                .find(|(name, _)| name == &job.runner_job_name)
-                .map(|(_, definition_json)| {
-                    serde_json::from_str::<RunnerJobSchema>(&definition_json)
-                        .expect("runner job schema")
-                })
+                .find(|schema| schema.name == job.runner_job_name)
                 .expect("runner job schema for workflow job")
         })
-        .collect::<Vec<_>>();
-    serde_json::to_string(&schemas).expect("workflow job schemas")
+        .collect::<Vec<_>>()
+}
+
+fn runner_job_schema(schema: &str) -> RunnerJobSchema {
+    serde_json::from_str(schema).expect("runner job schema")
 }
 
 fn write_test_config(dir: &Path) -> PathBuf {

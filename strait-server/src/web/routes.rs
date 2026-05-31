@@ -439,10 +439,10 @@ async fn runners_page(
             .map_err(internal_error)?;
         if !jobs.is_empty() {
             body.push_str(r#"<div class="subsection"><span class="subsection-title">Advertised jobs</span><div class="chip-row">"#);
-            for (job_name, _) in jobs {
+            for job in jobs {
                 body.push_str(&format!(
                     r#"<span class="chip">{}</span>"#,
-                    html_escape(&job_name)
+                    html_escape(&job.name)
                 ));
             }
             body.push_str("</div></div>");
@@ -620,7 +620,7 @@ async fn create_workflow(
             true,
             &parsed.trigger_json,
             &parsed.definition_json,
-            &parsed.job_schemas_json,
+            &parsed.job_schemas,
         )
         .map_err(internal_error)?;
     Ok(Redirect::to("/workflows"))
@@ -646,7 +646,7 @@ async fn update_workflow(
             true,
             &parsed.trigger_json,
             &parsed.definition_json,
-            &parsed.job_schemas_json,
+            &parsed.job_schemas,
         )
         .map_err(internal_error)?;
     Ok(Redirect::to(&format!("/workflows/{}", workflow.id)))
@@ -1004,7 +1004,7 @@ async fn api_create_workflow(
             request.enabled,
             &parsed.trigger_json,
             &parsed.definition_json,
-            &parsed.job_schemas_json,
+            &parsed.job_schemas,
         )
         .map_err(internal_error)?;
     let workflow = state
@@ -1050,7 +1050,7 @@ async fn api_update_workflow(
             request.enabled,
             &parsed.trigger_json,
             &parsed.definition_json,
-            &parsed.job_schemas_json,
+            &parsed.job_schemas,
         )
         .map_err(internal_error)?;
     let workflow = state
@@ -1104,16 +1104,6 @@ async fn refresh_single_runner(state: &Arc<AppState>, runner_id: &str) -> Result
         .list_jobs(&runner)
         .await
         .map_err(|error| error.to_string())?;
-    let jobs = jobs
-        .into_iter()
-        .map(|job| {
-            let name = job.name.clone();
-            (
-                name,
-                serde_json::to_string(&job).unwrap_or_else(|_| "{}".to_string()),
-            )
-        })
-        .collect::<Vec<_>>();
     state
         .db
         .replace_runner_jobs(runner_id, &jobs)
@@ -1128,7 +1118,7 @@ async fn refresh_single_runner(state: &Arc<AppState>, runner_id: &str) -> Result
 struct ParsedWorkflow {
     trigger_json: String,
     definition_json: String,
-    job_schemas_json: String,
+    job_schemas: Vec<RunnerJobSchema>,
 }
 
 fn display_status(status: &str) -> String {
@@ -1174,7 +1164,7 @@ fn parse_workflow_form(
     Ok(ParsedWorkflow {
         trigger_json: serde_json::to_string(&trigger).map_err(internal_error_text)?,
         definition_json: serde_json::to_string(&definition).map_err(internal_error_text)?,
-        job_schemas_json: serde_json::to_string(&job_schemas).map_err(internal_error_text)?,
+        job_schemas,
     })
 }
 
@@ -1208,7 +1198,7 @@ fn parse_api_workflow_request(
     Ok(ParsedWorkflow {
         trigger_json: serde_json::to_string(&trigger).map_err(internal_error_text)?,
         definition_json: serde_json::to_string(&definition).map_err(internal_error_text)?,
-        job_schemas_json: serde_json::to_string(&job_schemas).map_err(internal_error_text)?,
+        job_schemas,
     })
 }
 
@@ -1254,23 +1244,15 @@ fn validate_workflow_runners(
             .db
             .list_runner_jobs(&runner.id)
             .map_err(internal_error)?;
-        let definition_json = jobs
-            .iter()
-            .find(|(name, _)| name == &job.runner_job_name)
-            .map(|(_, definition_json)| definition_json.clone());
-        let Some(definition_json) = definition_json else {
+        let Some(runner_job) = jobs
+            .into_iter()
+            .find(|schema| schema.name == job.runner_job_name)
+        else {
             return Err(bad_request(format!(
                 "runner {} does not advertise job {}",
                 runner.name, job.runner_job_name
             )));
         };
-        let runner_job =
-            serde_json::from_str::<RunnerJobSchema>(&definition_json).map_err(|error| {
-                internal_error(format!(
-                    "failed to parse runner job definition for {}: {error}",
-                    job.runner_job_name
-                ))
-            })?;
         runner_job_defs.insert(job_index, runner_job);
     }
 
@@ -1418,15 +1400,7 @@ fn workflow_runner_catalog(
         let jobs = state
             .db
             .list_runner_jobs(&runner.id)
-            .map_err(internal_error)?
-            .into_iter()
-            .map(|(job_name, definition_json)| {
-                let mut parsed =
-                    serde_json::from_str::<RunnerJobSchema>(&definition_json).unwrap_or_default();
-                parsed.name = job_name;
-                parsed
-            })
-            .collect::<Vec<_>>();
+            .map_err(internal_error)?;
         catalog.push(WorkflowRunnerCatalogEntry {
             id: runner.id,
             name: runner.name,
@@ -1441,8 +1415,7 @@ fn workflow_schema_status(
     workflow: &Workflow,
 ) -> Result<WorkflowSchemaStatus, Box<dyn std::error::Error>> {
     let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)?;
-    let snapshot_json = state.db.workflow_job_schemas_json(&workflow.version_id)?;
-    let snapshot: Vec<RunnerJobSchema> = serde_json::from_str(&snapshot_json)?;
+    let snapshot = state.db.workflow_job_schemas(&workflow.version_id)?;
     if snapshot.len() != definition.jobs.len() {
         return Ok(WorkflowSchemaStatus::Incompatible);
     }
@@ -1456,9 +1429,7 @@ fn workflow_schema_status(
             .db
             .list_runner_jobs(&job.runner_id)?
             .into_iter()
-            .find(|(name, _)| name == &job.runner_job_name)
-            .map(|(_, definition_json)| serde_json::from_str::<RunnerJobSchema>(&definition_json))
-            .transpose()?;
+            .find(|schema| schema.name == job.runner_job_name);
         let Some(current_schema) = current_schema else {
             return Ok(WorkflowSchemaStatus::Incompatible);
         };

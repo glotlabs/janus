@@ -9,7 +9,9 @@ use tracing::{error, info, warn};
 use crate::{
     app::AppState,
     git,
-    models::{RunnerJobSchema, Workflow, WorkflowDefinition, WorkflowInputBinding, WorkflowTrigger},
+    models::{
+        RunnerJobSchema, Workflow, WorkflowDefinition, WorkflowInputBinding, WorkflowTrigger,
+    },
     state_machine::{self, JobStatus, PipelineStatus},
 };
 
@@ -252,10 +254,9 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
             .db
             .workflow_definition_json(&pipeline.workflow_version_id)?;
         let definition: WorkflowDefinition = serde_json::from_str(&definition_json)?;
-        let job_schemas_json = state
+        let job_schemas = state
             .db
-            .workflow_job_schemas_json(&pipeline.workflow_version_id)?;
-        let job_schemas: Vec<RunnerJobSchema> = serde_json::from_str(&job_schemas_json)?;
+            .workflow_job_schemas(&pipeline.workflow_version_id)?;
         let Some(job_definition) = definition.jobs.get(job.job_index as usize) else {
             continue;
         };
@@ -615,8 +616,7 @@ fn workflow_schema_status(
     workflow: &Workflow,
 ) -> Result<WorkflowSchemaStatus, Box<dyn std::error::Error>> {
     let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)?;
-    let snapshot_json = state.db.workflow_job_schemas_json(&workflow.version_id)?;
-    let snapshot: Vec<RunnerJobSchema> = serde_json::from_str(&snapshot_json)?;
+    let snapshot = state.db.workflow_job_schemas(&workflow.version_id)?;
     if snapshot.len() != definition.jobs.len() {
         return Ok(WorkflowSchemaStatus::Incompatible);
     }
@@ -630,9 +630,7 @@ fn workflow_schema_status(
             .db
             .list_runner_jobs(&job.runner_id)?
             .into_iter()
-            .find(|(name, _)| name == &job.runner_job_name)
-            .map(|(_, definition_json)| serde_json::from_str::<RunnerJobSchema>(&definition_json))
-            .transpose()?;
+            .find(|schema| schema.name == job.runner_job_name);
         let Some(current_schema) = current_schema else {
             return Ok(WorkflowSchemaStatus::Incompatible);
         };
@@ -829,17 +827,7 @@ async fn refresh_runner_health(state: Arc<AppState>) -> Result<(), Box<dyn std::
     for runner in runners.into_iter().filter(|item| item.enabled) {
         match state.runner_client.list_jobs(&runner).await {
             Ok(jobs) => {
-                let payloads = jobs
-                    .into_iter()
-                    .map(|job| {
-                        let name = job.name.clone();
-                        (
-                            name,
-                            serde_json::to_string(&job).unwrap_or_else(|_| "{}".to_string()),
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                state.db.replace_runner_jobs(&runner.id, &payloads)?;
+                state.db.replace_runner_jobs(&runner.id, &jobs)?;
                 state.db.update_runner_health(&runner.id, "healthy")?;
             }
             Err(error) => {
