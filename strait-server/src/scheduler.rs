@@ -9,9 +9,16 @@ use tracing::{error, info, warn};
 use crate::{
     app::AppState,
     git,
-    models::{RunnerJobSchema, WorkflowDefinition, WorkflowInputBinding, WorkflowTrigger},
+    models::{RunnerJobSchema, Workflow, WorkflowDefinition, WorkflowInputBinding, WorkflowTrigger},
     state_machine::{self, JobStatus, PipelineStatus},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowSchemaStatus {
+    Current,
+    Stale,
+    Incompatible,
+}
 
 pub fn spawn(state: Arc<AppState>) {
     let scheduler_state = Arc::clone(&state);
@@ -61,11 +68,29 @@ async fn reconcile(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error
 
 pub(crate) fn enqueue_workflow_run(
     state: Arc<AppState>,
-    workflow: &crate::models::Workflow,
+    workflow: &Workflow,
     trigger_type: &str,
     trigger_ref: Option<&str>,
     commit_sha: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    match workflow_schema_status(Arc::clone(&state), workflow)? {
+        WorkflowSchemaStatus::Current => {}
+        WorkflowSchemaStatus::Stale => {
+            warn!(
+                workflow_id = %workflow.id,
+                workflow_version_id = %workflow.version_id,
+                workflow = %workflow.name,
+                "workflow schema is stale; creating pipeline from saved schema snapshot"
+            );
+        }
+        WorkflowSchemaStatus::Incompatible => {
+            return Err(std::io::Error::other(format!(
+                "incompatible workflow schema for workflow {}",
+                workflow.name
+            ))
+            .into());
+        }
+    }
     let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)?;
     definition.validate().map_err(std::io::Error::other)?;
     let pipeline_id = state.db.create_pipeline_run(
@@ -147,14 +172,31 @@ async fn process_push_events(state: Arc<AppState>) -> Result<(), Box<dyn std::er
                 if !matches_branch(&trigger.branches, &ref_update.ref_name) {
                     continue;
                 }
-                let pipeline_id = enqueue_workflow_run(
+                match enqueue_workflow_run(
                     Arc::clone(&state),
                     &workflow,
                     "push",
                     Some(&ref_update.ref_name),
                     Some(&ref_update.new_rev),
-                )?;
-                info!(pipeline_id, workflow = %workflow.name, "pipeline created from push event");
+                ) {
+                    Ok(pipeline_id) => {
+                        info!(pipeline_id, workflow = %workflow.name, "pipeline created from push event");
+                    }
+                    Err(error)
+                        if error
+                            .to_string()
+                            .contains("incompatible workflow schema for workflow") =>
+                    {
+                        warn!(
+                            workflow_id = %workflow.id,
+                            workflow_version_id = %workflow.version_id,
+                            workflow = %workflow.name,
+                            %error,
+                            "skipping push-triggered pipeline because workflow schema is incompatible"
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
         state.db.mark_push_event_processed(&event.id)?;
@@ -566,6 +608,40 @@ async fn ensure_source_artifact(
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(upload.artifact_id)
+}
+
+fn workflow_schema_status(
+    state: Arc<AppState>,
+    workflow: &Workflow,
+) -> Result<WorkflowSchemaStatus, Box<dyn std::error::Error>> {
+    let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)?;
+    let snapshot_json = state.db.workflow_job_schemas_json(&workflow.version_id)?;
+    let snapshot: Vec<RunnerJobSchema> = serde_json::from_str(&snapshot_json)?;
+    if snapshot.len() != definition.jobs.len() {
+        return Ok(WorkflowSchemaStatus::Incompatible);
+    }
+
+    let mut status = WorkflowSchemaStatus::Current;
+    for (job_index, job) in definition.jobs.iter().enumerate() {
+        let Some(saved_schema) = snapshot.get(job_index) else {
+            return Ok(WorkflowSchemaStatus::Incompatible);
+        };
+        let current_schema = state
+            .db
+            .list_runner_jobs(&job.runner_id)?
+            .into_iter()
+            .find(|(name, _)| name == &job.runner_job_name)
+            .map(|(_, definition_json)| serde_json::from_str::<RunnerJobSchema>(&definition_json))
+            .transpose()?;
+        let Some(current_schema) = current_schema else {
+            return Ok(WorkflowSchemaStatus::Incompatible);
+        };
+        if &current_schema != saved_schema {
+            status = WorkflowSchemaStatus::Stale;
+        }
+    }
+
+    Ok(status)
 }
 
 async fn ensure_runner_has_artifact(

@@ -192,6 +192,39 @@ struct WorkflowForm {
     branch_name: String,
     jobs_json: String,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum WorkflowSchemaStatus {
+    Current,
+    Stale,
+    Incompatible,
+}
+
+impl WorkflowSchemaStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Stale => "stale",
+            Self::Incompatible => "incompatible",
+        }
+    }
+
+    fn tone(self) -> &'static str {
+        match self {
+            Self::Current => "success",
+            Self::Stale => "warning",
+            Self::Incompatible => "danger",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WorkflowApiView {
+    #[serde(flatten)]
+    workflow: Workflow,
+    schema_status: WorkflowSchemaStatus,
+}
 #[derive(Deserialize)]
 struct ManualTriggerForm {
     csrf_token: String,
@@ -508,6 +541,7 @@ async fn workflows_page(
         .into_iter()
         .filter(|item| repo_ids_contains(&repos, &item.repo_id))
     {
+        let schema_status = workflow_schema_status(&state, &workflow).map_err(internal_error)?;
         let trigger: WorkflowTrigger =
             serde_json::from_str(&workflow.trigger_json).unwrap_or(WorkflowTrigger {
                 kind: "push".to_string(),
@@ -516,11 +550,12 @@ async fn workflows_page(
         let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)
             .unwrap_or(WorkflowDefinition { jobs: Vec::new() });
         body.push_str(&format!(
-            r#"<article class="entity-card"><div class="entity-head"><div><h3><a href="/workflows/{}">{}</a></h3><p class="muted">Repo: <code>{}</code></p></div><div class="badge-row">{}</div></div><div class="meta-grid"><div class="meta-pair"><span>Trigger</span><strong>{}</strong></div><div class="meta-pair"><span>Branches</span><strong>{}</strong></div><div class="meta-pair"><span>Version</span><strong>{}</strong></div><div class="meta-pair"><span>Jobs</span><strong>{}</strong></div></div><div class="chip-row">{}</div></article>"#,
+            r#"<article class="entity-card"><div class="entity-head"><div><h3><a href="/workflows/{}">{}</a></h3><p class="muted">Repo: <code>{}</code></p></div><div class="badge-row">{}{}</div></div><div class="meta-grid"><div class="meta-pair"><span>Trigger</span><strong>{}</strong></div><div class="meta-pair"><span>Branches</span><strong>{}</strong></div><div class="meta-pair"><span>Version</span><strong>{}</strong></div><div class="meta-pair"><span>Jobs</span><strong>{}</strong></div></div><div class="chip-row">{}</div></article>"#,
             workflow.id,
             html_escape(&workflow.name),
             html_escape(&workflow.repo_id),
             badge("workflow", "neutral"),
+            badge(schema_status.as_str(), schema_status.tone()),
             html_escape(&trigger.kind),
             html_escape(&trigger.branches.join(", ")),
             workflow.version,
@@ -555,11 +590,13 @@ async fn workflow_detail_page(
         "Workflow Detail",
         "Adjust trigger behavior, job order, and runner/job bindings.",
     );
+    let schema_status = workflow_schema_status(&state, &workflow).map_err(internal_error)?;
     body.push_str(&format!(
-        r#"<section class="card"><div class="section-head"><div><div class="eyebrow">Editing</div><h2>{}</h2><p class="muted">Repository: {}/{}</p></div></div><form method="post" action="/workflows/{}/update" class="stack-lg">{}{}</form></section>"#,
+        r#"<section class="card"><div class="section-head"><div><div class="eyebrow">Editing</div><h2>{}</h2><p class="muted">Repository: {}/{}</p></div><div class="badge-row">{}</div></div><form method="post" action="/workflows/{}/update" class="stack-lg">{}{}</form></section>"#,
         html_escape(&workflow.name),
         html_escape(&repo.owner_username),
         html_escape(&repo.name),
+        badge(schema_status.as_str(), schema_status.tone()),
         workflow.id,
         csrf_input(&csrf),
         workflow_form_fields(Some(&workflow), &runner_catalog, Some(&repo_field))
@@ -933,7 +970,7 @@ async fn api_create_runner(
 async fn api_list_workflows(
     CurrentUser(user): CurrentUser,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<Workflow>>, Response> {
+) -> Result<Json<Vec<WorkflowApiView>>, Response> {
     let repos = visible_repos_for_user(&state, &user)?;
     let repo_ids = repos.into_iter().map(|repo| repo.id).collect::<Vec<_>>();
     let workflows = state
@@ -942,14 +979,20 @@ async fn api_list_workflows(
         .map_err(internal_error)?
         .into_iter()
         .filter(|workflow| repo_ids.iter().any(|id| id == &workflow.repo_id))
-        .collect::<Vec<_>>();
+        .map(|workflow| {
+            Ok(WorkflowApiView {
+                schema_status: workflow_schema_status(&state, &workflow).map_err(internal_error)?,
+                workflow,
+            })
+        })
+        .collect::<Result<Vec<_>, Response>>()?;
     Ok(Json(workflows))
 }
 async fn api_create_workflow(
     CurrentUser(user): CurrentUser,
     State(state): State<Arc<AppState>>,
     Json(request): Json<ApiWorkflowRequest>,
-) -> Result<Json<Workflow>, Response> {
+) -> Result<Json<WorkflowApiView>, Response> {
     verify_csrf(&state, &user, &request.csrf_token)?;
     let repo = authorized_repo(&state, &user, &request.repo_id)?;
     let parsed = parse_api_workflow_request(&state, &request)?;
@@ -971,21 +1014,28 @@ async fn api_create_workflow(
         .into_iter()
         .find(|workflow| workflow.name == request.name)
         .ok_or_else(|| internal_error_text("workflow missing after create"))?;
-    Ok(Json(workflow))
+    Ok(Json(WorkflowApiView {
+        schema_status: workflow_schema_status(&state, &workflow).map_err(internal_error)?,
+        workflow,
+    }))
 }
 async fn api_get_workflow(
     CurrentUser(user): CurrentUser,
     State(state): State<Arc<AppState>>,
     AxumPath(workflow_id): AxumPath<String>,
-) -> Result<Json<Workflow>, Response> {
-    Ok(Json(authorized_workflow(&state, &user, &workflow_id)?))
+) -> Result<Json<WorkflowApiView>, Response> {
+    let workflow = authorized_workflow(&state, &user, &workflow_id)?;
+    Ok(Json(WorkflowApiView {
+        schema_status: workflow_schema_status(&state, &workflow).map_err(internal_error)?,
+        workflow,
+    }))
 }
 async fn api_update_workflow(
     CurrentUser(user): CurrentUser,
     State(state): State<Arc<AppState>>,
     AxumPath(workflow_id): AxumPath<String>,
     Json(request): Json<ApiWorkflowRequest>,
-) -> Result<Json<Workflow>, Response> {
+) -> Result<Json<WorkflowApiView>, Response> {
     verify_csrf(&state, &user, &request.csrf_token)?;
     let workflow = authorized_workflow(&state, &user, &workflow_id)?;
     if workflow.repo_id != request.repo_id {
@@ -1003,13 +1053,15 @@ async fn api_update_workflow(
             &parsed.job_schemas_json,
         )
         .map_err(internal_error)?;
-    Ok(Json(
-        state
-            .db
-            .get_workflow(&workflow.id)
-            .map_err(internal_error)?
-            .ok_or_else(|| not_found("workflow"))?,
-    ))
+    let workflow = state
+        .db
+        .get_workflow(&workflow.id)
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("workflow"))?;
+    Ok(Json(WorkflowApiView {
+        schema_status: workflow_schema_status(&state, &workflow).map_err(internal_error)?,
+        workflow,
+    }))
 }
 async fn api_list_pipelines(
     CurrentUser(user): CurrentUser,
@@ -1382,6 +1434,40 @@ fn workflow_runner_catalog(
         });
     }
     Ok(catalog)
+}
+
+fn workflow_schema_status(
+    state: &Arc<AppState>,
+    workflow: &Workflow,
+) -> Result<WorkflowSchemaStatus, Box<dyn std::error::Error>> {
+    let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)?;
+    let snapshot_json = state.db.workflow_job_schemas_json(&workflow.version_id)?;
+    let snapshot: Vec<RunnerJobSchema> = serde_json::from_str(&snapshot_json)?;
+    if snapshot.len() != definition.jobs.len() {
+        return Ok(WorkflowSchemaStatus::Incompatible);
+    }
+
+    let mut status = WorkflowSchemaStatus::Current;
+    for (job_index, job) in definition.jobs.iter().enumerate() {
+        let Some(saved_schema) = snapshot.get(job_index) else {
+            return Ok(WorkflowSchemaStatus::Incompatible);
+        };
+        let current_schema = state
+            .db
+            .list_runner_jobs(&job.runner_id)?
+            .into_iter()
+            .find(|(name, _)| name == &job.runner_job_name)
+            .map(|(_, definition_json)| serde_json::from_str::<RunnerJobSchema>(&definition_json))
+            .transpose()?;
+        let Some(current_schema) = current_schema else {
+            return Ok(WorkflowSchemaStatus::Incompatible);
+        };
+        if &current_schema != saved_schema {
+            status = WorkflowSchemaStatus::Stale;
+        }
+    }
+
+    Ok(status)
 }
 
 fn workflow_form_fields(

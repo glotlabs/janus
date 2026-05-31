@@ -116,6 +116,91 @@ async fn workflows_page_renders_runner_job_builder() {
 }
 
 #[tokio::test]
+async fn workflows_page_marks_stale_workflow_schemas() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "stale-workflow-page");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .replace_runner_jobs(
+            &fixture.runner_id,
+            &[(
+                "build-app".to_string(),
+                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true},"published":{"type":"boolean","required":false}},"outputs":{"app":{"type":"artifact","required":true}}}"#.to_string(),
+            )],
+        )
+        .expect("runner jobs");
+
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/workflows")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let html = String::from_utf8(body.to_vec()).expect("html");
+    assert!(html.contains("stale"));
+}
+
+#[tokio::test]
+async fn api_workflow_includes_schema_status() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "stale-workflow-api");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .replace_runner_jobs(
+            &fixture.runner_id,
+            &[(
+                "build-app".to_string(),
+                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true}},"outputs":{}}"#.to_string(),
+            )],
+        )
+        .expect("runner jobs");
+
+    let workflow = fixture
+        .state
+        .db
+        .workflows_for_repo(&repo.id)
+        .expect("workflows")
+        .into_iter()
+        .find(|workflow| workflow.name == "wf")
+        .expect("workflow");
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/workflows/{}", workflow.id))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: JsonValue = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["schema_status"], json!("stale"));
+    assert_eq!(payload["id"], json!(workflow.id));
+}
+
+#[tokio::test]
 async fn workflow_form_submission_accepts_structured_jobs_json() {
     let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
     let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
@@ -915,6 +1000,74 @@ async fn scheduler_reuses_dispatch_key_after_ambiguous_runner_create_failure() {
 }
 
 #[tokio::test]
+async fn enqueue_workflow_run_allows_stale_schema() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "stale-enqueue");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .replace_runner_jobs(
+            &fixture.runner_id,
+            &[(
+                "build-app".to_string(),
+                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true},"published":{"type":"boolean","required":false}},"outputs":{"app":{"type":"artifact","required":true}}}"#.to_string(),
+            )],
+        )
+        .expect("runner jobs");
+    let workflow = fixture
+        .state
+        .db
+        .workflows_for_repo(&repo.id)
+        .expect("workflows")
+        .remove(0);
+
+    let pipeline_id = scheduler::enqueue_workflow_run(
+        Arc::clone(&fixture.state),
+        &workflow,
+        "push",
+        Some("refs/heads/main"),
+        Some(&"1".repeat(40)),
+    )
+    .expect("stale workflow should still enqueue");
+
+    assert!(!pipeline_id.is_empty());
+}
+
+#[tokio::test]
+async fn enqueue_workflow_run_blocks_incompatible_schema() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "incompatible-enqueue");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .replace_runner_jobs(&fixture.runner_id, &[])
+        .expect("runner jobs");
+    let workflow = fixture
+        .state
+        .db
+        .workflows_for_repo(&repo.id)
+        .expect("workflows")
+        .remove(0);
+
+    let error = scheduler::enqueue_workflow_run(
+        Arc::clone(&fixture.state),
+        &workflow,
+        "push",
+        Some("refs/heads/main"),
+        Some(&"1".repeat(40)),
+    )
+    .expect_err("incompatible workflow should be blocked");
+
+    assert!(
+        error
+            .to_string()
+            .contains("incompatible workflow schema for workflow")
+    );
+}
+
+#[tokio::test]
 async fn cancel_pipeline_tracks_runner_cancel_progress() {
     let mock = spawn_mock_runner().await;
     let fixture = test_fixture_with_runner(&mock.base_url).await;
@@ -1358,7 +1511,14 @@ fn create_workflow_direct(state: &Arc<crate::app::AppState>, repo_id: &str, runn
     let job_schemas_json = workflow_job_schemas_json(state, &jobs);
     state
         .db
-        .create_workflow(repo_id, "wf", true, &trigger, &definition, &job_schemas_json)
+        .create_workflow(
+            repo_id,
+            "wf",
+            true,
+            &trigger,
+            &definition,
+            &job_schemas_json,
+        )
         .expect("workflow");
 }
 
@@ -1372,8 +1532,8 @@ fn create_workflow_with_jobs_direct(
         branches: vec!["main".to_string()],
     })
     .expect("trigger");
-    let definition = serde_json::to_string(&WorkflowDefinition { jobs: jobs.clone() })
-        .expect("definition");
+    let definition =
+        serde_json::to_string(&WorkflowDefinition { jobs: jobs.clone() }).expect("definition");
     let job_schemas_json = workflow_job_schemas_json(state, &jobs);
     state
         .db
