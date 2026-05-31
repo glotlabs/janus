@@ -31,7 +31,7 @@ export function renderInputTable({
   wrap.replaceChildren();
   if (inputs.length === 0) {
     wrap.appendChild(cloneTemplate(templates.inputsEmpty));
-    if (summary) summary.textContent = 'No inputs';
+    if (summary) summary.textContent = 'None';
     return;
   }
 
@@ -60,7 +60,7 @@ export function renderOutputTable({ derivedJobs, getJobDefinition, templates }) 
     const outputs = definition ? Object.entries(definition.outputs || {}) : [];
     wrap.replaceChildren();
     if (summary) summary.textContent = outputs.length === 0
-      ? 'No outputs'
+      ? 'None'
       : `${outputs.length} output${outputs.length === 1 ? '' : 's'}`;
 
     if (outputs.length === 0) {

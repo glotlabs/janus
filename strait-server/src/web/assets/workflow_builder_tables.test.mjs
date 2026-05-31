@@ -60,8 +60,8 @@ function workflowRow({ runnerId = 'runner-1', jobName = 'build', inputs = {} } =
 }
 
 const templates = {
-  inputsEmpty: emptyTemplate('No inputs'),
-  outputsEmpty: emptyTemplate('No outputs'),
+  inputsEmpty: emptyTemplate('None'),
+  outputsEmpty: emptyTemplate('None'),
   inputsTable: tableTemplate(),
   outputsTable: tableTemplate()
 };
@@ -94,8 +94,8 @@ test('renderInputTable renders empty state and summary', () => withFakeDocument(
     onBindingChanged() {}
   });
 
-  assert.equal(row.elements.inputSummary.textContent, 'No inputs');
-  assert.equal(row.elements.inputsWrap.children[0].textContent, 'No inputs');
+  assert.equal(row.elements.inputSummary.textContent, 'None');
+  assert.equal(row.elements.inputsWrap.children[0].textContent, 'None');
 }));
 
 test('renderInputTable renders input rows, required badge, and literal hint', () => withFakeDocument(() => {
@@ -200,8 +200,8 @@ test('renderOutputTable renders empty state and summary', () => withFakeDocument
     templates
   });
 
-  assert.equal(row.elements.outputSummary.textContent, 'No outputs');
-  assert.equal(row.elements.outputsWrap.children[0].textContent, 'No outputs');
+  assert.equal(row.elements.outputSummary.textContent, 'None');
+  assert.equal(row.elements.outputsWrap.children[0].textContent, 'None');
 }));
 
 test('renderOutputTable renders output rows', () => withFakeDocument(() => {

@@ -187,7 +187,7 @@ test('outputOptionsFor only exposes earlier matching outputs', () => {
   assert.deepEqual(outputOptionsFor(rows[1], derivedJobs, 'artifact', lookup.getJobDefinition), [
     {
       value: '{"kind":"job_output","job_index":0,"output_name":"app"}',
-      label: 'Linux / build -> app'
+      label: 'app (Linux.build)'
     }
   ]);
   assert.deepEqual(outputOptionsFor(rows[0], derivedJobs, 'artifact', lookup.getJobDefinition), []);

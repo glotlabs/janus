@@ -241,10 +241,10 @@ fn workflow_form_fields(form: WorkflowFormView) -> Markup {
                     }
                 }
                 template id="workflow-inputs-empty-template" {
-                    div class="muted" { "This runner job does not declare inputs." }
+                    div class="muted" { "None" }
                 }
                 template id="workflow-outputs-empty-template" {
-                    div class="muted" { "This runner job does not declare outputs." }
+                    div class="muted" { "None" }
                 }
                 template id="workflow-inputs-table-template" {
                     table class="inputs-table" {

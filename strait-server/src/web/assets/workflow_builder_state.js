@@ -153,11 +153,17 @@ export function outputOptionsFor(currentRow, derivedJobs, expectedKind, getJobDe
       if ((outputDef.type || '') !== expectedKind) continue;
       options.push({
         value: JSON.stringify({ kind: 'job_output', job_index: job.jobIndex, output_name: outputName }),
-        label: `${job.name} -> ${outputName}`
+        label: `${outputName} (${outputJobLabel(job)})`
       });
     }
   }
   return options;
+}
+
+function outputJobLabel(job) {
+  const runnerName = job.runner?.name || job.runnerId || 'runner';
+  const jobName = job.runnerJobName || job.name || `job-${job.jobIndex + 1}`;
+  return `${runnerName}.${jobName}`;
 }
 
 export function parseOutputBinding(value) {
