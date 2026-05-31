@@ -111,8 +111,6 @@ async fn git_push_triggers_pipeline_end_to_end() {
             "branches": ["main"],
             "jobs": [
                 {
-                    "id": "build",
-                    "name": "Build",
                     "runner_id": runner_id,
                     "runner_job_name": "build-app",
                     "inputs": {

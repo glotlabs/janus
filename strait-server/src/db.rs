@@ -774,7 +774,7 @@ impl Database {
         };
         let mut stmt = conn.prepare(
             "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json
-             FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_name",
+             FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY CAST(SUBSTR(job_id, 5) AS INTEGER), job_id",
         )?;
         let job_rows = stmt
             .query_map([pipeline_id], |row| {
@@ -1214,7 +1214,7 @@ impl Database {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT id, pipeline_run_id, job_id, job_name, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json
-             FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_name",
+             FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY CAST(SUBSTR(job_id, 5) AS INTEGER), job_id",
         )?;
         let rows = stmt.query_map([pipeline_id], |row| {
             Ok(JobRun {

@@ -93,7 +93,7 @@ pub(crate) fn enqueue_workflow_run(
         let run_id = state.db.create_job_run(
             &pipeline_id,
             &job.id,
-            &job.name,
+            &job.display_name(),
             &job.runner_id,
             &job.runner_job_name,
             job.allow_failure,

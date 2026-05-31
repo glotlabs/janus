@@ -119,8 +119,6 @@ async fn workflow_form_submission_accepts_structured_jobs_json() {
     let token = csrf_token(&fixture.state, &fixture.user);
     let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
     let jobs_json = serde_json::to_string(&vec![json!({
-        "id": "build",
-        "name": "Build",
         "runner_id": fixture.runner_id,
         "runner_job_name": "build-app",
         "inputs": {
@@ -165,7 +163,7 @@ async fn workflow_form_submission_accepts_structured_jobs_json() {
     let definition: WorkflowDefinition =
         serde_json::from_str(&workflow.definition_json).expect("definition");
     assert_eq!(definition.jobs.len(), 1);
-    assert_eq!(definition.jobs[0].id, "build");
+    assert_eq!(definition.jobs[0].id, "job-1");
     assert_eq!(definition.jobs[0].runner_job_name, "build-app");
     assert_eq!(
         definition.jobs[0].inputs.get("source"),
@@ -198,20 +196,16 @@ async fn workflow_form_rejects_missing_job_output_reference() {
     let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
     let jobs_json = serde_json::to_string(&vec![
         json!({
-            "id": "produce",
-            "name": "Produce",
             "runner_id": fixture.runner_id,
             "runner_job_name": "produce",
             "inputs": {},
             "allow_failure": false
         }),
         json!({
-            "id": "consume",
-            "name": "Consume",
             "runner_id": fixture.runner_id,
             "runner_job_name": "consume",
             "inputs": {
-                "version": "$job.produce.missing"
+                "version": "$job.job-1.missing"
             },
             "allow_failure": false
         }),
@@ -243,7 +237,7 @@ async fn workflow_form_rejects_missing_job_output_reference() {
         .await
         .expect("body");
     let text = String::from_utf8(body.to_vec()).expect("text");
-    assert!(text.contains("workflow input version references missing output produce.missing"));
+    assert!(text.contains("workflow input version references missing output job-1.missing"));
 }
 
 #[tokio::test]
@@ -271,20 +265,16 @@ async fn workflow_form_rejects_typed_output_input_mismatch() {
     let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
     let jobs_json = serde_json::to_string(&vec![
         json!({
-            "id": "produce",
-            "name": "Produce",
             "runner_id": fixture.runner_id,
             "runner_job_name": "produce",
             "inputs": {},
             "allow_failure": false
         }),
         json!({
-            "id": "consume",
-            "name": "Consume",
             "runner_id": fixture.runner_id,
             "runner_job_name": "consume",
             "inputs": {
-                "build_number": "$job.produce.build_number"
+                "build_number": "$job.job-1.build_number"
             },
             "allow_failure": false
         }),
@@ -316,84 +306,11 @@ async fn workflow_form_rejects_typed_output_input_mismatch() {
         .await
         .expect("body");
     let text = String::from_utf8(body.to_vec()).expect("text");
-    assert!(text.contains(
-        "workflow input build_number expects string but produce.build_number is integer"
-    ));
-}
-
-#[tokio::test]
-async fn workflow_form_rejects_non_artifact_artifacts_from_job() {
-    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
-    fixture
-        .state
-        .db
-        .replace_runner_jobs(
-            &fixture.runner_id,
-            &[
-                (
-                    "produce".to_string(),
-                    r#"{"name":"produce","timeout_seconds":60,"inputs":{},"outputs":{"version":{"type":"string","required":true}}}"#.to_string(),
-                ),
-                (
-                    "consume".to_string(),
-                    r#"{"name":"consume","timeout_seconds":60,"inputs":{},"outputs":{}}"#.to_string(),
-                ),
-            ],
+    assert!(
+        text.contains(
+            "workflow input build_number expects string but job-1.build_number is integer"
         )
-        .expect("runner jobs");
-    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo-artifacts-from");
-    let token = csrf_token(&fixture.state, &fixture.user);
-    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
-    let jobs_json = serde_json::to_string(&vec![
-        json!({
-            "id": "produce",
-            "name": "Produce",
-            "runner_id": fixture.runner_id,
-            "runner_job_name": "produce",
-            "inputs": {},
-            "artifacts_from": [],
-            "allow_failure": false
-        }),
-        json!({
-            "id": "consume",
-            "name": "Consume",
-            "runner_id": fixture.runner_id,
-            "runner_job_name": "consume",
-            "inputs": {},
-            "artifacts_from": ["produce"],
-            "allow_failure": false
-        }),
-    ])
-    .expect("jobs json");
-    let body = form_urlencoded::Serializer::new(String::new())
-        .append_pair("csrf_token", &token)
-        .append_pair("repo_id", &repo.id)
-        .append_pair("name", "wf")
-        .append_pair("trigger_kind", "push")
-        .append_pair("branch_name", "main")
-        .append_pair("jobs_json", &jobs_json)
-        .finish();
-
-    let response = fixture
-        .app
-        .clone()
-        .oneshot(
-            Request::post("/workflows")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .header("cookie", cookie)
-                .body(Body::from(body))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    let text = String::from_utf8(body.to_vec()).expect("text");
-    assert!(text.contains(
-        "job consume cannot use artifacts_from produce because that job exposes non-artifact outputs"
-    ));
+    );
 }
 
 #[tokio::test]
@@ -414,8 +331,6 @@ async fn workflow_form_rejects_literal_input_type_mismatch() {
     let token = csrf_token(&fixture.state, &fixture.user);
     let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
     let jobs_json = serde_json::to_string(&vec![json!({
-        "id": "build",
-        "name": "Build",
         "runner_id": fixture.runner_id,
         "runner_job_name": "build-app",
         "inputs": {
@@ -460,8 +375,6 @@ async fn workflow_form_rejects_unknown_literal_input_name() {
     let token = csrf_token(&fixture.state, &fixture.user);
     let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
     let jobs_json = serde_json::to_string(&vec![json!({
-        "id": "build",
-        "name": "Build",
         "runner_id": fixture.runner_id,
         "runner_job_name": "build-app",
         "inputs": {
@@ -497,7 +410,7 @@ async fn workflow_form_rejects_unknown_literal_input_name() {
         .expect("body");
     let text = String::from_utf8(body.to_vec()).expect("text");
     assert!(
-        text.contains("workflow job build provides unknown input bogus for runner job build-app")
+        text.contains("workflow job job-1 provides unknown input bogus for runner job build-app")
     );
 }
 
@@ -624,16 +537,13 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
         vec![
             WorkflowJobDefinition {
                 id: "produce".to_string(),
-                name: "Produce".to_string(),
                 runner_id: producer_runner_id,
                 runner_job_name: "produce-typed".to_string(),
                 inputs: BTreeMap::new(),
-                artifacts_from: Vec::new(),
                 allow_failure: false,
             },
             WorkflowJobDefinition {
                 id: "consume".to_string(),
-                name: "Consume".to_string(),
                 runner_id: consumer_runner_id,
                 runner_job_name: "consume-typed".to_string(),
                 inputs: BTreeMap::from([
@@ -645,7 +555,6 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
                     ("published".to_string(), json!("$job.produce.published")),
                     ("metadata".to_string(), json!("$job.produce.metadata")),
                 ]),
-                artifacts_from: Vec::new(),
                 allow_failure: false,
             },
         ],
@@ -732,23 +641,19 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
         vec![
             WorkflowJobDefinition {
                 id: "produce".to_string(),
-                name: "Produce".to_string(),
                 runner_id: producer_runner_id,
                 runner_job_name: "produce-int".to_string(),
                 inputs: BTreeMap::new(),
-                artifacts_from: Vec::new(),
                 allow_failure: false,
             },
             WorkflowJobDefinition {
                 id: "consume".to_string(),
-                name: "Consume".to_string(),
                 runner_id: consumer_runner_id,
                 runner_job_name: "consume-string".to_string(),
                 inputs: BTreeMap::from([(
                     "build_number".to_string(),
                     json!("$job.produce.build_number"),
                 )]),
-                artifacts_from: Vec::new(),
                 allow_failure: false,
             },
         ],
@@ -1425,14 +1330,12 @@ fn create_workflow_direct(state: &Arc<crate::app::AppState>, repo_id: &str, runn
     let definition = serde_json::to_string(&WorkflowDefinition {
         jobs: vec![WorkflowJobDefinition {
             id: "build".to_string(),
-            name: "Build".to_string(),
             runner_id: runner_id.to_string(),
             runner_job_name: "build-app".to_string(),
             inputs: BTreeMap::from([
                 ("commit".to_string(), json!("$commit")),
                 ("branch".to_string(), json!("$branch")),
             ]),
-            artifacts_from: Vec::new(),
             allow_failure: false,
         }],
     })

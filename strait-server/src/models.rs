@@ -127,13 +127,10 @@ pub struct WorkflowDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowJobDefinition {
     pub id: String,
-    pub name: String,
     pub runner_id: String,
     pub runner_job_name: String,
     #[serde(default)]
     pub inputs: BTreeMap<String, Value>,
-    #[serde(default)]
-    pub artifacts_from: Vec<String>,
     #[serde(default)]
     pub allow_failure: bool,
 }
@@ -150,6 +147,12 @@ impl WorkflowDefinition {
         }
 
         Ok(())
+    }
+}
+
+impl WorkflowJobDefinition {
+    pub fn display_name(&self) -> String {
+        format!("{} / {}", self.id, self.runner_job_name)
     }
 }
 

@@ -813,8 +813,6 @@ struct ApiWorkflowRequest {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ApiWorkflowJob {
-    id: String,
-    name: String,
     runner_id: String,
     runner_job_name: String,
     #[serde(default)]
@@ -1118,13 +1116,12 @@ fn parse_api_workflow_request(
     let jobs = request
         .jobs
         .iter()
-        .map(|job| WorkflowJobDefinition {
-            id: job.id.clone(),
-            name: job.name.clone(),
+        .enumerate()
+        .map(|(index, job)| WorkflowJobDefinition {
+            id: format!("job-{}", index + 1),
             runner_id: job.runner_id.clone(),
             runner_job_name: job.runner_job_name.clone(),
             inputs: job.inputs.clone(),
-            artifacts_from: Vec::new(),
             allow_failure: job.allow_failure,
         })
         .collect::<Vec<_>>();
@@ -1137,13 +1134,33 @@ fn parse_api_workflow_request(
     })
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct SubmittedWorkflowJob {
+    runner_id: String,
+    runner_job_name: String,
+    #[serde(default)]
+    inputs: BTreeMap<String, Value>,
+    #[serde(default)]
+    allow_failure: bool,
+}
+
 fn parse_workflow_form_jobs(input: &str) -> Result<Vec<WorkflowJobDefinition>, Response> {
-    let jobs = serde_json::from_str::<Vec<WorkflowJobDefinition>>(input)
+    let jobs = serde_json::from_str::<Vec<SubmittedWorkflowJob>>(input)
         .map_err(|error| bad_request(format!("invalid workflow jobs payload: {error}")))?;
     if jobs.is_empty() {
         return Err(bad_request("workflow must contain at least one job"));
     }
-    Ok(jobs)
+    Ok(jobs
+        .into_iter()
+        .enumerate()
+        .map(|(index, job)| WorkflowJobDefinition {
+            id: format!("job-{}", index + 1),
+            runner_id: job.runner_id,
+            runner_job_name: job.runner_job_name,
+            inputs: job.inputs,
+            allow_failure: job.allow_failure,
+        })
+        .collect())
 }
 
 fn validate_workflow_runners(
@@ -1271,45 +1288,6 @@ fn validate_workflow_runners(
                 )));
             }
         }
-
-        for upstream_job_id in &job.artifacts_from {
-            let upstream_job = definition
-                .jobs
-                .iter()
-                .find(|candidate| candidate.id == *upstream_job_id)
-                .ok_or_else(|| {
-                    bad_request(format!(
-                        "job {} references unknown artifacts_from job {upstream_job_id}",
-                        job.id
-                    ))
-                })?;
-            let Some(upstream_index) = definition
-                .jobs
-                .iter()
-                .position(|candidate| candidate.id == upstream_job.id)
-            else {
-                return Err(internal_error("failed to locate upstream job index"));
-            };
-            if upstream_index >= job_index {
-                return Err(bad_request(format!(
-                    "job {} references artifacts_from {upstream_job_id} but only earlier jobs can be referenced",
-                    job.id
-                )));
-            }
-            let upstream_runner_job = runner_job_defs
-                .get(&upstream_job.id)
-                .ok_or_else(|| internal_error("missing upstream runner job definition"))?;
-            if upstream_runner_job
-                .outputs
-                .values()
-                .any(|output| output.kind != "artifact")
-            {
-                return Err(bad_request(format!(
-                    "job {} cannot use artifacts_from {upstream_job_id} because that job exposes non-artifact outputs",
-                    job.id
-                )));
-            }
-        }
     }
     Ok(())
 }
@@ -1350,8 +1328,6 @@ struct WorkflowRunnerCatalogEntry {
 
 #[derive(Debug, Clone, Serialize)]
 struct WorkflowEditorJob {
-    id: String,
-    name: String,
     runner_id: String,
     runner_job_name: String,
     allow_failure: bool,
@@ -1493,8 +1469,6 @@ fn workflow_form_fields(
         .jobs
         .iter()
         .map(|job| WorkflowEditorJob {
-            id: job.id.clone(),
-            name: job.name.clone(),
             runner_id: job.runner_id.clone(),
             runner_job_name: job.runner_job_name.clone(),
             allow_failure: job.allow_failure,
@@ -1524,8 +1498,6 @@ fn workflow_form_fields(
             })
             .unwrap_or_default();
         initial_jobs.push(WorkflowEditorJob {
-            id: String::new(),
-            name: String::new(),
             runner_id,
             runner_job_name,
             allow_failure: false,
@@ -1559,13 +1531,6 @@ fn workflow_form_fields(
 
   function makeSelect() {{
     return document.createElement('select');
-  }}
-
-  function slugify(value) {{
-    return (value || 'job')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '') || 'job';
   }}
 
   function getRunner(runnerId) {{
@@ -1641,15 +1606,11 @@ fn workflow_form_fields(
   }}
 
   function buildDerivedJobs(rows) {{
-    const counts = new Map();
-    return rows.map((row) => {{
+    return rows.map((row, index) => {{
       const runnerId = row.querySelector('[data-field="runner_id"]').value.trim();
       const runnerJobName = row.querySelector('[data-field="runner_job_name"]').value.trim();
       const runner = getRunner(runnerId);
-      const baseId = slugify(`${{runner ? runner.name : runnerId}}-${{runnerJobName || 'job'}}`);
-      const seen = (counts.get(baseId) || 0) + 1;
-      counts.set(baseId, seen);
-      const derivedId = seen === 1 ? baseId : `${{baseId}}-${{seen}}`;
+      const derivedId = `job-${{index + 1}}`;
       return {{
         row,
         runner,
@@ -1741,8 +1702,6 @@ fn workflow_form_fields(
           return acc;
         }}, {{}});
       return {{
-        id: job.id,
-        name: job.name,
         runner_id: job.runnerId,
         runner_job_name: job.runnerJobName,
         inputs: inputsMap,
@@ -2384,7 +2343,12 @@ fn render_workflow_job_chips(definition: &WorkflowDefinition) -> String {
     definition
         .jobs
         .iter()
-        .map(|job| format!(r#"<span class="chip">{}</span>"#, html_escape(&job.name)))
+        .map(|job| {
+            format!(
+                r#"<span class="chip">{}</span>"#,
+                html_escape(&job.display_name())
+            )
+        })
         .collect::<Vec<_>>()
         .join("")
 }
