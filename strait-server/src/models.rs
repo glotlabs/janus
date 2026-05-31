@@ -241,12 +241,6 @@ impl WorkflowDefinition {
     }
 }
 
-impl WorkflowJobDefinition {
-    pub fn display_name(&self, job_index: usize) -> String {
-        format!("job-{} / {}", job_index + 1, self.runner_job_name)
-    }
-}
-
 impl JobRun {
     pub fn display_name(&self) -> String {
         format!("job-{} / {}", self.job_index + 1, self.runner_job_name)

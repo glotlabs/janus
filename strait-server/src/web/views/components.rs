@@ -1,7 +1,5 @@
 use maud::{DOCTYPE, Markup, html};
 
-use crate::models::WorkflowDefinition;
-
 pub(super) fn layout(title: &str, body: Markup) -> Markup {
     html! {
         (DOCTYPE)
@@ -112,16 +110,5 @@ pub(super) fn runner_state_tone(state: &str) -> &'static str {
         "healthy" => "success",
         "unknown" => "warning",
         _ => "danger",
-    }
-}
-
-pub(super) fn render_workflow_job_chips(definition: &WorkflowDefinition) -> Markup {
-    if definition.jobs.is_empty() {
-        return badge("no jobs", "neutral");
-    }
-    html! {
-        @for (index, job) in definition.jobs.iter().enumerate() {
-            span class="chip" { (job.display_name(index)) }
-        }
     }
 }

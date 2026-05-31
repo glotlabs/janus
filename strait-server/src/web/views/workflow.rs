@@ -1,15 +1,16 @@
 use maud::{Markup, PreEscaped, html};
 
-use crate::models::{Repo, Workflow, WorkflowDefinition, WorkflowTrigger};
+use crate::models::{Repo, Workflow, WorkflowTrigger};
 
-use super::components::{badge, csrf_input, layout, page_intro, render_workflow_job_chips, x_mark};
+use super::components::{badge, csrf_input, layout, page_intro, x_mark};
 use crate::web::routes::WorkflowSchemaStatus;
 
 pub(crate) struct WorkflowCard {
     pub workflow: Workflow,
+    pub repo: Repo,
     pub schema_status: WorkflowSchemaStatus,
     pub trigger: WorkflowTrigger,
-    pub definition: WorkflowDefinition,
+    pub job_count: usize,
 }
 
 pub(crate) struct WorkflowFormView {
@@ -62,21 +63,17 @@ pub(crate) fn workflows_page(
                                     h3 {
                                         a href=(format!("/workflows/{}", card.workflow.id)) { (card.workflow.name) }
                                     }
-                                    p class="muted" { "Repo: " code { (card.workflow.repo_id) } }
                                 }
                                 div class="badge-row" {
-                                    (badge("workflow", "neutral"))
                                     (badge(card.schema_status.as_str(), card.schema_status.tone()))
+                                    (badge(&format!("v{}", card.workflow.version), "neutral"))
                                 }
                             }
                             div class="meta-grid" {
-                                div class="meta-pair" { span { "Trigger" } strong { (card.trigger.kind) } }
+                                div class="meta-pair" { span { "Repo" } strong { (card.repo.name) } }
                                 div class="meta-pair" { span { "Branches" } strong { (card.trigger.branches.join(", ")) } }
-                                div class="meta-pair" { span { "Version" } strong { (card.workflow.version) } }
-                                div class="meta-pair" { span { "Jobs" } strong { (card.definition.jobs.len()) } }
-                            }
-                            div class="chip-row" {
-                                (render_workflow_job_chips(&card.definition))
+                                div class="meta-pair" { span { "Trigger" } strong { (card.trigger.kind) } }
+                                div class="meta-pair" { span { "Jobs" } strong { (card.job_count) } }
                             }
                         }
                     }

@@ -533,10 +533,14 @@ async fn workflows_page(
     let form = workflow_form_view(None, &runner_catalog, repo_select);
     let workflow_cards = workflows
         .into_iter()
-        .filter(|item| repo_ids_contains(&repos, &item.repo_id))
-        .map(|workflow| {
+        .filter_map(|workflow| {
+            let repo = repos.iter().find(|repo| repo.id == workflow.repo_id)?.clone();
             let schema_status =
-                workflow_schema_status(&state, &workflow).map_err(internal_error)?;
+                workflow_schema_status(&state, &workflow).map_err(internal_error);
+            Some((workflow, repo, schema_status))
+        })
+        .map(|(workflow, repo, schema_status)| {
+            let schema_status = schema_status?;
             let trigger: WorkflowTrigger =
                 serde_json::from_str(&workflow.trigger_json).unwrap_or(WorkflowTrigger {
                     kind: "push".to_string(),
@@ -546,9 +550,10 @@ async fn workflows_page(
                 .unwrap_or(WorkflowDefinition { jobs: Vec::new() });
             Ok(workflow_view::WorkflowCard {
                 workflow,
+                repo,
                 schema_status,
                 trigger,
-                definition,
+                job_count: definition.jobs.len(),
             })
         })
         .collect::<Result<Vec<_>, Response>>()?;
@@ -1444,9 +1449,6 @@ fn visible_repos_for_user(state: &Arc<AppState>, user: &User) -> Result<Vec<Repo
 }
 fn can_view_repo(user: &User, repo: &Repo) -> bool {
     user.role == "admin" || repo.owner_id == user.id
-}
-fn repo_ids_contains(repos: &[Repo], repo_id: &str) -> bool {
-    repos.iter().any(|repo| repo.id == repo_id)
 }
 fn authorized_repo(state: &Arc<AppState>, user: &User, repo_id: &str) -> Result<Repo, Response> {
     let repo = state
