@@ -60,6 +60,10 @@ pub(crate) fn build_router(state: Arc<AppState>) -> Router {
             "/assets/workflow_builder_dom.js",
             get(asset_workflow_builder_dom_js),
         )
+        .route(
+            "/assets/workflow_builder_state.js",
+            get(asset_workflow_builder_state_js),
+        )
         .route("/assets/pipeline_events.js", get(asset_pipeline_events_js))
         .route("/users", get(users_page).post(create_user))
         .route("/repos", get(repos_page).post(create_repo))
@@ -134,6 +138,12 @@ async fn asset_workflow_builder_dom_js() -> EmbeddedAsset {
     embedded_asset(
         "text/javascript; charset=utf-8",
         include_str!("assets/workflow_builder_dom.js"),
+    )
+}
+async fn asset_workflow_builder_state_js() -> EmbeddedAsset {
+    embedded_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("assets/workflow_builder_state.js"),
     )
 }
 async fn asset_pipeline_events_js() -> EmbeddedAsset {

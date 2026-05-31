@@ -111,6 +111,18 @@ async fn workflows_page_renders_runner_job_builder() {
     assert!(html.contains("build-app"));
     assert!(html.contains("test-app"));
     assert!(html.contains("\"commit\""));
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/assets/workflow_builder_state.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

@@ -177,6 +177,96 @@ fn workflow_form_fields(form: WorkflowFormView) -> Markup {
                 }
             }
             div id="workflow-builder" class="stack-md" {
+                template id="workflow-job-row-template" {
+                    fieldset class="job-builder-row" data-workflow-job-row="true" {
+                        label {
+                            span { "Runner" }
+                            select data-field="runner_id" {}
+                        }
+                        label {
+                            span { "Job" }
+                            select data-field="runner_job_name" {}
+                        }
+                        label {
+                            span { "Inputs" }
+                            button type="button" class="input-summary-trigger ghost" data-input-summary="true" {}
+                        }
+                        label {
+                            span { "Outputs" }
+                            button type="button" class="input-summary-trigger ghost" data-output-summary="true" {}
+                        }
+                        dialog class="inputs-dialog" data-inputs-dialog="true" {
+                            div class="dialog-card" {
+                                div class="section-head" {
+                                    div {
+                                        div class="eyebrow" { "Inputs" }
+                                        h3 { "Configure job inputs" }
+                                        p class="muted" {
+                                            "Bindings are saved back into the workflow when you submit the form."
+                                        }
+                                    }
+                                    button type="button" class="ghost" data-dialog-close="inputs" { "Close" }
+                                }
+                                div class="inputs-wrap" data-inputs-wrap="true" {}
+                                div class="actions" {
+                                    button type="button" data-dialog-close="inputs" { "Done" }
+                                }
+                            }
+                        }
+                        dialog class="inputs-dialog" data-outputs-dialog="true" {
+                            div class="dialog-card" {
+                                div class="section-head" {
+                                    div {
+                                        div class="eyebrow" { "Outputs" }
+                                        h3 { "Declared job outputs" }
+                                        p class="muted" {
+                                            "Runner jobs can expose artifact or typed outputs, which downstream jobs can consume."
+                                        }
+                                    }
+                                    button type="button" class="ghost" data-dialog-close="outputs" { "Close" }
+                                }
+                                div class="inputs-wrap" data-outputs-wrap="true" {}
+                                div class="actions" {
+                                    button type="button" data-dialog-close="outputs" { "Done" }
+                                }
+                            }
+                        }
+                        div class="job-row-remove" {
+                            button type="button" class="ghost" data-remove-job="true" { "Remove job" }
+                        }
+                    }
+                }
+                template id="workflow-inputs-empty-template" {
+                    div class="muted" { "This runner job does not declare inputs." }
+                }
+                template id="workflow-outputs-empty-template" {
+                    div class="muted" { "This runner job does not declare outputs." }
+                }
+                template id="workflow-inputs-table-template" {
+                    table class="inputs-table" {
+                        thead {
+                            tr {
+                                th { "Input" }
+                                th { "Type" }
+                                th { "Binding" }
+                                th { "Value" }
+                            }
+                        }
+                        tbody data-table-body="true" {}
+                    }
+                }
+                template id="workflow-outputs-table-template" {
+                    table class="inputs-table" {
+                        thead {
+                            tr {
+                                th { "Output" }
+                                th { "Type" }
+                                th { "Required" }
+                            }
+                        }
+                        tbody data-table-body="true" {}
+                    }
+                }
                 div id="workflow-job-list" class="stack-md" {}
                 div class="actions" {
                     button type="button" id="workflow-add-job" class="secondary" { "Add job" }

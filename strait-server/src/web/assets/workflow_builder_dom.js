@@ -13,37 +13,27 @@ export function makeSelect() {
   return document.createElement('select');
 }
 
-export function labelWrap(text, input) {
-  const label = document.createElement('label');
-  const caption = document.createElement('span');
-  caption.textContent = text;
-  label.appendChild(caption);
-  label.appendChild(input);
-  return label;
+export function cloneTemplate(template) {
+  return template.content.firstElementChild.cloneNode(true);
 }
 
-export function tableHead(labels) {
-  const thead = document.createElement('thead');
-  const row = document.createElement('tr');
-  for (const label of labels) {
-    const cell = document.createElement('th');
-    cell.textContent = label;
-    row.appendChild(cell);
+export function replaceOptions(select, options, selectedValue, config = {}) {
+  select.replaceChildren();
+  if (config.placeholder) {
+    const placeholder = document.createElement('option');
+    placeholder.value = config.placeholder.value || '';
+    placeholder.textContent = config.placeholder.label;
+    placeholder.selected = !selectedValue || Boolean(config.placeholder.selected);
+    select.appendChild(placeholder);
   }
-  thead.appendChild(row);
-  return thead;
-}
-
-export function sectionHeader(eyebrowText, titleText, noteText) {
-  const wrap = document.createElement('div');
-  const eyebrow = document.createElement('div');
-  eyebrow.className = 'eyebrow';
-  eyebrow.textContent = eyebrowText;
-  const title = document.createElement('h3');
-  title.textContent = titleText;
-  const note = document.createElement('p');
-  note.className = 'muted';
-  note.textContent = noteText;
-  wrap.append(eyebrow, title, note);
-  return wrap;
+  for (const optionData of options) {
+    const option = document.createElement('option');
+    option.value = optionData.value;
+    option.textContent = optionData.label;
+    option.selected = optionData.value === selectedValue;
+    select.appendChild(option);
+  }
+  if (config.selectFirst && !select.value && options.length > 0) {
+    select.value = options[0].value;
+  }
 }
