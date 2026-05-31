@@ -17,10 +17,7 @@ use axum::{
 };
 use serde_json::{Map, json};
 use sha2::Digest;
-use strait_lib::{
-    HEADER_IDEMPOTENCY_KEY, ROUTE_RUNNER_JOB_RUNS, ROUTE_RUNNER_JOBS, ROUTE_RUNNER_RUN_BY_ID,
-    ROUTE_RUNNER_RUN_LOGS, runner_job_run_path, runner_run_logs_path, runner_run_path,
-};
+use strait_lib::{HEADER_IDEMPOTENCY_KEY, RunnerRoute, RunnerRouteTemplate};
 use tokio::time::{Duration, sleep};
 use tower::util::ServiceExt;
 use uuid::Uuid;
@@ -1144,16 +1141,16 @@ async fn runner_http_contract_serializes_shared_dtos() {
     let temp = temp_dir("runner_http_contract");
     let state = test_state(&temp);
     let app = Router::new()
-        .route(ROUTE_RUNNER_JOBS, get(list_jobs))
-        .route(ROUTE_RUNNER_JOB_RUNS, post(create_job_impl))
-        .route(ROUTE_RUNNER_RUN_BY_ID, get(get_job))
-        .route(ROUTE_RUNNER_RUN_LOGS, get(get_job_logs))
+        .route(RunnerRouteTemplate::Jobs.path(), get(list_jobs))
+        .route(RunnerRouteTemplate::JobRuns.path(), post(create_job_impl))
+        .route(RunnerRouteTemplate::Run.path(), get(get_job))
+        .route(RunnerRouteTemplate::RunLogs.path(), get(get_job_logs))
         .with_state(state);
 
     let response = app
         .clone()
         .oneshot(
-            Request::get(ROUTE_RUNNER_JOBS)
+            Request::get(RunnerRoute::Jobs.path())
                 .header("authorization", "Bearer runner-token")
                 .body(Body::empty())
                 .expect("request should build"),
@@ -1171,14 +1168,19 @@ async fn runner_http_contract_serializes_shared_dtos() {
     let response = app
         .clone()
         .oneshot(
-            Request::post(runner_job_run_path("build-app"))
-                .header("authorization", "Bearer runner-token")
-                .header("content-type", "application/json")
-                .header(HEADER_IDEMPOTENCY_KEY, "contract_dispatch_1")
-                .body(Body::from(
-                    json!({"commit":"abc123","branch":"main"}).to_string(),
-                ))
-                .expect("request should build"),
+            Request::post(
+                RunnerRoute::JobRuns {
+                    job_name: "build-app",
+                }
+                .path(),
+            )
+            .header("authorization", "Bearer runner-token")
+            .header("content-type", "application/json")
+            .header(HEADER_IDEMPOTENCY_KEY, "contract_dispatch_1")
+            .body(Body::from(
+                json!({"commit":"abc123","branch":"main"}).to_string(),
+            ))
+            .expect("request should build"),
         )
         .await
         .expect("request should succeed");
@@ -1193,10 +1195,15 @@ async fn runner_http_contract_serializes_shared_dtos() {
     let response = app
         .clone()
         .oneshot(
-            Request::get(runner_run_path(&created.job_id))
-                .header("authorization", "Bearer runner-token")
-                .body(Body::empty())
-                .expect("request should build"),
+            Request::get(
+                RunnerRoute::Run {
+                    job_id: &created.job_id,
+                }
+                .path(),
+            )
+            .header("authorization", "Bearer runner-token")
+            .body(Body::empty())
+            .expect("request should build"),
         )
         .await
         .expect("request should succeed");
@@ -1210,10 +1217,15 @@ async fn runner_http_contract_serializes_shared_dtos() {
 
     let response = app
         .oneshot(
-            Request::get(runner_run_logs_path(&created.job_id))
-                .header("authorization", "Bearer runner-token")
-                .body(Body::empty())
-                .expect("request should build"),
+            Request::get(
+                RunnerRoute::RunLogs {
+                    job_id: &created.job_id,
+                }
+                .path(),
+            )
+            .header("authorization", "Bearer runner-token")
+            .body(Body::empty())
+            .expect("request should build"),
         )
         .await
         .expect("request should succeed");

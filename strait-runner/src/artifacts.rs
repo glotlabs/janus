@@ -652,10 +652,7 @@ mod tests {
         routing::{get, post},
     };
     use sha2::{Digest, Sha256};
-    use strait_lib::{
-        ArtifactUploadResponse, HEADER_SHA256, ROUTE_RUNNER_ARTIFACT_BY_ID, ROUTE_RUNNER_ARTIFACTS,
-        runner_artifact_path,
-    };
+    use strait_lib::{ArtifactUploadResponse, HEADER_SHA256, RunnerRoute, RunnerRouteTemplate};
     use tower::util::ServiceExt;
 
     use super::{ArtifactStore, download_artifact, upload_artifact};
@@ -714,8 +711,8 @@ mod tests {
         let temp = temp_dir("artifact_http");
         let state = test_state(&temp);
         let app = Router::new()
-            .route(ROUTE_RUNNER_ARTIFACTS, post(upload_artifact))
-            .route(ROUTE_RUNNER_ARTIFACT_BY_ID, get(download_artifact))
+            .route(RunnerRouteTemplate::Artifacts.path(), post(upload_artifact))
+            .route(RunnerRouteTemplate::Artifact.path(), get(download_artifact))
             .with_state(state);
         let payload = b"artifact-body";
         let checksum = hex::encode(Sha256::digest(payload));
@@ -723,7 +720,7 @@ mod tests {
         let upload = app
             .clone()
             .oneshot(
-                Request::post(ROUTE_RUNNER_ARTIFACTS)
+                Request::post(RunnerRoute::Artifacts.path())
                     .header("authorization", "Bearer artifacts-write-token")
                     .header("content-type", "application/octet-stream")
                     .header(HEADER_SHA256, checksum.as_str())
@@ -742,10 +739,15 @@ mod tests {
 
         let download = app
             .oneshot(
-                Request::get(runner_artifact_path(&metadata.artifact_id))
-                    .header("authorization", "Bearer artifacts-read-token")
-                    .body(Body::empty())
-                    .expect("request should build"),
+                Request::get(
+                    RunnerRoute::Artifact {
+                        artifact_id: &metadata.artifact_id,
+                    }
+                    .path(),
+                )
+                .header("authorization", "Bearer artifacts-read-token")
+                .body(Body::empty())
+                .expect("request should build"),
             )
             .await
             .expect("request should succeed");

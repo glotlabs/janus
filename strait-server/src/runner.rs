@@ -2,9 +2,7 @@ use reqwest::{Client, StatusCode};
 use serde_json::Value;
 pub use strait_lib::{
     ArtifactUploadResponse, HEADER_IDEMPOTENCY_KEY, HEADER_SHA256, JobCreatedResponse,
-    JobLogsResponse, JobOutputMetadata, JobStatusResponse, ROUTE_RUNNER_ARTIFACTS,
-    ROUTE_RUNNER_JOBS, runner_artifact_path, runner_job_run_path, runner_run_logs_path,
-    runner_run_path,
+    JobLogsResponse, JobOutputMetadata, JobStatusResponse, RunnerRoute,
 };
 
 use crate::models::{Runner, RunnerJobDefinition};
@@ -27,7 +25,7 @@ impl RunnerClient {
     ) -> Result<Vec<RunnerJobDefinition>, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .get(runner_url(runner, ROUTE_RUNNER_JOBS))
+            .get(runner_url(runner, RunnerRoute::Jobs))
             .bearer_auth(&runner.token)
             .send()
             .await?;
@@ -45,7 +43,7 @@ impl RunnerClient {
     ) -> Result<ArtifactUploadResponse, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .post(runner_url(runner, ROUTE_RUNNER_ARTIFACTS))
+            .post(runner_url(runner, RunnerRoute::Artifacts))
             .bearer_auth(&runner.token)
             .header(HEADER_SHA256, sha256)
             .body(bytes)
@@ -66,7 +64,12 @@ impl RunnerClient {
     ) -> Result<JobCreatedResponse, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .post(runner_url(runner, &runner_job_run_path(runner_job_name)))
+            .post(runner_url(
+                runner,
+                RunnerRoute::JobRuns {
+                    job_name: runner_job_name,
+                },
+            ))
             .bearer_auth(&runner.token)
             .header(HEADER_IDEMPOTENCY_KEY, idempotency_key)
             .json(&body)
@@ -85,7 +88,12 @@ impl RunnerClient {
     ) -> Result<JobStatusResponse, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .get(runner_url(runner, &runner_run_path(runner_run_id)))
+            .get(runner_url(
+                runner,
+                RunnerRoute::Run {
+                    job_id: runner_run_id,
+                },
+            ))
             .bearer_auth(&runner.token)
             .send()
             .await?;
@@ -102,7 +110,12 @@ impl RunnerClient {
     ) -> Result<JobLogsResponse, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .get(runner_url(runner, &runner_run_logs_path(runner_run_id)))
+            .get(runner_url(
+                runner,
+                RunnerRoute::RunLogs {
+                    job_id: runner_run_id,
+                },
+            ))
             .bearer_auth(&runner.token)
             .send()
             .await?;
@@ -119,7 +132,12 @@ impl RunnerClient {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .delete(runner_url(runner, &runner_run_path(runner_run_id)))
+            .delete(runner_url(
+                runner,
+                RunnerRoute::Run {
+                    job_id: runner_run_id,
+                },
+            ))
             .bearer_auth(&runner.token)
             .send()
             .await?;
@@ -136,7 +154,7 @@ impl RunnerClient {
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .get(runner_url(runner, &runner_artifact_path(artifact_id)))
+            .get(runner_url(runner, RunnerRoute::Artifact { artifact_id }))
             .bearer_auth(&runner.token)
             .send()
             .await?;
@@ -147,8 +165,8 @@ impl RunnerClient {
     }
 }
 
-fn runner_url(runner: &Runner, path: &str) -> String {
-    format!("{}{}", runner.base_url.trim_end_matches('/'), path)
+fn runner_url(runner: &Runner, route: RunnerRoute<'_>) -> String {
+    format!("{}{}", runner.base_url.trim_end_matches('/'), route.path())
 }
 
 async fn runner_http_error(

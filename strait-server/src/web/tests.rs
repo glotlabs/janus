@@ -28,10 +28,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-use strait_lib::{
-    HEADER_IDEMPOTENCY_KEY, ROUTE_RUNNER_ARTIFACT_BY_ID, ROUTE_RUNNER_ARTIFACTS,
-    ROUTE_RUNNER_JOB_RUNS, ROUTE_RUNNER_JOBS, ROUTE_RUNNER_RUN_BY_ID, ROUTE_RUNNER_RUN_LOGS,
-};
+use strait_lib::{HEADER_IDEMPOTENCY_KEY, RunnerRouteTemplate};
 use tokio::time::sleep;
 use tower::util::ServiceExt;
 use url::form_urlencoded;
@@ -1964,15 +1961,21 @@ async fn spawn_mock_runner_with_options(
         terminal_outcome,
     });
     let app = Router::new()
-        .route(ROUTE_RUNNER_JOBS, get(mock_list_jobs))
-        .route(ROUTE_RUNNER_JOB_RUNS, post(mock_create_run))
+        .route(RunnerRouteTemplate::Jobs.path(), get(mock_list_jobs))
+        .route(RunnerRouteTemplate::JobRuns.path(), post(mock_create_run))
         .route(
-            ROUTE_RUNNER_RUN_BY_ID,
+            RunnerRouteTemplate::Run.path(),
             get(mock_get_run).delete(mock_cancel_run),
         )
-        .route(ROUTE_RUNNER_RUN_LOGS, get(mock_logs))
-        .route(ROUTE_RUNNER_ARTIFACTS, post(mock_artifact_upload))
-        .route(ROUTE_RUNNER_ARTIFACT_BY_ID, get(mock_artifact_download))
+        .route(RunnerRouteTemplate::RunLogs.path(), get(mock_logs))
+        .route(
+            RunnerRouteTemplate::Artifacts.path(),
+            post(mock_artifact_upload),
+        )
+        .route(
+            RunnerRouteTemplate::Artifact.path(),
+            get(mock_artifact_download),
+        )
         .with_state(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
