@@ -22,7 +22,7 @@ use jobs::JobStore;
 use manifest::ManifestStore;
 use rate_limit::RateLimiter;
 use serde::Serialize;
-use strait_lib::RunnerRouteTemplate;
+use strait_lib::{RunnerCapabilitiesResponse, RunnerRouteTemplate};
 use tokio::time::{self, MissedTickBehavior};
 use tracing::{info, warn};
 
@@ -248,6 +248,7 @@ fn build_app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ready", get(readiness))
         .route("/readiness", get(readiness))
+        .route(RunnerRouteTemplate::Capabilities.path(), get(capabilities))
         .route(RunnerRouteTemplate::Jobs.path(), get(jobs::list_jobs))
         .route(
             RunnerRouteTemplate::Artifacts.path(),
@@ -264,6 +265,10 @@ fn build_app(state: AppState) -> Router {
         )
         .route(RunnerRouteTemplate::RunLogs.path(), get(jobs::get_job_logs))
         .with_state(state)
+}
+
+async fn capabilities() -> Json<RunnerCapabilitiesResponse> {
+    Json(RunnerCapabilitiesResponse::current())
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -358,6 +363,7 @@ mod tests {
         http::{Request, StatusCode},
     };
     use sha2::{Digest, Sha256};
+    use strait_lib::{RUNNER_PROTOCOL_VERSION, RunnerRoute};
     use tower::util::ServiceExt;
 
     use super::{AppState, RuntimeStatus, build_app};
@@ -391,6 +397,35 @@ mod tests {
             .expect("response body");
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("health json");
         assert_eq!(payload["status"], "shutting_down");
+    }
+
+    #[tokio::test]
+    async fn capabilities_reports_runner_protocol_versions() {
+        let temp = temp_dir("capabilities");
+        let state = test_state(&temp);
+        let app = build_app(state);
+
+        let response = app
+            .oneshot(
+                Request::get(RunnerRoute::Capabilities.path())
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let payload: strait_lib::RunnerCapabilitiesResponse =
+            serde_json::from_slice(&body).expect("capabilities json");
+        assert_eq!(payload.protocol_version, RUNNER_PROTOCOL_VERSION);
+        assert!(
+            payload
+                .supported_protocol_versions
+                .contains(&RUNNER_PROTOCOL_VERSION)
+        );
     }
 
     #[tokio::test]

@@ -18,6 +18,7 @@ use axum::{
 use reqwest::Client;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use strait_lib::{RunnerCapabilitiesResponse, RunnerRouteTemplate};
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -304,12 +305,22 @@ async fn spawn_mock_runner() -> MockRunner {
         runs: Mutex::new(BTreeMap::new()),
     });
     let app = Router::new()
-        .route("/jobs", get(mock_list_jobs))
-        .route("/jobs/{name}/runs", post(mock_create_run))
-        .route("/runs/{job_id}", get(mock_get_run))
-        .route("/runs/{job_id}/logs", get(mock_logs))
-        .route("/artifacts", post(mock_artifact_upload))
-        .route("/artifacts/{artifact_id}", get(mock_artifact_download))
+        .route(
+            RunnerRouteTemplate::Capabilities.path(),
+            get(mock_capabilities),
+        )
+        .route(RunnerRouteTemplate::Jobs.path(), get(mock_list_jobs))
+        .route(RunnerRouteTemplate::JobRuns.path(), post(mock_create_run))
+        .route(RunnerRouteTemplate::Run.path(), get(mock_get_run))
+        .route(RunnerRouteTemplate::RunLogs.path(), get(mock_logs))
+        .route(
+            RunnerRouteTemplate::Artifacts.path(),
+            post(mock_artifact_upload),
+        )
+        .route(
+            RunnerRouteTemplate::Artifact.path(),
+            get(mock_artifact_download),
+        )
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -321,6 +332,10 @@ async fn spawn_mock_runner() -> MockRunner {
     MockRunner {
         base_url: format!("http://{}", addr),
     }
+}
+
+async fn mock_capabilities() -> Json<RunnerCapabilitiesResponse> {
+    Json(RunnerCapabilitiesResponse::current())
 }
 
 async fn mock_list_jobs() -> Json<Value> {

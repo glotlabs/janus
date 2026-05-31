@@ -1141,6 +1141,10 @@ async fn runner_http_contract_serializes_shared_dtos() {
     let temp = temp_dir("runner_http_contract");
     let state = test_state(&temp);
     let app = Router::new()
+        .route(
+            RunnerRouteTemplate::Capabilities.path(),
+            get(|| async { axum::Json(strait_lib::RunnerCapabilitiesResponse::current()) }),
+        )
         .route(RunnerRouteTemplate::Jobs.path(), get(list_jobs))
         .route(RunnerRouteTemplate::JobRuns.path(), post(create_job_impl))
         .route(RunnerRouteTemplate::Run.path(), get(get_job))

@@ -3,7 +3,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use glob::Pattern;
 use serde_json::{Map, Value, json};
-use strait_lib::{FailureCategory, JobOutput, JobStatus as RunnerJobStatus};
+use strait_lib::{
+    FailureCategory, JobOutput, JobStatus as RunnerJobStatus, SUPPORTED_RUNNER_PROTOCOL_VERSIONS,
+};
 use tokio::time::{self, Duration, MissedTickBehavior};
 use tracing::{error, info, warn};
 
@@ -957,9 +959,33 @@ fn matches_branch(patterns: &[String], ref_name: &str) -> bool {
     })
 }
 
-async fn refresh_runner_health(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn refresh_runner_health(
+    state: Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let runners = state.db.list_runners()?;
     for runner in runners.into_iter().filter(|item| item.enabled) {
+        match state.runner_client.capabilities(&runner).await {
+            Ok(capabilities) => {
+                if !capabilities
+                    .is_compatible_with_supported_versions(SUPPORTED_RUNNER_PROTOCOL_VERSIONS)
+                {
+                    warn!(
+                        runner = %runner.name,
+                        protocol_version = capabilities.protocol_version,
+                        supported_protocol_versions = ?capabilities.supported_protocol_versions,
+                        server_supported_protocol_versions = ?SUPPORTED_RUNNER_PROTOCOL_VERSIONS,
+                        "runner protocol is incompatible"
+                    );
+                    state.db.update_runner_health(&runner.id, "incompatible")?;
+                    continue;
+                }
+            }
+            Err(error) => {
+                warn!(runner = %runner.name, %error, "runner capabilities check failed");
+                state.db.update_runner_health(&runner.id, "unreachable")?;
+                continue;
+            }
+        }
         match state.runner_client.list_jobs(&runner).await {
             Ok(jobs) => {
                 state.db.replace_runner_jobs(&runner.id, &jobs)?;

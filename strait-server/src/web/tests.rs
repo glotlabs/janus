@@ -689,6 +689,48 @@ async fn push_event_creates_pipeline_and_dispatches_job() {
 }
 
 #[tokio::test]
+async fn runner_health_refresh_marks_supported_protocol_healthy() {
+    let mock = spawn_mock_runner().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+
+    scheduler::refresh_runner_health(Arc::clone(&fixture.state))
+        .await
+        .expect("refresh");
+
+    let runner = fixture
+        .state
+        .db
+        .get_runner(&fixture.runner_id)
+        .expect("runner")
+        .expect("runner");
+    assert_eq!(runner.last_health_state, "healthy");
+    let jobs = fixture
+        .state
+        .db
+        .list_runner_jobs(&fixture.runner_id)
+        .expect("jobs");
+    assert!(jobs.iter().any(|job| job.name == "build-app"));
+}
+
+#[tokio::test]
+async fn runner_health_refresh_marks_unsupported_protocol_incompatible() {
+    let mock = spawn_mock_runner_with_unsupported_protocol().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+
+    scheduler::refresh_runner_health(Arc::clone(&fixture.state))
+        .await
+        .expect("refresh");
+
+    let runner = fixture
+        .state
+        .db
+        .get_runner(&fixture.runner_id)
+        .expect("runner")
+        .expect("runner");
+    assert_eq!(runner.last_health_state, "incompatible");
+}
+
+#[tokio::test]
 async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
     let mock = spawn_mock_runner().await;
     let fixture = test_fixture_with_runner(&mock.base_url).await;
@@ -1872,6 +1914,7 @@ struct MockRunnerState {
     fail_first_dispatch: AtomicBool,
     stall_cancellation: AtomicBool,
     terminal_outcome: MockTerminalOutcome,
+    capabilities: strait_lib::RunnerCapabilitiesResponse,
 }
 
 #[derive(Debug, Clone)]
@@ -1945,10 +1988,38 @@ async fn spawn_mock_runner_with_infra_failure_once() -> MockRunner {
         .await
 }
 
+async fn spawn_mock_runner_with_unsupported_protocol() -> MockRunner {
+    let mut capabilities = strait_lib::RunnerCapabilitiesResponse::current();
+    capabilities.protocol_version = strait_lib::RUNNER_PROTOCOL_VERSION + 1;
+    capabilities.supported_protocol_versions = vec![strait_lib::RUNNER_PROTOCOL_VERSION + 1];
+    spawn_mock_runner_with_options_and_capabilities(
+        false,
+        false,
+        MockTerminalOutcome::Success,
+        capabilities,
+    )
+    .await
+}
+
 async fn spawn_mock_runner_with_options(
     fail_first_dispatch: bool,
     stall_cancellation: bool,
     terminal_outcome: MockTerminalOutcome,
+) -> MockRunner {
+    spawn_mock_runner_with_options_and_capabilities(
+        fail_first_dispatch,
+        stall_cancellation,
+        terminal_outcome,
+        strait_lib::RunnerCapabilitiesResponse::current(),
+    )
+    .await
+}
+
+async fn spawn_mock_runner_with_options_and_capabilities(
+    fail_first_dispatch: bool,
+    stall_cancellation: bool,
+    terminal_outcome: MockTerminalOutcome,
+    capabilities: strait_lib::RunnerCapabilitiesResponse,
 ) -> MockRunner {
     let state = Arc::new(MockRunnerState {
         runs: Mutex::new(BTreeMap::new()),
@@ -1959,8 +2030,13 @@ async fn spawn_mock_runner_with_options(
         fail_first_dispatch: AtomicBool::new(fail_first_dispatch),
         stall_cancellation: AtomicBool::new(stall_cancellation),
         terminal_outcome,
+        capabilities,
     });
     let app = Router::new()
+        .route(
+            RunnerRouteTemplate::Capabilities.path(),
+            get(mock_capabilities),
+        )
         .route(RunnerRouteTemplate::Jobs.path(), get(mock_list_jobs))
         .route(RunnerRouteTemplate::JobRuns.path(), post(mock_create_run))
         .route(
@@ -1988,6 +2064,12 @@ async fn spawn_mock_runner_with_options(
         base_url: format!("http://{}", addr),
         state,
     }
+}
+
+async fn mock_capabilities(
+    State(state): State<Arc<MockRunnerState>>,
+) -> Json<strait_lib::RunnerCapabilitiesResponse> {
+    Json(state.capabilities.clone())
 }
 
 impl MockRunner {

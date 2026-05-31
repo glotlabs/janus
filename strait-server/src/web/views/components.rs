@@ -108,7 +108,7 @@ pub(super) fn status_tone(status: &str) -> &'static str {
 pub(super) fn runner_state_tone(state: &str) -> &'static str {
     match state {
         "healthy" => "success",
-        "unknown" => "warning",
+        "unknown" | "incompatible" => "warning",
         _ => "danger",
     }
 }

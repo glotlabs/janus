@@ -20,6 +20,7 @@ use maud::{Markup, html};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
+use strait_lib::SUPPORTED_RUNNER_PROTOCOL_VERSIONS;
 use tokio::time;
 use uuid::Uuid;
 
@@ -1042,6 +1043,21 @@ async fn refresh_single_runner(state: &Arc<AppState>, runner_id: &str) -> Result
         .get_runner(runner_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "runner not found".to_string())?;
+    let capabilities = state
+        .runner_client
+        .capabilities(&runner)
+        .await
+        .map_err(|error| error.to_string())?;
+    if !capabilities.is_compatible_with_supported_versions(SUPPORTED_RUNNER_PROTOCOL_VERSIONS) {
+        state
+            .db
+            .update_runner_health(runner_id, "incompatible")
+            .map_err(|error| error.to_string())?;
+        return Err(format!(
+            "runner protocol incompatible: runner supports {:?}, server supports {:?}",
+            capabilities.supported_protocol_versions, SUPPORTED_RUNNER_PROTOCOL_VERSIONS
+        ));
+    }
     let jobs = state
         .runner_client
         .list_jobs(&runner)

@@ -5,9 +5,12 @@ use serde_json::Value;
 
 pub const HEADER_IDEMPOTENCY_KEY: &str = "x-idempotency-key";
 pub const HEADER_SHA256: &str = "x-sha256";
+pub const RUNNER_PROTOCOL_VERSION: u32 = 1;
+pub const SUPPORTED_RUNNER_PROTOCOL_VERSIONS: &[u32] = &[RUNNER_PROTOCOL_VERSION];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerRouteTemplate {
+    Capabilities,
     Jobs,
     Artifacts,
     Artifact,
@@ -19,6 +22,7 @@ pub enum RunnerRouteTemplate {
 impl RunnerRouteTemplate {
     pub fn path(self) -> &'static str {
         match self {
+            Self::Capabilities => "/capabilities",
             Self::Jobs => "/jobs",
             Self::Artifacts => "/artifacts",
             Self::Artifact => "/artifacts/{artifact_id}",
@@ -31,6 +35,7 @@ impl RunnerRouteTemplate {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerRoute<'a> {
+    Capabilities,
     Jobs,
     Artifacts,
     Artifact { artifact_id: &'a str },
@@ -42,6 +47,7 @@ pub enum RunnerRoute<'a> {
 impl RunnerRoute<'_> {
     pub fn path(self) -> String {
         match self {
+            Self::Capabilities => RunnerRouteTemplate::Capabilities.path().to_string(),
             Self::Jobs => RunnerRouteTemplate::Jobs.path().to_string(),
             Self::Artifacts => RunnerRouteTemplate::Artifacts.path().to_string(),
             Self::Artifact { artifact_id } => format!("/artifacts/{artifact_id}"),
@@ -53,6 +59,7 @@ impl RunnerRoute<'_> {
 
     pub fn template(self) -> RunnerRouteTemplate {
         match self {
+            Self::Capabilities => RunnerRouteTemplate::Capabilities,
             Self::Jobs => RunnerRouteTemplate::Jobs,
             Self::Artifacts => RunnerRouteTemplate::Artifacts,
             Self::Artifact { .. } => RunnerRouteTemplate::Artifact,
@@ -60,6 +67,27 @@ impl RunnerRoute<'_> {
             Self::Run { .. } => RunnerRouteTemplate::Run,
             Self::RunLogs { .. } => RunnerRouteTemplate::RunLogs,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerCapabilitiesResponse {
+    pub protocol_version: u32,
+    pub supported_protocol_versions: Vec<u32>,
+}
+
+impl RunnerCapabilitiesResponse {
+    pub fn current() -> Self {
+        Self {
+            protocol_version: RUNNER_PROTOCOL_VERSION,
+            supported_protocol_versions: SUPPORTED_RUNNER_PROTOCOL_VERSIONS.to_vec(),
+        }
+    }
+
+    pub fn is_compatible_with_supported_versions(&self, supported_versions: &[u32]) -> bool {
+        self.supported_protocol_versions
+            .iter()
+            .any(|version| supported_versions.contains(version))
     }
 }
 
@@ -456,6 +484,7 @@ mod tests {
 
     #[test]
     fn runner_path_builders_match_route_templates() {
+        assert_eq!(RunnerRoute::Capabilities.path(), "/capabilities");
         assert_eq!(RunnerRoute::Jobs.path(), "/jobs");
         assert_eq!(RunnerRoute::Artifacts.path(), "/artifacts");
         assert_eq!(
@@ -484,6 +513,7 @@ mod tests {
 
     #[test]
     fn runner_route_templates_match_axum_paths() {
+        assert_eq!(RunnerRouteTemplate::Capabilities.path(), "/capabilities");
         assert_eq!(RunnerRouteTemplate::Jobs.path(), "/jobs");
         assert_eq!(RunnerRouteTemplate::Artifacts.path(), "/artifacts");
         assert_eq!(
@@ -497,5 +527,16 @@ mod tests {
             RunnerRoute::RunLogs { job_id: "job_123" }.template(),
             RunnerRouteTemplate::RunLogs
         );
+    }
+
+    #[test]
+    fn current_capabilities_advertise_supported_protocol_version() {
+        let capabilities = RunnerCapabilitiesResponse::current();
+
+        assert_eq!(capabilities.protocol_version, RUNNER_PROTOCOL_VERSION);
+        assert!(
+            capabilities.is_compatible_with_supported_versions(SUPPORTED_RUNNER_PROTOCOL_VERSIONS)
+        );
+        assert!(!capabilities.is_compatible_with_supported_versions(&[999]));
     }
 }

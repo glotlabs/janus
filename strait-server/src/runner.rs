@@ -2,7 +2,7 @@ use reqwest::{Client, StatusCode};
 use serde_json::Value;
 pub use strait_lib::{
     ArtifactUploadResponse, HEADER_IDEMPOTENCY_KEY, HEADER_SHA256, JobCreatedResponse,
-    JobLogsResponse, JobOutputMetadata, JobStatusResponse, RunnerRoute,
+    JobLogsResponse, JobOutputMetadata, JobStatusResponse, RunnerCapabilitiesResponse, RunnerRoute,
 };
 
 use crate::models::{Runner, RunnerJobDefinition};
@@ -17,6 +17,22 @@ impl RunnerClient {
         Self {
             http: Client::new(),
         }
+    }
+
+    pub async fn capabilities(
+        &self,
+        runner: &Runner,
+    ) -> Result<RunnerCapabilitiesResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let response = self
+            .http
+            .get(runner_url(runner, RunnerRoute::Capabilities))
+            .bearer_auth(&runner.token)
+            .send()
+            .await?;
+        if response.status() != StatusCode::OK {
+            return Err(format!("runner capabilities returned {}", response.status()).into());
+        }
+        Ok(response.json().await?)
     }
 
     pub async fn list_jobs(
