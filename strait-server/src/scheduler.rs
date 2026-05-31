@@ -100,12 +100,12 @@ pub(crate) fn enqueue_workflow_run(
         )?;
         run_ids.insert(job.id.clone(), run_id);
     }
-    for job in &definition.jobs {
-        for need in &job.needs {
-            if let (Some(job_run_id), Some(dep_run_id)) = (run_ids.get(&job.id), run_ids.get(need))
-            {
-                state.db.add_job_dependency(job_run_id, dep_run_id)?;
-            }
+    for window in definition.jobs.windows(2) {
+        if let [previous, current] = window
+            && let (Some(job_run_id), Some(dep_run_id)) =
+                (run_ids.get(&current.id), run_ids.get(&previous.id))
+        {
+            state.db.add_previous_job(job_run_id, dep_run_id)?;
         }
     }
     Ok(pipeline_id)
@@ -197,19 +197,19 @@ fn recover_incomplete_pipelines(state: Arc<AppState>) -> Result<(), Box<dyn std:
 async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
     let jobs = state.db.list_job_runs_by_status(&["pending"])?;
     for job in jobs {
-        let dependencies = state.db.dependencies_for_job_run(&job.id)?;
-        let dependency_state =
-            state_machine::next_ready_job_status(dependencies.iter().filter_map(|item| {
+        let previous_jobs = state.db.previous_jobs_for_job_run(&job.id)?;
+        let previous_job_state =
+            state_machine::next_ready_job_status(previous_jobs.iter().filter_map(|item| {
                 JobStatus::parse(&item.status).map(|status| (status, item.allow_failure))
             }));
-        if dependency_state == Some(JobStatus::Blocked) {
+        if previous_job_state == Some(JobStatus::Blocked) {
             state
                 .db
                 .set_job_run_status(&job.id, JobStatus::Blocked.as_str())?;
             state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
             continue;
         }
-        if dependency_state.is_none() {
+        if previous_job_state.is_none() {
             continue;
         }
         let Some(runner) = state.db.get_runner(&job.runner_id)? else {

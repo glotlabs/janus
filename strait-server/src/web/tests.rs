@@ -123,7 +123,6 @@ async fn workflow_form_submission_accepts_structured_jobs_json() {
         "name": "Build",
         "runner_id": fixture.runner_id,
         "runner_job_name": "build-app",
-        "needs": [],
         "inputs": {
             "commit": "$commit",
             "branch": "$branch",
@@ -203,7 +202,6 @@ async fn workflow_form_rejects_missing_job_output_reference() {
             "name": "Produce",
             "runner_id": fixture.runner_id,
             "runner_job_name": "produce",
-            "needs": [],
             "inputs": {},
             "allow_failure": false
         }),
@@ -212,7 +210,6 @@ async fn workflow_form_rejects_missing_job_output_reference() {
             "name": "Consume",
             "runner_id": fixture.runner_id,
             "runner_job_name": "consume",
-            "needs": ["produce"],
             "inputs": {
                 "version": "$job.produce.missing"
             },
@@ -278,7 +275,6 @@ async fn workflow_form_rejects_typed_output_input_mismatch() {
             "name": "Produce",
             "runner_id": fixture.runner_id,
             "runner_job_name": "produce",
-            "needs": [],
             "inputs": {},
             "allow_failure": false
         }),
@@ -287,7 +283,6 @@ async fn workflow_form_rejects_typed_output_input_mismatch() {
             "name": "Consume",
             "runner_id": fixture.runner_id,
             "runner_job_name": "consume",
-            "needs": ["produce"],
             "inputs": {
                 "build_number": "$job.produce.build_number"
             },
@@ -355,7 +350,6 @@ async fn workflow_form_rejects_non_artifact_artifacts_from_job() {
             "name": "Produce",
             "runner_id": fixture.runner_id,
             "runner_job_name": "produce",
-            "needs": [],
             "inputs": {},
             "artifacts_from": [],
             "allow_failure": false
@@ -365,7 +359,6 @@ async fn workflow_form_rejects_non_artifact_artifacts_from_job() {
             "name": "Consume",
             "runner_id": fixture.runner_id,
             "runner_job_name": "consume",
-            "needs": ["produce"],
             "inputs": {},
             "artifacts_from": ["produce"],
             "allow_failure": false
@@ -425,7 +418,6 @@ async fn workflow_form_rejects_literal_input_type_mismatch() {
         "name": "Build",
         "runner_id": fixture.runner_id,
         "runner_job_name": "build-app",
-        "needs": [],
         "inputs": {
             "published": "true"
         },
@@ -472,7 +464,6 @@ async fn workflow_form_rejects_unknown_literal_input_name() {
         "name": "Build",
         "runner_id": fixture.runner_id,
         "runner_job_name": "build-app",
-        "needs": [],
         "inputs": {
             "bogus": 123
         },
@@ -636,7 +627,6 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
                 name: "Produce".to_string(),
                 runner_id: producer_runner_id,
                 runner_job_name: "produce-typed".to_string(),
-                needs: Vec::new(),
                 inputs: BTreeMap::new(),
                 artifacts_from: Vec::new(),
                 allow_failure: false,
@@ -646,7 +636,6 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
                 name: "Consume".to_string(),
                 runner_id: consumer_runner_id,
                 runner_job_name: "consume-typed".to_string(),
-                needs: vec!["produce".to_string()],
                 inputs: BTreeMap::from([
                     ("version".to_string(), json!("$job.produce.version")),
                     (
@@ -746,7 +735,6 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
                 name: "Produce".to_string(),
                 runner_id: producer_runner_id,
                 runner_job_name: "produce-int".to_string(),
-                needs: Vec::new(),
                 inputs: BTreeMap::new(),
                 artifacts_from: Vec::new(),
                 allow_failure: false,
@@ -756,7 +744,6 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
                 name: "Consume".to_string(),
                 runner_id: consumer_runner_id,
                 runner_job_name: "consume-string".to_string(),
-                needs: vec!["produce".to_string()],
                 inputs: BTreeMap::from([(
                     "build_number".to_string(),
                     json!("$job.produce.build_number"),
@@ -1441,7 +1428,6 @@ fn create_workflow_direct(state: &Arc<crate::app::AppState>, repo_id: &str, runn
             name: "Build".to_string(),
             runner_id: runner_id.to_string(),
             runner_job_name: "build-app".to_string(),
-            needs: Vec::new(),
             inputs: BTreeMap::from([
                 ("commit".to_string(), json!("$commit")),
                 ("branch".to_string(), json!("$branch")),

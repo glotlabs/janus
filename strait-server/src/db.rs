@@ -672,15 +672,15 @@ impl Database {
         Ok(id)
     }
 
-    pub fn add_job_dependency(
+    pub fn add_previous_job(
         &self,
         job_run_id: &str,
-        depends_on_job_run_id: &str,
+        previous_job_run_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
-            "INSERT INTO job_run_dependencies (job_run_id, depends_on_job_run_id) VALUES (?1, ?2)",
-            params![job_run_id, depends_on_job_run_id],
+            "INSERT INTO job_run_previous (job_run_id, previous_job_run_id) VALUES (?1, ?2)",
+            params![job_run_id, previous_job_run_id],
         )?;
         Ok(())
     }
@@ -815,9 +815,9 @@ impl Database {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             let mut dep_stmt = conn.prepare(
-                "SELECT depends_on_job_run_id FROM job_run_dependencies WHERE job_run_id = ?1",
+                "SELECT previous_job_run_id FROM job_run_previous WHERE job_run_id = ?1",
             )?;
-            let dependencies = dep_stmt
+            let previous_jobs = dep_stmt
                 .query_map([run.id.clone()], |row| row.get(0))?
                 .collect::<Result<Vec<String>, _>>()?;
             let mut artifact_stmt = conn.prepare(
@@ -831,7 +831,7 @@ impl Database {
                 stdout,
                 stderr,
                 outputs,
-                dependencies,
+                previous_jobs,
             });
         }
         Ok(Some(PipelineSnapshot { pipeline, jobs }))
@@ -888,15 +888,15 @@ impl Database {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
-    pub fn dependencies_for_job_run(
+    pub fn previous_jobs_for_job_run(
         &self,
         job_run_id: &str,
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT jr.id, jr.pipeline_run_id, jr.job_id, jr.job_name, jr.runner_id, jr.runner_job_name, jr.dispatch_idempotency_key, jr.runner_run_id, jr.status, jr.allow_failure, jr.started_at, jr.duration_ms, jr.exit_code, jr.terminal_reason, jr.failure_category, jr.cancel_reason, jr.cancel_requested_at, jr.cancel_started_at, jr.cancel_retry_count, jr.last_cancel_retry_at, jr.infra_retry_count, jr.last_infra_retry_at, jr.finished_at, jr.output_metadata_json
-             FROM job_run_dependencies d
-             JOIN job_runs jr ON jr.id = d.depends_on_job_run_id
+             FROM job_run_previous d
+             JOIN job_runs jr ON jr.id = d.previous_job_run_id
              WHERE d.job_run_id = ?1",
         )?;
         let rows = stmt.query_map([job_run_id], |row| {
@@ -1641,12 +1641,12 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             FOREIGN KEY(pipeline_run_id) REFERENCES pipeline_runs(id) ON DELETE CASCADE,
             FOREIGN KEY(runner_id) REFERENCES runners(id) ON DELETE CASCADE
         );
-        CREATE TABLE IF NOT EXISTS job_run_dependencies (
+        CREATE TABLE IF NOT EXISTS job_run_previous (
             job_run_id TEXT NOT NULL,
-            depends_on_job_run_id TEXT NOT NULL,
-            PRIMARY KEY(job_run_id, depends_on_job_run_id),
+            previous_job_run_id TEXT NOT NULL,
+            PRIMARY KEY(job_run_id, previous_job_run_id),
             FOREIGN KEY(job_run_id) REFERENCES job_runs(id) ON DELETE CASCADE,
-            FOREIGN KEY(depends_on_job_run_id) REFERENCES job_runs(id) ON DELETE CASCADE
+            FOREIGN KEY(previous_job_run_id) REFERENCES job_runs(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS job_run_artifacts (
             id TEXT PRIMARY KEY,

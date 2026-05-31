@@ -68,9 +68,9 @@ impl PipelineStatus {
 }
 
 pub fn next_ready_job_status(
-    dependency_statuses: impl Iterator<Item = (JobStatus, bool)>,
+    previous_job_statuses: impl Iterator<Item = (JobStatus, bool)>,
 ) -> Option<JobStatus> {
-    let statuses = dependency_statuses.collect::<Vec<_>>();
+    let statuses = previous_job_statuses.collect::<Vec<_>>();
     if statuses
         .iter()
         .any(|(status, allow_failure)| *status == JobStatus::Failed && !allow_failure)

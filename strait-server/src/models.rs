@@ -131,8 +131,6 @@ pub struct WorkflowJobDefinition {
     pub runner_id: String,
     pub runner_job_name: String,
     #[serde(default)]
-    pub needs: Vec<String>,
-    #[serde(default)]
     pub inputs: BTreeMap<String, Value>,
     #[serde(default)]
     pub artifacts_from: Vec<String>,
@@ -151,17 +149,6 @@ impl WorkflowDefinition {
             return Err("workflow job ids must be unique".to_string());
         }
 
-        for job in &self.jobs {
-            for need in &job.needs {
-                if !ids.contains(need.as_str()) {
-                    return Err(format!("job {} depends on unknown job {}", job.id, need));
-                }
-                if need == &job.id {
-                    return Err(format!("job {} cannot depend on itself", job.id));
-                }
-            }
-        }
-
         Ok(())
     }
 }
@@ -178,7 +165,7 @@ pub struct JobRunDetail {
     pub stdout: String,
     pub stderr: String,
     pub outputs: Vec<JobRunOutput>,
-    pub dependencies: Vec<String>,
+    pub previous_jobs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

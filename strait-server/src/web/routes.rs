@@ -486,7 +486,7 @@ async fn workflows_page(
     let csrf = csrf_token(&state, &user);
     let mut body = page_intro(
         "Workflows",
-        "Define reusable CI pipelines with structured jobs, dependencies, and runner bindings.",
+        "Define reusable CI pipelines with structured jobs, serial execution order, and runner bindings.",
     );
     let mut repo_select = String::from(r#"<select name="repo_id">"#);
     for repo in &repos {
@@ -553,7 +553,7 @@ async fn workflow_detail_page(
     );
     let mut body = page_intro(
         "Workflow Detail",
-        "Adjust trigger behavior, job dependencies, and runner/job bindings.",
+        "Adjust trigger behavior, job order, and runner/job bindings.",
     );
     body.push_str(&format!(
         r#"<section class="card"><div class="section-head"><div><div class="eyebrow">Editing</div><h2>{}</h2><p class="muted">Repository: {}/{}</p></div></div><form method="post" action="/workflows/{}/update" class="stack-lg">{}{}</form></section>"#,
@@ -817,8 +817,6 @@ struct ApiWorkflowJob {
     name: String,
     runner_id: String,
     runner_job_name: String,
-    #[serde(default)]
-    needs: Vec<String>,
     #[serde(default)]
     inputs: BTreeMap<String, Value>,
     #[serde(default)]
@@ -1125,7 +1123,6 @@ fn parse_api_workflow_request(
             name: job.name.clone(),
             runner_id: job.runner_id.clone(),
             runner_job_name: job.runner_job_name.clone(),
-            needs: job.needs.clone(),
             inputs: job.inputs.clone(),
             artifacts_from: Vec::new(),
             allow_failure: job.allow_failure,
@@ -1184,7 +1181,7 @@ fn validate_workflow_runners(
         runner_job_defs.insert(job.id.clone(), runner_job);
     }
 
-    for job in &definition.jobs {
+    for (job_index, job) in definition.jobs.iter().enumerate() {
         let runner_job = runner_job_defs
             .get(&job.id)
             .ok_or_else(|| internal_error("missing parsed runner job definition"))?;
@@ -1235,10 +1232,16 @@ fn validate_workflow_runners(
                                 "workflow input {input_name} references unknown job {source_job_id}"
                             ))
                         })?;
-                    if !job.needs.iter().any(|need| need == &upstream_job.id) {
+                    let Some(upstream_index) = definition
+                        .jobs
+                        .iter()
+                        .position(|candidate| candidate.id == upstream_job.id)
+                    else {
+                        return Err(internal_error("failed to locate upstream job index"));
+                    };
+                    if upstream_index >= job_index {
                         return Err(bad_request(format!(
-                            "workflow input {input_name} references {source_job_id}.{output_name} but job {} does not depend on {source_job_id}",
-                            job.id
+                            "workflow input {input_name} references {source_job_id}.{output_name} but only earlier jobs can be referenced"
                         )));
                     }
                     let upstream_runner_job = runner_job_defs
@@ -1280,9 +1283,16 @@ fn validate_workflow_runners(
                         job.id
                     ))
                 })?;
-            if !job.needs.iter().any(|need| need == &upstream_job.id) {
+            let Some(upstream_index) = definition
+                .jobs
+                .iter()
+                .position(|candidate| candidate.id == upstream_job.id)
+            else {
+                return Err(internal_error("failed to locate upstream job index"));
+            };
+            if upstream_index >= job_index {
                 return Err(bad_request(format!(
-                    "job {} references artifacts_from {upstream_job_id} but does not depend on it",
+                    "job {} references artifacts_from {upstream_job_id} but only earlier jobs can be referenced",
                     job.id
                 )));
             }
@@ -1344,8 +1354,6 @@ struct WorkflowEditorJob {
     name: String,
     runner_id: String,
     runner_job_name: String,
-    #[serde(default)]
-    needs: Vec<String>,
     allow_failure: bool,
     #[serde(default)]
     inputs: BTreeMap<String, Value>,
@@ -1489,7 +1497,6 @@ fn workflow_form_fields(
             name: job.name.clone(),
             runner_id: job.runner_id.clone(),
             runner_job_name: job.runner_job_name.clone(),
-            needs: job.needs.clone(),
             allow_failure: job.allow_failure,
             inputs: job.inputs.clone(),
         })
@@ -1521,7 +1528,6 @@ fn workflow_form_fields(
             name: String::new(),
             runner_id,
             runner_job_name,
-            needs: Vec::new(),
             allow_failure: false,
             inputs: BTreeMap::new(),
         });
@@ -1531,7 +1537,7 @@ fn workflow_form_fields(
     );
     let repo_field = repo_selector.unwrap_or(&repo_id_input);
     format!(
-        r#"<div class="form-grid form-grid-2"><label><span>Workflow name</span><input name="name" value="{name}" /></label><label><span>Trigger</span><select name="trigger_kind"><option value="push" {push_selected}>push</option><option value="manual" {manual_selected}>manual</option></select></label></div><div class="form-grid form-grid-2"><label><span>Repository</span>{repo_input}</label><label><span>Branch</span><input name="branch_name" value="{branch_name}" /></label></div><div class="card soft-card"><div class="section-head"><div><div class="eyebrow">Jobs</div><h3>Workflow builder</h3><p class="muted">Runner and job selections derive workflow job IDs automatically. Inputs are rendered from the selected runner job manifest.</p></div></div><div id="workflow-builder" class="stack-md"><div id="workflow-job-list" class="stack-md"></div><div class="actions"><button type="button" id="workflow-add-job" class="secondary">Add job</button></div></div></div><textarea id="workflow-jobs-json" name="jobs_json" hidden>{jobs_json}</textarea><div class="inline-note">Artifact inputs can point to <code>source.tar.gz</code>. Typed inputs can bind to matching outputs from earlier jobs in the workflow.</div><script type="application/json" id="workflow-runner-catalog">{runner_catalog_json}</script><script type="application/json" id="workflow-initial-jobs">{initial_jobs_json}</script><script>
+        r#"<div class="form-grid form-grid-2"><label><span>Workflow name</span><input name="name" value="{name}" /></label><label><span>Trigger</span><select name="trigger_kind"><option value="push" {push_selected}>push</option><option value="manual" {manual_selected}>manual</option></select></label></div><div class="form-grid form-grid-2"><label><span>Repository</span>{repo_input}</label><label><span>Branch</span><input name="branch_name" value="{branch_name}" /></label></div><div class="card soft-card"><div class="section-head"><div><div class="eyebrow">Jobs</div><h3>Workflow builder</h3><p class="muted">Jobs run one by one in the order shown below. Inputs are rendered from the selected runner job manifest.</p></div></div><div id="workflow-builder" class="stack-md"><div id="workflow-job-list" class="stack-md"></div><div class="actions"><button type="button" id="workflow-add-job" class="secondary">Add job</button></div></div></div><textarea id="workflow-jobs-json" name="jobs_json" hidden>{jobs_json}</textarea><div class="inline-note">Artifact inputs can point to <code>source.tar.gz</code>. Typed inputs can bind to matching outputs from earlier jobs in the workflow.</div><script type="application/json" id="workflow-runner-catalog">{runner_catalog_json}</script><script type="application/json" id="workflow-initial-jobs">{initial_jobs_json}</script><script>
 (() => {{
   const list = document.getElementById('workflow-job-list');
   const addButton = document.getElementById('workflow-add-job');
@@ -1739,7 +1745,6 @@ fn workflow_form_fields(
         name: job.name,
         runner_id: job.runnerId,
         runner_job_name: job.runnerJobName,
-        needs: Array.isArray(job.row._needs) ? job.row._needs : [],
         inputs: inputsMap,
         allow_failure: Boolean(job.row._allowFailure)
       }};
@@ -1760,8 +1765,10 @@ fn workflow_form_fields(
 
   function outputOptionsFor(currentRow, derivedJobs, expectedKind) {{
     const options = [];
+    const currentIndex = derivedJobs.findIndex((job) => job.row === currentRow);
     for (const job of derivedJobs) {{
       if (job.row === currentRow) continue;
+      if (currentIndex !== -1 && derivedJobs.indexOf(job) >= currentIndex) continue;
       const definition = getJobDefinition(job.runnerId, job.runnerJobName);
       const outputs = definition ? Object.entries(definition.outputs || {{}}) : [];
       for (const [outputName, outputDef] of outputs) {{
@@ -1799,9 +1806,6 @@ fn workflow_form_fields(
     }}
     if (!reference) return `Select a ${{expectedKind}} output from an earlier job.`;
     const [sourceJobId] = reference.split('.', 1);
-    if (sourceJobId && !(Array.isArray(row._needs) && row._needs.includes(sourceJobId))) {{
-      return `Warning: add ${{sourceJobId}} to this job's needs before submitting.`;
-    }}
     const sourceJob = findDerivedJobById(derivedJobs, sourceJobId);
     if (sourceJob) {{
       return `Binding to ${{sourceJob.name}}.`;
@@ -2044,7 +2048,6 @@ fn workflow_form_fields(
     row.setAttribute('data-workflow-job-row', 'true');
     row.className = 'job-builder-row';
     row._inputs = job.inputs || {{}};
-    row._needs = job.needs || [];
     row._allowFailure = Boolean(job.allow_failure);
 
     const runnerSelect = makeSelect();
