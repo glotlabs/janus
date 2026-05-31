@@ -28,7 +28,7 @@ pub fn init_bare_repo(path: &Path) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let status = Command::new("git")
-        .args(["init", "--bare"])
+        .args(["init", "--bare", "--initial-branch=main"])
         .arg(path)
         .status()
         .map_err(|error| error.to_string())?;
@@ -121,11 +121,32 @@ pub fn create_source_archive(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_repo_name;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{init_bare_repo, validate_repo_name};
 
     #[test]
     fn repo_name_is_normalized() {
         assert_eq!(validate_repo_name("My.Repo").expect("valid"), "my.repo");
         assert!(validate_repo_name("../bad").is_err());
+    }
+
+    #[test]
+    fn bare_repo_uses_main_as_initial_branch() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("strait-server-git-test-{unique}.git"));
+
+        init_bare_repo(&path).expect("init bare repo");
+
+        let head = fs::read_to_string(path.join("HEAD")).expect("read HEAD");
+        assert_eq!(head, "ref: refs/heads/main\n");
+
+        fs::remove_dir_all(path).expect("remove temp repo");
     }
 }
