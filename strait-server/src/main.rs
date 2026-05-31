@@ -15,7 +15,8 @@ mod web;
 use std::env;
 
 use app::{
-    Cli, Command, build_state, hook_post_receive, init_tracing, reconcile_hooks, seed_user, serve,
+    Cli, Command, bootstrap_admin, build_state, hook_post_receive, init_tracing,
+    password_from_source, reconcile_hooks, seed_user, serve,
 };
 use runner_auth::{init_runner_key, rotate_runner_key, show_runner_key};
 
@@ -32,6 +33,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::AdminRunnerKeyRotate => {
             return rotate_runner_key(&cli.config_path);
         }
+        Command::AdminBootstrapAdmin {
+            username,
+            password_source,
+        } => {
+            let password = password_from_source(password_source)?;
+            return bootstrap_admin(&cli.config_path, username, password);
+        }
         _ => {}
     }
 
@@ -46,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             password,
             role,
         } => seed_user(state, &username, &password, &role),
+        Command::AdminBootstrapAdmin { .. } => unreachable!(),
         Command::AdminRunnerKeyInit
         | Command::AdminRunnerKeyShow { .. }
         | Command::AdminRunnerKeyRotate => {

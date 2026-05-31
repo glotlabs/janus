@@ -28,6 +28,7 @@ async fn git_push_triggers_pipeline_end_to_end() {
     let runner = spawn_mock_runner().await;
     let server_port = free_port();
     let config_path = write_config(&temp, server_port, &runner.base_url);
+    bootstrap_admin(&config_path);
     let server = ServerProcess::spawn(&config_path);
 
     wait_for_http(&format!("http://127.0.0.1:{server_port}/health")).await;
@@ -207,10 +208,6 @@ session_ttl_days = 1
 session_cookie_secure = false
 login_rate_limit_per_minute = 100
 
-[auth.bootstrap_admin]
-username = "admin"
-password = "password123"
-
 [runner_auth]
 key_id = "test-server"
 private_key_path = "{}/runner-signing.key"
@@ -289,6 +286,32 @@ impl ServerProcess {
             .expect("spawn server");
         Self { child }
     }
+}
+
+fn bootstrap_admin(config_path: &Path) {
+    use std::io::Write;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_strait-server"))
+        .args([
+            "admin",
+            "bootstrap-admin",
+            "--username",
+            "admin",
+            "--password-stdin",
+            "--config",
+        ])
+        .arg(config_path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("bootstrap admin");
+    child
+        .stdin
+        .as_mut()
+        .expect("bootstrap stdin")
+        .write_all(b"password123\n")
+        .expect("write bootstrap password");
+    let status = child.wait().expect("bootstrap status");
+    assert!(status.success());
 }
 
 impl Drop for ServerProcess {

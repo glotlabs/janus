@@ -14,10 +14,6 @@ session_ttl_days = 7
 session_cookie_secure = true
 login_rate_limit_per_minute = 10
 
-[auth.bootstrap_admin]
-username = "admin"
-password = "change-me"
-
 [scheduler]
 poll_interval_ms = 2000
 cancel_stuck_timeout_seconds = 30

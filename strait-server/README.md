@@ -16,13 +16,17 @@ Commands:
 
 ```bash
 cargo run -p strait-server -- serve
-cargo run -p strait-server -- admin seed-user --username alice --password secret --role developer
+cargo run -p strait-server -- admin bootstrap-admin --username admin --config server.toml
+printf '%s\n' "$ADMIN_PASSWORD" | cargo run -p strait-server -- admin bootstrap-admin --username admin --password-stdin --config server.toml
+cargo run -p strait-server -- admin seed-user --username alice --password secret --role admin
 cargo run -p strait-server -- admin reconcile-hooks
 cargo run -p strait-server -- admin runner-key init --config server.toml
 cargo run -p strait-server -- admin runner-key show --config server.toml
 cargo run -p strait-server -- admin runner-key show --format toml --config server.toml
 cargo run -p strait-server -- admin runner-key rotate --config server.toml
 ```
+
+`admin bootstrap-admin` only works before any users exist. Without `--password-stdin`, it prompts twice with terminal echo disabled.
 
 Initialize runner signing keys once before first `serve`; this generates `[runner_auth]`, creates the Ed25519 keypair, and writes the generated key ID into the server config.
 

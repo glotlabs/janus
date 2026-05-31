@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
-    fs, io,
+    fs,
+    io::{self, Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -37,20 +38,10 @@ pub(crate) fn build_state(
     server_bin: PathBuf,
 ) -> Result<Arc<AppState>, Box<dyn std::error::Error>> {
     let config = Arc::new(Config::load_from_path(&config_path)?);
-    fs::create_dir_all(&config.data_dir)?;
-    fs::create_dir_all(&config.repos_dir)?;
-    if let Some(parent) = Path::new(&config.database.path).parent() {
-        fs::create_dir_all(parent)?;
-    }
+    prepare_storage(&config)?;
 
     let db = Database::open(&config.database.path)?;
     db.cleanup_expired_sessions()?;
-    let admin_hash = hash_password(&config.auth.bootstrap_admin.password)?;
-    db.ensure_user(
-        &config.auth.bootstrap_admin.username,
-        &admin_hash,
-        UserRole::Admin,
-    )?;
     let runner_signer = RunnerSigner::load_or_generate(&config.runner_auth)?;
 
     Ok(Arc::new(AppState {
@@ -63,6 +54,15 @@ pub(crate) fn build_state(
         server_bin: Arc::new(server_bin),
         login_attempts: Arc::new(Mutex::new(BTreeMap::new())),
     }))
+}
+
+fn prepare_storage(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(&config.data_dir)?;
+    fs::create_dir_all(&config.repos_dir)?;
+    if let Some(parent) = Path::new(&config.database.path).parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn serve(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
@@ -108,6 +108,118 @@ pub(crate) fn seed_user(
     let password_hash = hash_password(password)?;
     let role = UserRole::parse(role).ok_or_else(|| format!("unknown user role: {role}"))?;
     state.db.create_user(username, &password_hash, role)?;
+    Ok(())
+}
+
+pub(crate) fn bootstrap_admin(
+    config_path: &Path,
+    username: &str,
+    password: impl AsRef<str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let password = password.as_ref();
+    let config = Config::load_from_path(config_path)?;
+    prepare_storage(&config)?;
+    let db = Database::open(&config.database.path)?;
+    if db.user_count()? > 0 {
+        return Err("bootstrap-admin can only run when no users exist".into());
+    }
+    validate_bootstrap_admin(username, password)?;
+    let password_hash = hash_password(password)?;
+    db.create_user(username.trim(), &password_hash, UserRole::Admin)?;
+    println!("bootstrapped admin user {}", username.trim());
+    Ok(())
+}
+
+pub(crate) fn password_from_source(
+    source: &BootstrapPasswordSource,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match source {
+        BootstrapPasswordSource::Prompt => prompt_confirmed_password(),
+        BootstrapPasswordSource::Stdin => {
+            let mut password = String::new();
+            io::stdin().read_to_string(&mut password)?;
+            Ok(password.trim_end_matches(['\r', '\n']).to_string())
+        }
+    }
+}
+
+pub(crate) fn prompt_confirmed_password() -> Result<String, Box<dyn std::error::Error>> {
+    let password = prompt_hidden_password("Password: ")?;
+    let confirmation = prompt_hidden_password("Confirm password: ")?;
+    if password != confirmation {
+        return Err("passwords do not match".into());
+    }
+    Ok(password)
+}
+
+#[cfg(unix)]
+pub(crate) fn prompt_hidden_password(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let fd = libc::STDIN_FILENO;
+    let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+    if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+        return Err(
+            "password prompt requires a terminal; use --password-stdin for non-interactive use"
+                .into(),
+        );
+    }
+    let original = unsafe { original.assume_init() };
+    let mut hidden = original;
+    hidden.c_lflag &= !libc::ECHO;
+
+    eprint!("{prompt}");
+    io::stderr().flush()?;
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &hidden) } != 0 {
+        return Err("failed to disable terminal echo".into());
+    }
+
+    let mut password = String::new();
+    let read_result = io::stdin().read_line(&mut password);
+    let restore_result = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &original) };
+    eprintln!();
+
+    read_result?;
+    if restore_result != 0 {
+        return Err("failed to restore terminal echo".into());
+    }
+    Ok(password.trim_end_matches(['\r', '\n']).to_string())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn prompt_hidden_password(_prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
+    Err(
+        "hidden password prompt is not supported on this platform; use --password-stdin instead"
+            .into(),
+    )
+}
+
+fn validate_bootstrap_admin(username: &str, password: &str) -> Result<(), String> {
+    let username = username.trim();
+    if username.len() < 3 {
+        return Err("username must be at least 3 characters".to_string());
+    }
+    if username.chars().count() > 64 {
+        return Err("username must be 64 characters or fewer".to_string());
+    }
+    if !username
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return Err("username contains invalid characters".to_string());
+    }
+    if password.len() < 8 {
+        return Err("password must be at least 8 characters".to_string());
+    }
+    Ok(())
+}
+
+fn set_bootstrap_password_source(
+    current: &mut BootstrapPasswordSource,
+    next: BootstrapPasswordSource,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !matches!(current, BootstrapPasswordSource::Prompt) {
+        return Err("only one bootstrap password source may be provided".into());
+    }
+    *current = next;
     Ok(())
 }
 
@@ -178,11 +290,21 @@ pub(crate) enum Command {
         password: String,
         role: String,
     },
+    AdminBootstrapAdmin {
+        username: String,
+        password_source: BootstrapPasswordSource,
+    },
     AdminRunnerKeyShow {
         format: crate::runner_auth::RunnerKeyShowFormat,
     },
     AdminRunnerKeyInit,
     AdminRunnerKeyRotate,
+}
+
+#[derive(Clone)]
+pub(crate) enum BootstrapPasswordSource {
+    Prompt,
+    Stdin,
 }
 
 impl Cli {
@@ -273,6 +395,36 @@ impl Cli {
                     username: username.ok_or("missing --username")?,
                     password: password.ok_or("missing --password")?,
                     role: role.unwrap_or_else(|| "admin".to_string()),
+                }
+            }
+            Some("admin") if args.get(index + 1).map(String::as_str) == Some("bootstrap-admin") => {
+                index += 2;
+                let mut username = None;
+                let mut password_source = BootstrapPasswordSource::Prompt;
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--username" => {
+                            index += 1;
+                            username = args.get(index).cloned();
+                        }
+                        "--password-stdin" => {
+                            set_bootstrap_password_source(
+                                &mut password_source,
+                                BootstrapPasswordSource::Stdin,
+                            )?;
+                        }
+                        "--config" => {
+                            index += 1;
+                            config_path =
+                                PathBuf::from(args.get(index).ok_or("missing config path")?);
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                Command::AdminBootstrapAdmin {
+                    username: username.ok_or("missing --username")?,
+                    password_source,
                 }
             }
             Some("admin") if args.get(index + 1).map(String::as_str) == Some("runner-key") => {

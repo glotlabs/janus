@@ -41,29 +41,6 @@ impl Database {
         })
     }
 
-    pub fn ensure_user(
-        &self,
-        username: &str,
-        password_hash: &str,
-        role: UserRole,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let now = now();
-        let conn = self.conn.lock().expect("db mutex poisoned");
-        conn.execute(
-            "INSERT INTO users (id, username, password_hash, role, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(username) DO NOTHING",
-            params![
-                Uuid::now_v7().to_string(),
-                username,
-                password_hash,
-                role.as_str(),
-                now
-            ],
-        )?;
-        Ok(())
-    }
-
     pub fn create_user(
         &self,
         username: &str,
@@ -98,6 +75,11 @@ impl Database {
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn user_count(&self) -> Result<i64, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        Ok(conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))?)
     }
 
     pub fn get_user_credentials(

@@ -64,13 +64,6 @@ pub struct AuthConfig {
     pub session_ttl_days: u64,
     pub session_cookie_secure: bool,
     pub login_rate_limit_per_minute: u64,
-    pub bootstrap_admin: BootstrapAdminConfig,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BootstrapAdminConfig {
-    pub username: String,
-    pub password: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

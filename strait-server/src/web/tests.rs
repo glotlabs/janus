@@ -1,6 +1,6 @@
 use super::routes::{build_router, csrf_token};
 use crate::{
-    app::build_state,
+    app::{bootstrap_admin, build_state},
     auth::{hash_password, session_cookie},
     git,
     models::{
@@ -1048,6 +1048,28 @@ fn hook_ingestion_is_idempotent() {
         .expect("push2");
     let events = state.db.list_unprocessed_push_events().expect("events");
     assert_eq!(events.len(), 1);
+}
+
+#[test]
+fn bootstrap_admin_only_works_when_no_users_exist() {
+    let dir = temp_dir("bootstrap_admin_once");
+    let config_path = write_test_config(&dir);
+
+    bootstrap_admin(&config_path, "admin", "password123").expect("bootstrap should create admin");
+    let state =
+        build_state(config_path.clone(), PathBuf::from("/bin/strait-server")).expect("state");
+    let users = state.db.list_users().expect("users");
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].username, "admin");
+    assert_eq!(users[0].role, UserRole::Admin);
+
+    let error = bootstrap_admin(&config_path, "other-admin", "password123")
+        .expect_err("second bootstrap should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("bootstrap-admin can only run when no users exist")
+    );
 }
 
 #[tokio::test]
@@ -2239,10 +2261,11 @@ fn runner_job_definition(schema: &str) -> RunnerJobDefinition {
 fn admin_user(state: &Arc<crate::app::AppState>) -> User {
     state
         .db
-        .get_user_credentials("admin")
-        .expect("admin credentials")
+        .list_users()
+        .expect("users")
+        .into_iter()
+        .find(|user| user.role.is_admin())
         .expect("admin user")
-        .0
 }
 
 fn write_test_config(dir: &Path) -> PathBuf {
@@ -2267,10 +2290,6 @@ session_secret = "test-secret"
 session_ttl_days = 1
 session_cookie_secure = false
 login_rate_limit_per_minute = 100
-
-[auth.bootstrap_admin]
-username = "admin"
-password = "password123"
 
 [runner_auth]
 key_id = "test-server"

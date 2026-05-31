@@ -401,10 +401,6 @@ session_ttl_days = 1
 session_cookie_secure = false
 login_rate_limit_per_minute = 100
 
-[auth.bootstrap_admin]
-username = "admin"
-password = "password123"
-
 [runner_auth]
 key_id = "{key_id}"
 private_key_path = "{}"
@@ -448,10 +444,6 @@ session_secret = "test-secret"
 session_ttl_days = 1
 session_cookie_secure = false
 login_rate_limit_per_minute = 100
-
-[auth.bootstrap_admin]
-username = "admin"
-password = "password123"
 
 [scheduler]
 poll_interval_ms = 50
