@@ -22,7 +22,7 @@ export function outputBindingHint({
   const expectedKind = mode === 'output_artifact' ? 'artifact' : kind;
   const options = outputOptionsFor(row, derivedJobs, expectedKind, getJobDefinition);
   if (options.length === 0) {
-    return `No earlier jobs expose matching ${expectedKind} outputs yet.`;
+    return 'No outputs available';
   }
   if (!reference) return `Select a ${expectedKind} output from an earlier job.`;
   const binding = parseOutputBinding(reference);
@@ -44,10 +44,11 @@ export function renderOutputBindingOptions({ derivedJobs, getJobDefinition }) {
       const options = outputOptionsFor(job.row, derivedJobs, expectedKind, getJobDefinition);
       replaceOptions(valueField, options, selected, {
         placeholder: options.length === 0
-          ? { label: `No ${expectedKind} outputs available`, selected: true }
+          ? { label: 'No outputs available', selected: true }
           : null,
         selectFirst: true
       });
+      valueField.hidden = options.length === 0;
       inputRow.dataset.bindingValue = valueField.value;
     }
   }

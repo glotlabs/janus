@@ -33,8 +33,8 @@ import {
 
   function syncJobsJson() {
     const derivedJobs = currentDerivedJobs();
-    jobsJsonField.value = JSON.stringify(serializeJobs(derivedJobs));
     renderOutputBindingOptions({ derivedJobs, getJobDefinition });
+    jobsJsonField.value = JSON.stringify(serializeJobs(derivedJobs));
     renderOutputTable(derivedJobs);
   }
 

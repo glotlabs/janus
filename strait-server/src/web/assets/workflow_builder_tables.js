@@ -11,6 +11,7 @@ import {
   bindingModesFor,
   inferBinding,
   literalHintFor,
+  outputOptionsFor,
 } from './workflow_builder_state.js';
 
 export function renderInputTable({
@@ -106,11 +107,16 @@ function renderInputRow({
 
   const paintValueField = () => {
     valueCell.replaceChildren();
+    const isOutputBinding = modeSelect.value === 'output_artifact' || modeSelect.value === 'output_value';
+    const expectedOutputKind = modeSelect.value === 'output_artifact' ? 'artifact' : inputDef.type;
     const currentBinding = {
       mode: modeSelect.value,
       value: inputRow.dataset.bindingValue || binding.value || ''
     };
     const field = buildValueField(inputDef.type, currentBinding, inputRow);
+    if (isOutputBinding && outputOptionsFor(row, derivedJobs, expectedOutputKind, getJobDefinition).length === 0) {
+      field.hidden = true;
+    }
     if ('value' in field) {
       field.addEventListener('input', () => {
         inputRow.dataset.bindingValue = field.value || '';

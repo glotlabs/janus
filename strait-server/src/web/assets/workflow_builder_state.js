@@ -72,16 +72,19 @@ export function readInputBinding(inputRow) {
   const mode = modeSelect ? modeSelect.value : 'literal';
   if (kind === 'artifact') {
     if (mode === 'source_artifact') return [name, { kind: 'source_artifact' }];
-    return [name, JSON.parse(valueField.value)];
+    return [name, parseOutputBinding(valueField ? valueField.value : '') || { kind: 'source_artifact' }];
   }
   if (kind === 'string') {
     if (mode === 'commit') return [name, { kind: 'commit' }];
     if (mode === 'branch') return [name, { kind: 'branch' }];
-    if (mode === 'output_value') return [name, JSON.parse(valueField.value)];
+    if (mode === 'output_value') {
+      return [name, parseOutputBinding(valueField ? valueField.value : '') || { kind: 'literal', value: '' }];
+    }
     return [name, { kind: 'literal', value: valueField ? valueField.value : '' }];
   }
   if (mode === 'output_value') {
-    return [name, JSON.parse(valueField.value)];
+    const outputBinding = parseOutputBinding(valueField ? valueField.value : '');
+    if (outputBinding) return [name, outputBinding];
   }
   if (kind === 'boolean') {
     return [name, { kind: 'literal', value: valueField.value === 'true' }];

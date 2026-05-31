@@ -131,6 +131,22 @@ test('readInputBinding parses literal and special binding modes from fake rows',
   })), ['metadata', { kind: 'literal', value: { ok: true } }]);
 });
 
+test('readInputBinding handles empty output binding selects', () => {
+  assert.deepEqual(readInputBinding(inputRow({
+    name: 'source',
+    kind: 'artifact',
+    mode: 'output_artifact',
+    value: ''
+  })), ['source', { kind: 'source_artifact' }]);
+
+  assert.deepEqual(readInputBinding(inputRow({
+    name: 'version',
+    kind: 'string',
+    mode: 'output_value',
+    value: ''
+  })), ['version', { kind: 'literal', value: '' }]);
+});
+
 test('serializeJobs filters empty rows and preserves parsed inputs', () => {
   const lookup = createCatalogLookup(catalog);
   const rows = [

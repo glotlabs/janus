@@ -171,6 +171,26 @@ test('renderInputTable mode changes clear binding value and call callback', () =
   assert.equal(calls, 1);
 }));
 
+test('renderInputTable hides unavailable output binding select', () => withFakeDocument(() => {
+  const row = workflowRow();
+
+  renderInputTable({
+    row,
+    derivedJobs: [{ row, runnerId: 'runner-1', runnerJobName: 'build', jobIndex: 0, name: 'build' }],
+    getJobDefinition,
+    templates,
+    onBindingChanged() {}
+  });
+
+  const inputRow = row.elements.inputsWrap.children[0].querySelector('[data-table-body]').children[0];
+  const modeSelect = inputRow.children[2].children[0];
+  modeSelect.value = 'output_value';
+  modeSelect.listeners.change[0]();
+
+  assert.equal(inputRow.children[3].children[0].hidden, true);
+  assert.equal(inputRow.children[3].children[1].textContent, 'No outputs available');
+}));
+
 test('renderOutputTable renders empty state and summary', () => withFakeDocument(() => {
   const row = workflowRow({ jobName: 'empty' });
 

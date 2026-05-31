@@ -69,7 +69,7 @@ test('outputBindingHint describes missing earlier matching outputs', () => {
     getJobDefinition
   });
 
-  assert.equal(hint, 'No earlier jobs expose matching artifact outputs yet.');
+  assert.equal(hint, 'No outputs available');
 });
 
 test('outputBindingHint describes selected source job', () => {
@@ -110,8 +110,9 @@ test('renderOutputBindingOptions renders unavailable placeholder', () => withFak
     textContent: option.textContent,
     selected: option.selected
   })), [
-    { value: '', textContent: 'No artifact outputs available', selected: true }
+    { value: '', textContent: 'No outputs available', selected: true }
   ]);
+  assert.equal(currentInput.valueField.hidden, true);
 }));
 
 test('renderOutputBindingOptions selects the first available earlier output', () => withFakeDocument(() => {
@@ -130,6 +131,7 @@ test('renderOutputBindingOptions selects the first available earlier output', ()
   assert.equal(currentInput.valueField.options.length, 1);
   assert.equal(currentInput.valueField.value, '{"kind":"job_output","job_index":0,"output_name":"artifact"}');
   assert.equal(currentInput.dataset.bindingValue, '{"kind":"job_output","job_index":0,"output_name":"artifact"}');
+  assert.equal(currentInput.valueField.hidden, false);
 }));
 
 test('buildValueField renders commit and branch markers', () => withFakeDocument(() => {
