@@ -9,6 +9,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub server: ServerConfig,
     pub auth: AuthConfig,
+    pub runner_auth: RunnerAuthConfig,
     pub scheduler: SchedulerConfig,
     pub runners: RunnersConfig,
 }
@@ -44,6 +45,13 @@ pub struct AuthConfig {
 pub struct BootstrapAdminConfig {
     pub username: String,
     pub password: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunnerAuthConfig {
+    pub key_id: String,
+    pub private_key_path: String,
+    pub public_key_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

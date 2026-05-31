@@ -11,7 +11,7 @@ use tracing::info;
 
 use crate::{
     artifacts::ArtifactStore, auth::hash_password, config::Config, db::Database, git,
-    runner::RunnerClient, scheduler, web,
+    runner::RunnerClient, runner_auth::RunnerSigner, scheduler, web,
 };
 
 #[derive(Clone)]
@@ -20,6 +20,7 @@ pub struct AppState {
     pub(crate) db: Database,
     pub(crate) artifacts: ArtifactStore,
     pub(crate) runner_client: RunnerClient,
+    pub(crate) runner_signer: RunnerSigner,
     pub(crate) config_path: Arc<PathBuf>,
     pub(crate) server_bin: Arc<PathBuf>,
     pub(crate) login_attempts: Arc<Mutex<BTreeMap<String, LoginWindow>>>,
@@ -46,12 +47,14 @@ pub(crate) fn build_state(
     db.cleanup_expired_sessions()?;
     let admin_hash = hash_password(&config.auth.bootstrap_admin.password)?;
     db.ensure_user(&config.auth.bootstrap_admin.username, &admin_hash, "admin")?;
+    let runner_signer = RunnerSigner::load_or_generate(&config.runner_auth)?;
 
     Ok(Arc::new(AppState {
         artifacts: ArtifactStore::new(&config.data_dir)?,
         config,
         db,
-        runner_client: RunnerClient::new(),
+        runner_client: RunnerClient::new(runner_signer.clone()),
+        runner_signer,
         config_path: Arc::new(config_path),
         server_bin: Arc::new(server_bin),
         login_attempts: Arc::new(Mutex::new(BTreeMap::new())),

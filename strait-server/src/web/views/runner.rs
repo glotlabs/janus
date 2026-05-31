@@ -10,8 +10,14 @@ pub(crate) struct RunnerFormView {
     pub base_url: String,
 }
 
+pub(crate) struct RunnerAuthView {
+    pub key_id: String,
+    pub public_key: String,
+}
+
 pub(crate) fn runners_page(
     runners: Vec<(Runner, Vec<RunnerJobDefinition>)>,
+    auth: RunnerAuthView,
     csrf: &str,
     error: Option<&str>,
     form: RunnerFormView,
@@ -33,17 +39,32 @@ pub(crate) fn runners_page(
                 form method="post" action="/runners" class="stack-lg" {
                     (csrf_input(csrf))
                     (form_error(error))
-                    div class="form-grid form-grid-3" {
+                    div class="form-grid form-grid-2" {
                         label { span { "Name" } input name="name" value=(form.name) maxlength="120" required data-validate data-trim-required="true"; }
                         label {
                             span { "Base URL" }
                             input name="base_url" type="url" value=(form.base_url) placeholder="http://127.0.0.1:8080" maxlength="2048" required data-validate data-trim-required="true";
                         }
-                        label { span { "Token" } input name="token" required data-validate data-trim-required="true"; }
                     }
                     div class="actions" {
                         button type="submit" { "Add runner" }
                     }
+                }
+            }
+            section class="card" {
+                div class="section-head" {
+                    div {
+                        div class="eyebrow" { "Server identity" }
+                        h2 { "Runner trust key" }
+                    }
+                }
+                div class="meta-pair" {
+                    span { "Key ID" }
+                    code { (auth.key_id) }
+                }
+                div class="meta-pair" {
+                    span { "Public key" }
+                    code { (auth.public_key) }
                 }
             }
             section class="card" {

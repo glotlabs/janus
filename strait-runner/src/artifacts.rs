@@ -1009,7 +1009,7 @@ mod tests {
             },
             auth: crate::config::AuthConfig {
                 mode: "bearer".to_string(),
-                tokens: Vec::new(),
+                servers: Vec::new(),
             },
             artifacts: crate::config::ArtifactsConfig {
                 max_size_mb: 1,
@@ -1029,31 +1029,10 @@ mod tests {
 
         AppState {
             config: std::sync::Arc::new(config.clone()),
-            auth: std::sync::Arc::new(
-                AuthStore::load_from_config(
-                    &crate::config::AuthConfig {
-                        mode: "bearer".to_string(),
-                        tokens: vec![
-                            crate::config::AuthTokenConfig {
-                                name: "writer".to_string(),
-                                token_env: "TOKEN_ARTIFACTS_WRITE".to_string(),
-                                permissions: vec!["artifacts:write".to_string()],
-                            },
-                            crate::config::AuthTokenConfig {
-                                name: "reader".to_string(),
-                                token_env: "TOKEN_ARTIFACTS_READ".to_string(),
-                                permissions: vec!["artifacts:read".to_string()],
-                            },
-                        ],
-                    },
-                    |name| match name {
-                        "TOKEN_ARTIFACTS_WRITE" => Some("artifacts-write-token".to_string()),
-                        "TOKEN_ARTIFACTS_READ" => Some("artifacts-read-token".to_string()),
-                        _ => None,
-                    },
-                )
-                .expect("auth should load"),
-            ),
+            auth: std::sync::Arc::new(AuthStore::test_with_bearer_tokens(&[
+                ("artifacts-write-token", "writer", &["artifacts:write"]),
+                ("artifacts-read-token", "reader", &["artifacts:read"]),
+            ])),
             manifests: std::sync::Arc::new(
                 ManifestStore::load_from_dir(&config.manifests_dir).expect("manifests should load"),
             ),
@@ -1088,7 +1067,7 @@ mod tests {
             },
             auth: crate::config::AuthConfig {
                 mode: "bearer".to_string(),
-                tokens: Vec::new(),
+                servers: Vec::new(),
             },
             artifacts: crate::config::ArtifactsConfig {
                 max_size_mb: 1,
@@ -1108,31 +1087,10 @@ mod tests {
 
         AppState {
             config: std::sync::Arc::new(config.clone()),
-            auth: std::sync::Arc::new(
-                AuthStore::load_from_config(
-                    &crate::config::AuthConfig {
-                        mode: "bearer".to_string(),
-                        tokens: vec![
-                            crate::config::AuthTokenConfig {
-                                name: "writer".to_string(),
-                                token_env: "TOKEN_ARTIFACTS_WRITE".to_string(),
-                                permissions: vec!["artifacts:write".to_string()],
-                            },
-                            crate::config::AuthTokenConfig {
-                                name: "reader".to_string(),
-                                token_env: "TOKEN_ARTIFACTS_READ".to_string(),
-                                permissions: vec!["artifacts:read".to_string()],
-                            },
-                        ],
-                    },
-                    |name| match name {
-                        "TOKEN_ARTIFACTS_WRITE" => Some("artifacts-write-token".to_string()),
-                        "TOKEN_ARTIFACTS_READ" => Some("artifacts-read-token".to_string()),
-                        _ => None,
-                    },
-                )
-                .expect("auth should load"),
-            ),
+            auth: std::sync::Arc::new(AuthStore::test_with_bearer_tokens(&[
+                ("artifacts-write-token", "writer", &["artifacts:write"]),
+                ("artifacts-read-token", "reader", &["artifacts:read"]),
+            ])),
             manifests: std::sync::Arc::new(
                 ManifestStore::load_from_dir(&config.manifests_dir).expect("manifests should load"),
             ),

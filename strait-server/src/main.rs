@@ -6,6 +6,7 @@ mod db;
 mod git;
 mod models;
 mod runner;
+mod runner_auth;
 mod scheduler;
 mod schema_diff;
 mod state_machine;

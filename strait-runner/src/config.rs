@@ -63,13 +63,14 @@ pub struct ServerConfig {
 pub struct AuthConfig {
     pub mode: String,
     #[serde(default)]
-    pub tokens: Vec<AuthTokenConfig>,
+    pub servers: Vec<AuthServerConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct AuthTokenConfig {
+pub struct AuthServerConfig {
     pub name: String,
-    pub token_env: String,
+    pub key_id: String,
+    pub public_key: String,
     pub permissions: Vec<String>,
 }
 
@@ -105,11 +106,12 @@ manifests_dir = "/etc/strait-runner/jobs"
 listen = "127.0.0.1:8080"
 
 [auth]
-mode = "bearer"
+mode = "signed"
 
-[[auth.tokens]]
+[[auth.servers]]
 name = "git-orchestrator"
-token_env = "STRAIT_RUNNER_TOKEN_GIT"
+key_id = "git-orchestrator-2026-05"
+public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 permissions = ["artifacts:write", "jobs:run"]
 
 [artifacts]
@@ -131,7 +133,7 @@ keep_failed_workdirs = true
 
         assert_eq!(parsed.data_dir, "/var/lib/strait-runner");
         assert_eq!(parsed.server.listen, "127.0.0.1:8080");
-        assert_eq!(parsed.auth.tokens.len(), 1);
+        assert_eq!(parsed.auth.servers.len(), 1);
         assert!(parsed.artifacts.require_checksum_on_upload);
         assert_eq!(parsed.artifacts.max_upload_requests_per_minute, 60);
         assert_eq!(parsed.jobs.max_request_body_kb, 64);

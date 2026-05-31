@@ -32,7 +32,6 @@ pub struct Runner {
     pub id: String,
     pub name: String,
     pub base_url: String,
-    pub token: String,
     pub enabled: bool,
     pub last_health_state: String,
     pub last_seen_at: Option<String>,

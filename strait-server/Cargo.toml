@@ -26,6 +26,8 @@ toml = "0.9.8"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt", "json"] }
 async-stream = "0.3.6"
+base64 = "0.22.1"
+ed25519-dalek = "2.2.0"
 url = "2.5.7"
 uuid = { version = "1.18.1", features = ["serde", "v4", "v7"] }
 

@@ -2075,7 +2075,7 @@ required = true
         },
         auth: AuthConfig {
             mode: "bearer".to_string(),
-            tokens: Vec::new(),
+            servers: Vec::new(),
         },
         artifacts: ArtifactsConfig {
             max_size_mb: 1,
@@ -2165,7 +2165,7 @@ concurrency = "parallel"
         },
         auth: AuthConfig {
             mode: "bearer".to_string(),
-            tokens: Vec::new(),
+            servers: Vec::new(),
         },
         artifacts: ArtifactsConfig {
             max_size_mb: 1,
@@ -2230,7 +2230,7 @@ concurrency = "{}"
         },
         auth: AuthConfig {
             mode: "bearer".to_string(),
-            tokens: Vec::new(),
+            servers: Vec::new(),
         },
         artifacts: ArtifactsConfig {
             max_size_mb: 1,
@@ -2254,29 +2254,17 @@ concurrency = "{}"
 fn build_state(config: Config) -> AppState {
     AppState {
         config: Arc::new(config.clone()),
-        auth: Arc::new(
-            AuthStore::load_from_config(
-                &AuthConfig {
-                    mode: "bearer".to_string(),
-                    tokens: vec![crate::config::AuthTokenConfig {
-                        name: "runner".to_string(),
-                        token_env: "TOKEN_RUNNER".to_string(),
-                        permissions: vec![
-                            "jobs:run".to_string(),
-                            "jobs:read".to_string(),
-                            "logs:read".to_string(),
-                            "artifacts:read".to_string(),
-                            "artifacts:write".to_string(),
-                        ],
-                    }],
-                },
-                |name| match name {
-                    "TOKEN_RUNNER" => Some("runner-token".to_string()),
-                    _ => None,
-                },
-            )
-            .expect("auth should load"),
-        ),
+        auth: Arc::new(AuthStore::test_with_bearer_tokens(&[(
+            "runner-token",
+            "runner",
+            &[
+                "jobs:run",
+                "jobs:read",
+                "logs:read",
+                "artifacts:read",
+                "artifacts:write",
+            ],
+        )])),
         manifests: Arc::new(
             ManifestStore::load_from_dir(&config.manifests_dir).expect("manifests should load"),
         ),

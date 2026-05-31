@@ -72,8 +72,7 @@ async fn git_push_triggers_pipeline_end_to_end() {
         .json(&json!({
             "csrf_token": csrf,
             "name": "mock-runner",
-            "base_url": runner.base_url,
-            "token": "token"
+            "base_url": runner.base_url
         }))
         .send()
         .await
@@ -212,6 +211,11 @@ login_rate_limit_per_minute = 100
 username = "admin"
 password = "password123"
 
+[runner_auth]
+key_id = "test-server"
+private_key_path = "{}/runner-signing.key"
+public_key_path = "{}/runner-signing.pub"
+
 [scheduler]
 poll_interval_ms = 100
 cancel_stuck_timeout_seconds = 1
@@ -225,6 +229,8 @@ healthcheck_interval_seconds = 3600
             temp.join("repos").display(),
             temp.join("data/server.sqlite3").display(),
             port,
+            temp.join("data").display(),
+            temp.join("data").display(),
         ),
     )
     .expect("config");

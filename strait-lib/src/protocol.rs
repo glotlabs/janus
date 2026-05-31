@@ -1,5 +1,37 @@
 pub const HEADER_IDEMPOTENCY_KEY: &str = "x-idempotency-key";
 pub const HEADER_SHA256: &str = "x-sha256";
+pub const HEADER_SIGNATURE: &str = "x-strait-signature";
+pub const HEADER_SIGNATURE_KEY_ID: &str = "x-strait-key-id";
+pub const HEADER_SIGNATURE_TIMESTAMP: &str = "x-strait-timestamp";
+pub const HEADER_SIGNATURE_NONCE: &str = "x-strait-nonce";
+pub const HEADER_SIGNATURE_CONTENT_SHA256: &str = "x-strait-content-sha256";
+pub const SIGNATURE_ALGORITHM_ED25519: &str = "ed25519";
+
+use sha2::{Digest, Sha256};
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex_lower(&Sha256::digest(bytes))
+}
+
+pub fn canonical_signed_request(
+    method: &str,
+    path_and_query: &str,
+    content_sha256: &str,
+    timestamp: &str,
+    nonce: &str,
+) -> String {
+    format!("{method}\n{path_and_query}\n{content_sha256}\n{timestamp}\n{nonce}")
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerRouteTemplate {
@@ -111,6 +143,28 @@ mod tests {
         assert_eq!(
             RunnerRoute::RunLogs { job_id: "job_123" }.template(),
             RunnerRouteTemplate::RunLogs
+        );
+    }
+
+    #[test]
+    fn canonical_signed_request_is_stable() {
+        assert_eq!(
+            canonical_signed_request(
+                "POST",
+                "/jobs/build/runs",
+                "abc123",
+                "2026-05-31T10:00:00Z",
+                "nonce-1",
+            ),
+            "POST\n/jobs/build/runs\nabc123\n2026-05-31T10:00:00Z\nnonce-1"
+        );
+    }
+
+    #[test]
+    fn sha256_hex_encodes_lowercase_digest() {
+        assert_eq!(
+            sha256_hex(b"strait"),
+            "1c97db665f1495dc252b62f3d9b5d8edd94fa5b45c69b35dc4f5d46dd3aad190"
         );
     }
 }

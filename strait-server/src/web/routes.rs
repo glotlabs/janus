@@ -297,7 +297,6 @@ struct CreateRunnerForm {
     csrf_token: String,
     name: String,
     base_url: String,
-    token: String,
 }
 #[derive(Deserialize)]
 struct UpdateRunnerForm {
@@ -497,6 +496,7 @@ async fn runners_page(
         .collect::<Result<Vec<_>, Response>>()?;
     Ok(runner_view::runners_page(
         runners_with_jobs,
+        runner_auth_view(&state),
         &csrf,
         None,
         runner_view::RunnerFormView::default(),
@@ -514,11 +514,9 @@ async fn create_runner(
         .map_err(|error| render_runners_form_error(&state, &user, &form, error))?;
     validate_base_url(&form.base_url)
         .map_err(|error| render_runners_form_error(&state, &user, &form, error))?;
-    validate_runner_token(&form.token)
-        .map_err(|error| render_runners_form_error(&state, &user, &form, error))?;
     let runner_id = state
         .db
-        .create_runner(form.name.trim(), form.base_url.trim(), form.token.trim())
+        .create_runner(form.name.trim(), form.base_url.trim())
         .map_err(internal_error)?;
     refresh_single_runner(&state, &runner_id)
         .await
@@ -844,7 +842,6 @@ struct ApiRepoCreateRequest {
 struct ApiRunnerCreateRequest {
     name: String,
     base_url: String,
-    token: String,
     csrf_token: String,
 }
 #[derive(Deserialize)]
@@ -953,14 +950,9 @@ async fn api_create_runner(
         .map_err(|_| api_forbidden("csrf validation failed"))?;
     validate_runner_name(&request.name).map_err(api_bad_request)?;
     validate_base_url(&request.base_url).map_err(api_bad_request)?;
-    validate_runner_token(&request.token).map_err(api_bad_request)?;
     let runner_id = state
         .db
-        .create_runner(
-            request.name.trim(),
-            request.base_url.trim(),
-            request.token.trim(),
-        )
+        .create_runner(request.name.trim(), request.base_url.trim())
         .map_err(internal_error)?;
     refresh_single_runner(&state, &runner_id)
         .await
@@ -1672,6 +1664,13 @@ fn runner_form_view(form: &CreateRunnerForm) -> runner_view::RunnerFormView {
     }
 }
 
+fn runner_auth_view(state: &Arc<AppState>) -> runner_view::RunnerAuthView {
+    runner_view::RunnerAuthView {
+        key_id: state.runner_signer.key_id().to_string(),
+        public_key: state.runner_signer.public_key_base64(),
+    }
+}
+
 fn render_users_form_error(
     state: &Arc<AppState>,
     user: &User,
@@ -1734,6 +1733,7 @@ fn render_runners_form_error(
         let runners_with_jobs = runners_with_jobs(state)?;
         Ok::<_, Response>(runner_view::runners_page(
             runners_with_jobs,
+            runner_auth_view(state),
             &csrf_token(state, user),
             Some(&error),
             runner_form_view(form),
@@ -1987,13 +1987,6 @@ fn validate_runner_name(name: &str) -> Result<(), String> {
         Err("runner name cannot be empty".to_string())
     } else if name.trim().chars().count() > 120 {
         Err("runner name must be 120 characters or fewer".to_string())
-    } else {
-        Ok(())
-    }
-}
-fn validate_runner_token(token: &str) -> Result<(), String> {
-    if token.trim().is_empty() {
-        Err("runner token cannot be empty".to_string())
     } else {
         Ok(())
     }

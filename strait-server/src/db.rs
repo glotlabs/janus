@@ -352,14 +352,13 @@ impl Database {
         &self,
         name: &str,
         base_url: &str,
-        token: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let id = Uuid::now_v7().to_string();
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
-            "INSERT INTO runners (id, name, base_url, token_encrypted_or_local_ref, enabled, last_health_state, created_at)
-             VALUES (?1, ?2, ?3, ?4, 1, 'unknown', ?5)",
-            params![id, name, base_url, token, now()],
+            "INSERT INTO runners (id, name, base_url, enabled, last_health_state, created_at)
+             VALUES (?1, ?2, ?3, 1, 'unknown', ?4)",
+            params![id, name, base_url, now()],
         )?;
         Ok(id)
     }
@@ -367,18 +366,17 @@ impl Database {
     pub fn list_runners(&self) -> Result<Vec<Runner>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, name, base_url, token_encrypted_or_local_ref, enabled, last_health_state, last_seen_at, created_at FROM runners ORDER BY name ASC",
+            "SELECT id, name, base_url, enabled, last_health_state, last_seen_at, created_at FROM runners ORDER BY name ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(Runner {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 base_url: row.get(2)?,
-                token: row.get(3)?,
-                enabled: row.get::<_, i64>(4)? != 0,
-                last_health_state: row.get(5)?,
-                last_seen_at: row.get(6)?,
-                created_at: row.get(7)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+                last_health_state: row.get(4)?,
+                last_seen_at: row.get(5)?,
+                created_at: row.get(6)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -390,18 +388,17 @@ impl Database {
     ) -> Result<Option<Runner>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         Ok(conn.query_row(
-            "SELECT id, name, base_url, token_encrypted_or_local_ref, enabled, last_health_state, last_seen_at, created_at FROM runners WHERE id = ?1",
+            "SELECT id, name, base_url, enabled, last_health_state, last_seen_at, created_at FROM runners WHERE id = ?1",
             [runner_id],
             |row| {
                 Ok(Runner {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     base_url: row.get(2)?,
-                    token: row.get(3)?,
-                    enabled: row.get::<_, i64>(4)? != 0,
-                    last_health_state: row.get(5)?,
-                    last_seen_at: row.get(6)?,
-                    created_at: row.get(7)?,
+                    enabled: row.get::<_, i64>(3)? != 0,
+                    last_health_state: row.get(4)?,
+                    last_seen_at: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
             },
         ).optional()?)

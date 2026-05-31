@@ -30,7 +30,6 @@ CREATE TABLE IF NOT EXISTS runners (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     base_url TEXT NOT NULL,
-    token_encrypted_or_local_ref TEXT NOT NULL,
     enabled INTEGER NOT NULL,
     last_health_state TEXT NOT NULL,
     last_seen_at TEXT,

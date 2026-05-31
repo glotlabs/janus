@@ -5,11 +5,12 @@ manifests_dir = "/etc/strait-runner/jobs"
 listen = "127.0.0.1:8080"
 
 [auth]
-mode = "bearer"
+mode = "signed"
 
-[[auth.tokens]]
-name = "git-orchestrator"
-token_env = "STRAIT_RUNNER_TOKEN_GIT"
+[[auth.servers]]
+name = "main-strait"
+key_id = "main-strait-2026-05"
+public_key = "paste-server-public-key-base64-here"
 permissions = [
   "artifacts:write",
   "artifacts:read",

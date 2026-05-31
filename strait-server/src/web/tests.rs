@@ -444,7 +444,7 @@ async fn api_workflow_reports_additive_schema_diff_without_stale_status() {
 }
 
 #[tokio::test]
-async fn api_create_runner_rejects_empty_token() {
+async fn api_create_runner_rejects_invalid_base_url() {
     let fixture = test_fixture().await;
     let admin = admin_user(&fixture.state);
     let token = csrf_token(&fixture.state, &admin);
@@ -460,8 +460,7 @@ async fn api_create_runner_rejects_empty_token() {
                     json!({
                         "csrf_token": token,
                         "name": "runner",
-                        "base_url": "http://127.0.0.1:1",
-                        "token": " "
+                        "base_url": "not a url"
                     })
                     .to_string(),
                 ))
@@ -477,7 +476,7 @@ async fn api_create_runner_rejects_empty_token() {
     assert_eq!(payload["error"]["code"], json!("bad_request"));
     assert_eq!(
         payload["error"]["message"],
-        json!("runner token cannot be empty")
+        json!("base_url must be a valid URL")
     );
 }
 
@@ -1127,7 +1126,7 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
     let consumer_runner_id = fixture
         .state
         .db
-        .create_runner("consumer-runner", &mock.base_url, "token")
+        .create_runner("consumer-runner", &mock.base_url)
         .expect("consumer runner");
     fixture
         .state
@@ -1244,7 +1243,7 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
     let consumer_runner_id = fixture
         .state
         .db
-        .create_runner("consumer-mismatch", &mock.base_url, "token")
+        .create_runner("consumer-mismatch", &mock.base_url)
         .expect("consumer runner");
     fixture
         .state
@@ -2079,7 +2078,7 @@ async fn test_fixture_with_runner(base_url: &str) -> TestFixture {
     let runner_name = format!("runner-{}", Uuid::now_v7());
     let runner_id = state
         .db
-        .create_runner(&runner_name, base_url, "token")
+        .create_runner(&runner_name, base_url)
         .expect("runner");
     if base_url != "http://127.0.0.1:9" {
         state
@@ -2255,6 +2254,11 @@ login_rate_limit_per_minute = 100
 username = "admin"
 password = "password123"
 
+[runner_auth]
+key_id = "test-server"
+private_key_path = "{}/runner-signing.key"
+public_key_path = "{}/runner-signing.pub"
+
 [scheduler]
 poll_interval_ms = 50
 cancel_stuck_timeout_seconds = 1
@@ -2267,6 +2271,8 @@ healthcheck_interval_seconds = 60
             dir.join("data").display(),
             dir.join("repos").display(),
             dir.join("data/server.sqlite3").display(),
+            dir.join("data").display(),
+            dir.join("data").display(),
         ),
     )
     .expect("config");

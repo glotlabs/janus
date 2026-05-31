@@ -14,6 +14,7 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
+    middleware::from_fn_with_state,
     routing::{get, post},
 };
 use chrono::{SecondsFormat, Utc};
@@ -150,9 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_path = config_path();
     let config = Arc::new(Config::load_from_path(&config_path)?);
-    let auth = Arc::new(AuthStore::load_from_config(&config.auth, |name| {
-        env::var(name).ok()
-    })?);
+    let auth = Arc::new(AuthStore::load_from_config(&config.auth)?);
     let manifests = Arc::new(ManifestStore::load_from_dir(&config.manifests_dir)?);
     let artifacts = Arc::new(ArtifactStore::new(
         &config.data_dir,
@@ -244,10 +243,7 @@ fn config_path() -> String {
 }
 
 fn build_app(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
-        .route("/ready", get(readiness))
-        .route("/readiness", get(readiness))
+    let protected = Router::new()
         .route(RunnerRouteTemplate::Capabilities.path(), get(capabilities))
         .route(RunnerRouteTemplate::Jobs.path(), get(jobs::list_jobs))
         .route(
@@ -264,6 +260,16 @@ fn build_app(state: AppState) -> Router {
             get(jobs::get_job).delete(jobs::cancel_job),
         )
         .route(RunnerRouteTemplate::RunLogs.path(), get(jobs::get_job_logs))
+        .layer(from_fn_with_state(
+            state.clone(),
+            auth::verify_signed_request,
+        ));
+
+    Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(readiness))
+        .route("/readiness", get(readiness))
+        .merge(protected)
         .with_state(state)
 }
 
@@ -370,7 +376,7 @@ mod tests {
     use crate::{
         artifacts::ArtifactStore,
         auth::AuthStore,
-        config::{ArtifactsConfig, AuthConfig, AuthTokenConfig, Config, JobsConfig, ServerConfig},
+        config::{ArtifactsConfig, AuthConfig, Config, JobsConfig, ServerConfig},
         jobs::JobStore,
         manifest::ManifestStore,
     };
@@ -408,6 +414,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::get(RunnerRoute::Capabilities.path())
+                    .header("authorization", "Bearer jobs-read-token")
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -631,7 +638,7 @@ required = true
             },
             auth: AuthConfig {
                 mode: "bearer".to_string(),
-                tokens: Vec::new(),
+                servers: Vec::new(),
             },
             artifacts: ArtifactsConfig {
                 max_size_mb: 1,
@@ -651,49 +658,21 @@ required = true
 
         AppState {
             config: Arc::new(config.clone()),
-            auth: Arc::new(
-                AuthStore::load_from_config(
-                    &AuthConfig {
-                        mode: "bearer".to_string(),
-                        tokens: vec![
-                            AuthTokenConfig {
-                                name: "jobs-run".to_string(),
-                                token_env: "TOKEN_JOBS_RUN".to_string(),
-                                permissions: vec!["jobs:run".to_string()],
-                            },
-                            AuthTokenConfig {
-                                name: "jobs-read".to_string(),
-                                token_env: "TOKEN_JOBS_READ".to_string(),
-                                permissions: vec!["jobs:read".to_string()],
-                            },
-                            AuthTokenConfig {
-                                name: "logs-read".to_string(),
-                                token_env: "TOKEN_LOGS_READ".to_string(),
-                                permissions: vec!["logs:read".to_string()],
-                            },
-                            AuthTokenConfig {
-                                name: "artifacts-write".to_string(),
-                                token_env: "TOKEN_ARTIFACTS_WRITE".to_string(),
-                                permissions: vec!["artifacts:write".to_string()],
-                            },
-                            AuthTokenConfig {
-                                name: "artifacts-read".to_string(),
-                                token_env: "TOKEN_ARTIFACTS_READ".to_string(),
-                                permissions: vec!["artifacts:read".to_string()],
-                            },
-                        ],
-                    },
-                    |name| match name {
-                        "TOKEN_JOBS_RUN" => Some("jobs-run-token".to_string()),
-                        "TOKEN_JOBS_READ" => Some("jobs-read-token".to_string()),
-                        "TOKEN_LOGS_READ" => Some("logs-read-token".to_string()),
-                        "TOKEN_ARTIFACTS_WRITE" => Some("artifacts-write-token".to_string()),
-                        "TOKEN_ARTIFACTS_READ" => Some("artifacts-read-token".to_string()),
-                        _ => None,
-                    },
-                )
-                .expect("auth should load"),
-            ),
+            auth: Arc::new(AuthStore::test_with_bearer_tokens(&[
+                ("jobs-run-token", "jobs-run", &["jobs:run"]),
+                ("jobs-read-token", "jobs-read", &["jobs:read"]),
+                ("logs-read-token", "logs-read", &["logs:read"]),
+                (
+                    "artifacts-write-token",
+                    "artifacts-write",
+                    &["artifacts:write"],
+                ),
+                (
+                    "artifacts-read-token",
+                    "artifacts-read",
+                    &["artifacts:read"],
+                ),
+            ])),
             manifests: Arc::new(
                 ManifestStore::load_from_dir(&config.manifests_dir).expect("manifests should load"),
             ),
