@@ -2,7 +2,7 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::models::Runner;
+use crate::models::{Runner, RunnerJobSchema};
 
 #[derive(Debug, Clone)]
 pub struct RunnerClient {
@@ -19,7 +19,7 @@ impl RunnerClient {
     pub async fn list_jobs(
         &self,
         runner: &Runner,
-    ) -> Result<Vec<RunnerJobDefinition>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Vec<RunnerJobSchema>, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
             .get(format!("{}/jobs", runner.base_url.trim_end_matches('/')))
@@ -165,13 +165,6 @@ impl RunnerClient {
         }
         Ok(response.bytes().await?.to_vec())
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunnerJobDefinition {
-    pub name: String,
-    #[serde(flatten)]
-    pub definition: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

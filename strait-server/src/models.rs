@@ -50,6 +50,76 @@ pub struct Workflow {
     pub definition_json: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerInputType {
+    String,
+    Integer,
+    Boolean,
+    Artifact,
+    Json,
+}
+
+impl RunnerInputType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Boolean => "boolean",
+            Self::Artifact => "artifact",
+            Self::Json => "json",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerOutputType {
+    Artifact,
+    String,
+    Integer,
+    Boolean,
+    Json,
+}
+
+impl RunnerOutputType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Artifact => "artifact",
+            Self::String => "string",
+            Self::Integer => "integer",
+            Self::Boolean => "boolean",
+            Self::Json => "json",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerJobInputSchema {
+    #[serde(rename = "type")]
+    pub kind: RunnerInputType,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerJobOutputSchema {
+    #[serde(rename = "type")]
+    pub kind: RunnerOutputType,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct RunnerJobSchema {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, RunnerJobInputSchema>,
+    #[serde(default)]
+    pub outputs: BTreeMap<String, RunnerJobOutputSchema>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushEvent {
     pub id: String,

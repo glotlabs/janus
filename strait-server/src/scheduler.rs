@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use glob::Pattern;
@@ -9,7 +9,7 @@ use tracing::{error, info, warn};
 use crate::{
     app::AppState,
     git,
-    models::{WorkflowDefinition, WorkflowInputBinding, WorkflowTrigger},
+    models::{RunnerJobSchema, WorkflowDefinition, WorkflowInputBinding, WorkflowTrigger},
     state_machine::{self, JobStatus, PipelineStatus},
 };
 
@@ -53,18 +53,6 @@ pub(crate) async fn reconcile_once(state: Arc<AppState>) -> Result<(), Box<dyn s
     dispatch_pending_jobs(Arc::clone(&state)).await?;
     poll_running_jobs(state).await?;
     Ok(())
-}
-
-#[derive(Debug, Clone, serde::Deserialize, Default)]
-struct RunnerJobDefinition {
-    #[serde(default)]
-    inputs: BTreeMap<String, RunnerJobInputDefinition>,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-struct RunnerJobInputDefinition {
-    #[serde(rename = "type")]
-    kind: String,
 }
 
 async fn reconcile(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
@@ -443,7 +431,7 @@ async fn resolve_job_inputs(
     pipeline: &crate::models::PipelineRun,
     job_run_id: &str,
     job_definition: &crate::models::WorkflowJobDefinition,
-    runner_job_definition: &RunnerJobDefinition,
+    runner_job_definition: &RunnerJobSchema,
 ) -> Result<Map<String, Value>, Box<dyn std::error::Error>> {
     let mut resolved = Map::new();
     for (key, value) in &job_definition.inputs {
@@ -561,7 +549,7 @@ fn load_runner_job_definition(
     state: Arc<AppState>,
     runner_id: &str,
     runner_job_name: &str,
-) -> Result<RunnerJobDefinition, Box<dyn std::error::Error>> {
+) -> Result<RunnerJobSchema, Box<dyn std::error::Error>> {
     let definition_json = state
         .db
         .list_runner_jobs(runner_id)?
@@ -780,10 +768,10 @@ async fn refresh_runner_health(state: Arc<AppState>) -> Result<(), Box<dyn std::
                 let payloads = jobs
                     .into_iter()
                     .map(|job| {
+                        let name = job.name.clone();
                         (
-                            job.name,
-                            serde_json::to_string(&job.definition)
-                                .unwrap_or_else(|_| "{}".to_string()),
+                            name,
+                            serde_json::to_string(&job).unwrap_or_else(|_| "{}".to_string()),
                         )
                     })
                     .collect::<Vec<_>>();

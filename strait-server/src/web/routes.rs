@@ -27,8 +27,8 @@ use crate::{
     },
     git,
     models::{
-        self, PipelineRun, Repo, User, Workflow, WorkflowDefinition, WorkflowInputBinding,
-        WorkflowJobDefinition, WorkflowTrigger, parse_job_output_binding,
+        self, PipelineRun, Repo, RunnerJobSchema, User, Workflow, WorkflowDefinition,
+        WorkflowInputBinding, WorkflowJobDefinition, WorkflowTrigger, parse_job_output_binding,
     },
     scheduler,
 };
@@ -1051,9 +1051,10 @@ async fn refresh_single_runner(state: &Arc<AppState>, runner_id: &str) -> Result
     let jobs = jobs
         .into_iter()
         .map(|job| {
+            let name = job.name.clone();
             (
-                job.name,
-                serde_json::to_string(&job.definition).unwrap_or_else(|_| "{}".to_string()),
+                name,
+                serde_json::to_string(&job).unwrap_or_else(|_| "{}".to_string()),
             )
         })
         .collect::<Vec<_>>();
@@ -1204,8 +1205,8 @@ fn validate_workflow_runners(
                 runner.name, job.runner_job_name
             )));
         };
-        let runner_job = serde_json::from_str::<WorkflowRunnerJobCatalogEntry>(&definition_json)
-            .map_err(|error| {
+        let runner_job =
+            serde_json::from_str::<RunnerJobSchema>(&definition_json).map_err(|error| {
                 internal_error(format!(
                     "failed to parse runner job definition for {}: {error}",
                     job.runner_job_name
@@ -1286,12 +1287,12 @@ fn validate_workflow_runners(
                             binding.output_name
                         ))
                     })?;
-                if output.kind != expected_kind {
+                if output.kind.as_str() != expected_kind {
                     return Err(bad_request(format!(
                         "workflow input {input_name} expects {expected_kind} but job-{}.{} is {}",
                         binding.job_index + 1,
                         binding.output_name,
-                        output.kind
+                        output.kind.as_str()
                     )));
                 }
                 continue;
@@ -1332,7 +1333,7 @@ fn describe_json_value_kind(value: &Value) -> &'static str {
 struct WorkflowRunnerCatalogEntry {
     id: String,
     name: String,
-    jobs: Vec<WorkflowRunnerJobCatalogEntry>,
+    jobs: Vec<RunnerJobSchema>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1342,32 +1343,6 @@ struct WorkflowEditorJob {
     allow_failure: bool,
     #[serde(default)]
     inputs: BTreeMap<String, WorkflowInputBinding>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkflowRunnerJobCatalogEntry {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    inputs: BTreeMap<String, WorkflowRunnerJobInputEntry>,
-    #[serde(default)]
-    outputs: BTreeMap<String, WorkflowRunnerJobOutputEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkflowRunnerJobInputEntry {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    required: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct WorkflowRunnerJobOutputEntry {
-    #[serde(rename = "type", default)]
-    kind: String,
-    #[serde(default)]
-    required: bool,
 }
 
 fn workflow_runner_catalog(
@@ -1382,18 +1357,10 @@ fn workflow_runner_catalog(
             .map_err(internal_error)?
             .into_iter()
             .map(|(job_name, definition_json)| {
-                let parsed =
-                    serde_json::from_str::<WorkflowRunnerJobCatalogEntry>(&definition_json)
-                        .unwrap_or(WorkflowRunnerJobCatalogEntry {
-                            name: job_name.clone(),
-                            inputs: BTreeMap::new(),
-                            outputs: BTreeMap::new(),
-                        });
-                WorkflowRunnerJobCatalogEntry {
-                    name: job_name,
-                    inputs: parsed.inputs,
-                    outputs: parsed.outputs,
-                }
+                let mut parsed =
+                    serde_json::from_str::<RunnerJobSchema>(&definition_json).unwrap_or_default();
+                parsed.name = job_name;
+                parsed
             })
             .collect::<Vec<_>>();
         catalog.push(WorkflowRunnerCatalogEntry {
@@ -1451,10 +1418,9 @@ fn workflow_form_fields(
                 .iter()
                 .any(|item| item.name == job.runner_job_name)
             {
-                runner.jobs.push(WorkflowRunnerJobCatalogEntry {
+                runner.jobs.push(RunnerJobSchema {
                     name: job.runner_job_name.clone(),
-                    inputs: BTreeMap::new(),
-                    outputs: BTreeMap::new(),
+                    ..RunnerJobSchema::default()
                 });
                 runner
                     .jobs
@@ -1464,10 +1430,9 @@ fn workflow_form_fields(
             catalog.push(WorkflowRunnerCatalogEntry {
                 id: job.runner_id.clone(),
                 name: job.runner_id.clone(),
-                jobs: vec![WorkflowRunnerJobCatalogEntry {
+                jobs: vec![RunnerJobSchema {
                     name: job.runner_job_name.clone(),
-                    inputs: BTreeMap::new(),
-                    outputs: BTreeMap::new(),
+                    ..RunnerJobSchema::default()
                 }],
             });
         }
