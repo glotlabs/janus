@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::runner::JobOutputMetadata;
+pub type RunnerJobInputDefinition = strait_lib::JobInputDefinitionResponse;
+pub type RunnerJobOutputDefinition = strait_lib::JobOutputDefinitionResponse;
+pub type RunnerJobDefinition = strait_lib::JobDefinitionResponse;
+use strait_lib::JobOutputMetadata;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
@@ -48,76 +50,6 @@ pub struct Workflow {
     pub version_id: String,
     pub trigger_json: String,
     pub definition_json: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerInputType {
-    String,
-    Integer,
-    Boolean,
-    Artifact,
-    Json,
-}
-
-impl RunnerInputType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::String => "string",
-            Self::Integer => "integer",
-            Self::Boolean => "boolean",
-            Self::Artifact => "artifact",
-            Self::Json => "json",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerOutputType {
-    Artifact,
-    String,
-    Integer,
-    Boolean,
-    Json,
-}
-
-impl RunnerOutputType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Artifact => "artifact",
-            Self::String => "string",
-            Self::Integer => "integer",
-            Self::Boolean => "boolean",
-            Self::Json => "json",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerJobInputSchema {
-    #[serde(rename = "type")]
-    pub kind: RunnerInputType,
-    #[serde(default)]
-    pub required: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerJobOutputSchema {
-    #[serde(rename = "type")]
-    pub kind: RunnerOutputType,
-    #[serde(default)]
-    pub required: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct RunnerJobSchema {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub inputs: BTreeMap<String, RunnerJobInputSchema>,
-    #[serde(default)]
-    pub outputs: BTreeMap<String, RunnerJobOutputSchema>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

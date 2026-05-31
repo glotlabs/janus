@@ -1,4 +1,3 @@
 [workspace]
-members = ["strait-runner", "strait-server"]
+members = ["strait-lib", "strait-runner", "strait-server"]
 resolver = "3"
-

@@ -15,6 +15,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Duration as StdDuration;
+use strait_lib::{ArtifactUploadResponse, HEADER_SHA256};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -22,8 +23,6 @@ use crate::{
     auth::{ArtifactsRead, ArtifactsWrite, Authorized},
     storage::atomic_write,
 };
-
-const ARTIFACT_HEADER_SHA256: &str = "x-sha256";
 
 #[derive(Debug, Clone)]
 pub struct ArtifactStore {
@@ -396,7 +395,7 @@ impl fmt::Display for ArtifactError {
             Self::ParseExpiry { expires_at, source } => {
                 write!(f, "failed to parse artifact expiry {expires_at}: {source}")
             }
-            Self::MissingChecksum => write!(f, "missing required x-sha256 header"),
+            Self::MissingChecksum => write!(f, "missing required {HEADER_SHA256} header"),
             Self::ChecksumMismatch { expected, actual } => {
                 write!(
                     f,
@@ -516,7 +515,7 @@ pub async fn upload_artifact(
     State(state): State<crate::AppState>,
     headers: HeaderMap,
     body: Body,
-) -> Result<(StatusCode, Json<ArtifactMetadata>), ArtifactError> {
+) -> Result<(StatusCode, Json<ArtifactUploadResponse>), ArtifactError> {
     state
         .rate_limiter
         .check(
@@ -540,7 +539,15 @@ pub async fn upload_artifact(
         .artifacts
         .store_bytes(bytes.as_ref(), checksum.as_deref())?;
 
-    Ok((StatusCode::CREATED, Json(metadata)))
+    Ok((
+        StatusCode::CREATED,
+        Json(ArtifactUploadResponse {
+            artifact_id: metadata.artifact_id,
+            sha256: metadata.sha256,
+            size: metadata.size,
+            expires_at: metadata.expires_at,
+        }),
+    ))
 }
 
 pub async fn download_artifact(
@@ -557,10 +564,10 @@ pub async fn download_artifact(
         HeaderValue::from_static("application/octet-stream"),
     );
     response.headers_mut().insert(
-        header::HeaderName::from_static(ARTIFACT_HEADER_SHA256),
+        header::HeaderName::from_static(HEADER_SHA256),
         HeaderValue::from_str(&artifact.metadata.sha256).map_err(|error| {
             ArtifactError::InvalidHeader {
-                name: ARTIFACT_HEADER_SHA256,
+                name: HEADER_SHA256,
                 message: error.to_string(),
             }
         })?,
@@ -573,12 +580,12 @@ fn checksum_from_headers(
     headers: &HeaderMap,
     checksum_required: bool,
 ) -> Result<Option<String>, ArtifactError> {
-    match headers.get(ARTIFACT_HEADER_SHA256) {
+    match headers.get(HEADER_SHA256) {
         Some(value) => {
             let value = value
                 .to_str()
                 .map_err(|error| ArtifactError::InvalidHeader {
-                    name: ARTIFACT_HEADER_SHA256,
+                    name: HEADER_SHA256,
                     message: error.to_string(),
                 })?;
             validate_sha256_header(value)?;
@@ -592,14 +599,14 @@ fn checksum_from_headers(
 fn validate_sha256_header(value: &str) -> Result<(), ArtifactError> {
     if value.len() != 64 {
         return Err(ArtifactError::InvalidHeader {
-            name: ARTIFACT_HEADER_SHA256,
+            name: HEADER_SHA256,
             message: "must be exactly 64 hexadecimal characters".to_string(),
         });
     }
 
     if !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(ArtifactError::InvalidHeader {
-            name: ARTIFACT_HEADER_SHA256,
+            name: HEADER_SHA256,
             message: "must contain only hexadecimal characters".to_string(),
         });
     }
@@ -645,6 +652,10 @@ mod tests {
         routing::{get, post},
     };
     use sha2::{Digest, Sha256};
+    use strait_lib::{
+        ArtifactUploadResponse, HEADER_SHA256, ROUTE_RUNNER_ARTIFACT_BY_ID, ROUTE_RUNNER_ARTIFACTS,
+        runner_artifact_path,
+    };
     use tower::util::ServiceExt;
 
     use super::{ArtifactStore, download_artifact, upload_artifact};
@@ -703,8 +714,8 @@ mod tests {
         let temp = temp_dir("artifact_http");
         let state = test_state(&temp);
         let app = Router::new()
-            .route("/artifacts", post(upload_artifact))
-            .route("/artifacts/{artifact_id}", get(download_artifact))
+            .route(ROUTE_RUNNER_ARTIFACTS, post(upload_artifact))
+            .route(ROUTE_RUNNER_ARTIFACT_BY_ID, get(download_artifact))
             .with_state(state);
         let payload = b"artifact-body";
         let checksum = hex::encode(Sha256::digest(payload));
@@ -712,10 +723,10 @@ mod tests {
         let upload = app
             .clone()
             .oneshot(
-                Request::post("/artifacts")
+                Request::post(ROUTE_RUNNER_ARTIFACTS)
                     .header("authorization", "Bearer artifacts-write-token")
                     .header("content-type", "application/octet-stream")
-                    .header("x-sha256", checksum.as_str())
+                    .header(HEADER_SHA256, checksum.as_str())
                     .body(Body::from(payload.to_vec()))
                     .expect("request should build"),
             )
@@ -726,12 +737,12 @@ mod tests {
         let body = axum::body::to_bytes(upload.into_body(), usize::MAX)
             .await
             .expect("upload body");
-        let metadata: super::ArtifactMetadata =
-            serde_json::from_slice(&body).expect("metadata should deserialize");
+        let metadata: ArtifactUploadResponse =
+            serde_json::from_slice(&body).expect("shared upload response should deserialize");
 
         let download = app
             .oneshot(
-                Request::get(format!("/artifacts/{}", metadata.artifact_id))
+                Request::get(runner_artifact_path(&metadata.artifact_id))
                     .header("authorization", "Bearer artifacts-read-token")
                     .body(Body::empty())
                     .expect("request should build"),

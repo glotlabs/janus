@@ -10,12 +10,11 @@ use uuid::Uuid;
 
 use crate::models::{
     JobRun, JobRunDetail, JobRunOutput, PipelineRun, PipelineSnapshot, PreviousJobSummary,
-    PushEvent, PushEventRef, Repo, Runner, RunnerInputType, RunnerJobInputSchema,
-    RunnerJobOutputSchema, RunnerJobSchema, RunnerOutputType, ServerArtifact, User, Workflow,
-    WorkflowJobOutcomePolicy,
+    PushEvent, PushEventRef, Repo, Runner, RunnerJobDefinition, RunnerJobInputDefinition,
+    RunnerJobOutputDefinition, ServerArtifact, User, Workflow, WorkflowJobOutcomePolicy,
 };
-use crate::runner::JobOutputMetadata;
 use crate::state_machine::{self, JobStatus};
+use strait_lib::{Concurrency, InputType, JobOutputMetadata, OutputType};
 
 #[derive(Clone)]
 pub struct Database {
@@ -427,7 +426,7 @@ impl Database {
     pub fn replace_runner_jobs(
         &self,
         runner_id: &str,
-        jobs: &[RunnerJobSchema],
+        jobs: &[RunnerJobDefinition],
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut conn = self.conn.lock().expect("db mutex poisoned");
         let tx = conn.transaction()?;
@@ -435,11 +434,18 @@ impl Database {
         for job in jobs {
             let runner_job_id = Uuid::now_v7().to_string();
             tx.execute(
-                "INSERT INTO runner_jobs (id, runner_id, job_name, last_refreshed_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![runner_job_id, runner_id, job.name, now()],
+                "INSERT INTO runner_jobs (id, runner_id, job_name, concurrency, timeout_seconds, last_refreshed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    runner_job_id,
+                    runner_id,
+                    job.name,
+                    job.concurrency.as_str(),
+                    job.timeout_seconds as i64,
+                    now()
+                ],
             )?;
-            insert_runner_job_schema(&tx, &runner_job_id, job)?;
+            insert_runner_job_definition(&tx, &runner_job_id, job)?;
         }
         tx.commit()?;
         Ok(())
@@ -448,17 +454,24 @@ impl Database {
     pub fn list_runner_jobs(
         &self,
         runner_id: &str,
-    ) -> Result<Vec<RunnerJobSchema>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<RunnerJobDefinition>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, job_name FROM runner_jobs WHERE runner_id = ?1 ORDER BY job_name",
+            "SELECT id, job_name, concurrency, timeout_seconds FROM runner_jobs WHERE runner_id = ?1 ORDER BY job_name",
         )?;
         let rows = stmt.query_map([runner_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })?;
         let rows = rows.collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(job_id, job_name)| load_runner_job_schema(&conn, &job_id, &job_name))
+            .map(|(job_id, job_name, concurrency, timeout_seconds)| {
+                load_runner_job_definition(&conn, &job_id, &job_name, &concurrency, timeout_seconds)
+            })
             .collect()
     }
 
@@ -469,7 +482,7 @@ impl Database {
         enabled: bool,
         trigger_json: &str,
         definition_json: &str,
-        job_schemas: &[RunnerJobSchema],
+        job_schemas: &[RunnerJobDefinition],
     ) -> Result<(), Box<dyn std::error::Error>> {
         let workflow_id = Uuid::now_v7().to_string();
         let version_id = Uuid::now_v7().to_string();
@@ -612,7 +625,7 @@ impl Database {
         enabled: bool,
         trigger_json: &str,
         definition_json: &str,
-        job_schemas: &[RunnerJobSchema],
+        job_schemas: &[RunnerJobDefinition],
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut conn = self.conn.lock().expect("db mutex poisoned");
         let tx = conn.transaction()?;
@@ -1317,10 +1330,10 @@ impl Database {
     pub fn workflow_job_schemas(
         &self,
         workflow_version_id: &str,
-    ) -> Result<Vec<RunnerJobSchema>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<RunnerJobDefinition>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, job_index, job_name FROM workflow_version_job_schemas WHERE workflow_version_id = ?1 ORDER BY job_index",
+            "SELECT id, job_index, job_name, concurrency, timeout_seconds FROM workflow_version_job_schemas WHERE workflow_version_id = ?1 ORDER BY job_index",
         )?;
         let rows = stmt
             .query_map([workflow_version_id], |row| {
@@ -1328,13 +1341,23 @@ impl Database {
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
-            .map(|(schema_id, _job_index, job_name)| {
-                load_workflow_version_job_schema(&conn, &schema_id, &job_name)
-            })
+            .map(
+                |(schema_id, _job_index, job_name, concurrency, timeout_seconds)| {
+                    load_workflow_version_job_schema(
+                        &conn,
+                        &schema_id,
+                        &job_name,
+                        &concurrency,
+                        timeout_seconds,
+                    )
+                },
+            )
             .collect()
     }
 
@@ -1590,107 +1613,121 @@ fn next_dispatch_idempotency_key() -> String {
     format!("dispatch_{}", Uuid::now_v7().simple())
 }
 
-fn parse_runner_input_type(value: String) -> rusqlite::Result<RunnerInputType> {
-    match value.as_str() {
-        "string" => Ok(RunnerInputType::String),
-        "integer" => Ok(RunnerInputType::Integer),
-        "boolean" => Ok(RunnerInputType::Boolean),
-        "artifact" => Ok(RunnerInputType::Artifact),
-        "json" => Ok(RunnerInputType::Json),
-        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+fn parse_runner_input_type(value: String) -> rusqlite::Result<InputType> {
+    InputType::parse(&value).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
             0,
             rusqlite::types::Type::Text,
             format!("invalid runner input type {value}").into(),
-        )),
-    }
+        )
+    })
 }
 
-fn parse_runner_output_type(value: String) -> rusqlite::Result<RunnerOutputType> {
-    match value.as_str() {
-        "artifact" => Ok(RunnerOutputType::Artifact),
-        "string" => Ok(RunnerOutputType::String),
-        "integer" => Ok(RunnerOutputType::Integer),
-        "boolean" => Ok(RunnerOutputType::Boolean),
-        "json" => Ok(RunnerOutputType::Json),
-        _ => Err(rusqlite::Error::FromSqlConversionFailure(
+fn parse_runner_output_type(value: String) -> rusqlite::Result<OutputType> {
+    OutputType::parse(&value).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
             0,
             rusqlite::types::Type::Text,
             format!("invalid runner output type {value}").into(),
-        )),
-    }
+        )
+    })
 }
 
-fn insert_runner_job_schema(
+fn parse_runner_concurrency(value: String) -> rusqlite::Result<Concurrency> {
+    Concurrency::parse(&value).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("invalid runner concurrency {value}").into(),
+        )
+    })
+}
+
+fn insert_runner_job_definition(
     tx: &rusqlite::Transaction<'_>,
     runner_job_id: &str,
-    schema: &RunnerJobSchema,
+    schema: &RunnerJobDefinition,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for (input_name, input) in &schema.inputs {
         tx.execute(
-            "INSERT INTO runner_job_inputs (id, runner_job_id, input_name, input_type, required)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO runner_job_inputs (id, runner_job_id, input_name, input_type, required, sensitive, max_length, pattern, max_json_bytes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 Uuid::now_v7().to_string(),
                 runner_job_id,
                 input_name,
                 input.kind.as_str(),
-                input.required as i64
+                input.required as i64,
+                input.sensitive as i64,
+                input.max_length.map(|value| value as i64),
+                input.pattern.as_deref(),
+                input.max_json_bytes.map(|value| value as i64),
             ],
         )?;
     }
     for (output_name, output) in &schema.outputs {
         tx.execute(
-            "INSERT INTO runner_job_outputs (id, runner_job_id, output_name, output_type, required)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO runner_job_outputs (id, runner_job_id, output_name, output_type, required, output_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 Uuid::now_v7().to_string(),
                 runner_job_id,
                 output_name,
                 output.kind.as_str(),
-                output.required as i64
+                output.required as i64,
+                output.path.as_str(),
             ],
         )?;
     }
     Ok(())
 }
 
-fn load_runner_job_schema(
+fn load_runner_job_definition(
     conn: &Connection,
     runner_job_id: &str,
     job_name: &str,
-) -> Result<RunnerJobSchema, Box<dyn std::error::Error>> {
+    concurrency: &str,
+    timeout_seconds: i64,
+) -> Result<RunnerJobDefinition, Box<dyn std::error::Error>> {
     let mut input_stmt = conn.prepare(
-        "SELECT input_name, input_type, required FROM runner_job_inputs WHERE runner_job_id = ?1 ORDER BY input_name",
+        "SELECT input_name, input_type, required, sensitive, max_length, pattern, max_json_bytes FROM runner_job_inputs WHERE runner_job_id = ?1 ORDER BY input_name",
     )?;
     let inputs = input_stmt
         .query_map([runner_job_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                RunnerJobInputSchema {
+                RunnerJobInputDefinition {
                     kind: parse_runner_input_type(row.get(1)?)?,
                     required: row.get::<_, i64>(2)? != 0,
+                    sensitive: row.get::<_, i64>(3)? != 0,
+                    max_length: row.get::<_, Option<i64>>(4)?.map(|value| value as usize),
+                    pattern: row.get(5)?,
+                    max_json_bytes: row.get::<_, Option<i64>>(6)?.map(|value| value as usize),
                 },
             ))
         })?
         .collect::<Result<BTreeMap<_, _>, _>>()?;
 
     let mut output_stmt = conn.prepare(
-        "SELECT output_name, output_type, required FROM runner_job_outputs WHERE runner_job_id = ?1 ORDER BY output_name",
+        "SELECT output_name, output_type, required, output_path FROM runner_job_outputs WHERE runner_job_id = ?1 ORDER BY output_name",
     )?;
     let outputs = output_stmt
         .query_map([runner_job_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                RunnerJobOutputSchema {
+                RunnerJobOutputDefinition {
                     kind: parse_runner_output_type(row.get(1)?)?,
                     required: row.get::<_, i64>(2)? != 0,
+                    path: row.get(3)?,
                 },
             ))
         })?
         .collect::<Result<BTreeMap<_, _>, _>>()?;
 
-    Ok(RunnerJobSchema {
+    Ok(RunnerJobDefinition {
         name: job_name.to_string(),
+        concurrency: parse_runner_concurrency(concurrency.to_string())?,
+        timeout_seconds: timeout_seconds as u64,
         inputs,
         outputs,
     })
@@ -1699,38 +1736,50 @@ fn load_runner_job_schema(
 fn insert_workflow_version_job_schemas(
     tx: &rusqlite::Transaction<'_>,
     workflow_version_id: &str,
-    schemas: &[RunnerJobSchema],
+    schemas: &[RunnerJobDefinition],
 ) -> Result<(), Box<dyn std::error::Error>> {
     for (job_index, schema) in schemas.iter().enumerate() {
         let schema_id = Uuid::now_v7().to_string();
         tx.execute(
-            "INSERT INTO workflow_version_job_schemas (id, workflow_version_id, job_index, job_name)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![schema_id, workflow_version_id, job_index as i64, schema.name],
+            "INSERT INTO workflow_version_job_schemas (id, workflow_version_id, job_index, job_name, concurrency, timeout_seconds)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                schema_id,
+                workflow_version_id,
+                job_index as i64,
+                schema.name,
+                schema.concurrency.as_str(),
+                schema.timeout_seconds as i64
+            ],
         )?;
         for (input_name, input) in &schema.inputs {
             tx.execute(
-                "INSERT INTO workflow_version_job_schema_inputs (id, workflow_version_job_schema_id, input_name, input_type, required)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO workflow_version_job_schema_inputs (id, workflow_version_job_schema_id, input_name, input_type, required, sensitive, max_length, pattern, max_json_bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     Uuid::now_v7().to_string(),
                     schema_id,
                     input_name,
                     input.kind.as_str(),
-                    input.required as i64
+                    input.required as i64,
+                    input.sensitive as i64,
+                    input.max_length.map(|value| value as i64),
+                    input.pattern.as_deref(),
+                    input.max_json_bytes.map(|value| value as i64),
                 ],
             )?;
         }
         for (output_name, output) in &schema.outputs {
             tx.execute(
-                "INSERT INTO workflow_version_job_schema_outputs (id, workflow_version_job_schema_id, output_name, output_type, required)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO workflow_version_job_schema_outputs (id, workflow_version_job_schema_id, output_name, output_type, required, output_path)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     Uuid::now_v7().to_string(),
                     schema_id,
                     output_name,
                     output.kind.as_str(),
-                    output.required as i64
+                    output.required as i64,
+                    output.path.as_str(),
                 ],
             )?;
         }
@@ -1742,39 +1791,48 @@ fn load_workflow_version_job_schema(
     conn: &Connection,
     schema_id: &str,
     job_name: &str,
-) -> Result<RunnerJobSchema, Box<dyn std::error::Error>> {
+    concurrency: &str,
+    timeout_seconds: i64,
+) -> Result<RunnerJobDefinition, Box<dyn std::error::Error>> {
     let mut input_stmt = conn.prepare(
-        "SELECT input_name, input_type, required FROM workflow_version_job_schema_inputs WHERE workflow_version_job_schema_id = ?1 ORDER BY input_name",
+        "SELECT input_name, input_type, required, sensitive, max_length, pattern, max_json_bytes FROM workflow_version_job_schema_inputs WHERE workflow_version_job_schema_id = ?1 ORDER BY input_name",
     )?;
     let inputs = input_stmt
         .query_map([schema_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                RunnerJobInputSchema {
+                RunnerJobInputDefinition {
                     kind: parse_runner_input_type(row.get(1)?)?,
                     required: row.get::<_, i64>(2)? != 0,
+                    sensitive: row.get::<_, i64>(3)? != 0,
+                    max_length: row.get::<_, Option<i64>>(4)?.map(|value| value as usize),
+                    pattern: row.get(5)?,
+                    max_json_bytes: row.get::<_, Option<i64>>(6)?.map(|value| value as usize),
                 },
             ))
         })?
         .collect::<Result<BTreeMap<_, _>, _>>()?;
 
     let mut output_stmt = conn.prepare(
-        "SELECT output_name, output_type, required FROM workflow_version_job_schema_outputs WHERE workflow_version_job_schema_id = ?1 ORDER BY output_name",
+        "SELECT output_name, output_type, required, output_path FROM workflow_version_job_schema_outputs WHERE workflow_version_job_schema_id = ?1 ORDER BY output_name",
     )?;
     let outputs = output_stmt
         .query_map([schema_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                RunnerJobOutputSchema {
+                RunnerJobOutputDefinition {
                     kind: parse_runner_output_type(row.get(1)?)?,
                     required: row.get::<_, i64>(2)? != 0,
+                    path: row.get(3)?,
                 },
             ))
         })?
         .collect::<Result<BTreeMap<_, _>, _>>()?;
 
-    Ok(RunnerJobSchema {
+    Ok(RunnerJobDefinition {
         name: job_name.to_string(),
+        concurrency: parse_runner_concurrency(concurrency.to_string())?,
+        timeout_seconds: timeout_seconds as u64,
         inputs,
         outputs,
     })
@@ -1788,15 +1846,15 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
         );",
     )?;
 
-    let applied_v2 = conn
+    let applied_v3 = conn
         .query_row(
-            "SELECT 1 FROM schema_migrations WHERE version = 2",
+            "SELECT 1 FROM schema_migrations WHERE version = 3",
             [],
             |_| Ok(()),
         )
         .optional()?
         .is_some();
-    if applied_v2 {
+    if applied_v3 {
         return Ok(());
     }
 
@@ -1842,6 +1900,8 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             id TEXT PRIMARY KEY,
             runner_id TEXT NOT NULL,
             job_name TEXT NOT NULL,
+            concurrency TEXT NOT NULL DEFAULT 'parallel',
+            timeout_seconds INTEGER NOT NULL DEFAULT 0,
             last_refreshed_at TEXT NOT NULL,
             UNIQUE(runner_id, job_name),
             FOREIGN KEY(runner_id) REFERENCES runners(id) ON DELETE CASCADE
@@ -1852,6 +1912,10 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             input_name TEXT NOT NULL,
             input_type TEXT NOT NULL,
             required INTEGER NOT NULL,
+            sensitive INTEGER NOT NULL DEFAULT 0,
+            max_length INTEGER,
+            pattern TEXT,
+            max_json_bytes INTEGER,
             UNIQUE(runner_job_id, input_name),
             FOREIGN KEY(runner_job_id) REFERENCES runner_jobs(id) ON DELETE CASCADE
         );
@@ -1861,6 +1925,7 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             output_name TEXT NOT NULL,
             output_type TEXT NOT NULL,
             required INTEGER NOT NULL,
+            output_path TEXT NOT NULL DEFAULT '',
             UNIQUE(runner_job_id, output_name),
             FOREIGN KEY(runner_job_id) REFERENCES runner_jobs(id) ON DELETE CASCADE
         );
@@ -1887,6 +1952,8 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             workflow_version_id TEXT NOT NULL,
             job_index INTEGER NOT NULL,
             job_name TEXT NOT NULL,
+            concurrency TEXT NOT NULL DEFAULT 'parallel',
+            timeout_seconds INTEGER NOT NULL DEFAULT 0,
             UNIQUE(workflow_version_id, job_index),
             FOREIGN KEY(workflow_version_id) REFERENCES workflow_versions(id) ON DELETE CASCADE
         );
@@ -1896,6 +1963,10 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             input_name TEXT NOT NULL,
             input_type TEXT NOT NULL,
             required INTEGER NOT NULL,
+            sensitive INTEGER NOT NULL DEFAULT 0,
+            max_length INTEGER,
+            pattern TEXT,
+            max_json_bytes INTEGER,
             UNIQUE(workflow_version_job_schema_id, input_name),
             FOREIGN KEY(workflow_version_job_schema_id) REFERENCES workflow_version_job_schemas(id) ON DELETE CASCADE
         );
@@ -1905,6 +1976,7 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             output_name TEXT NOT NULL,
             output_type TEXT NOT NULL,
             required INTEGER NOT NULL,
+            output_path TEXT NOT NULL DEFAULT '',
             UNIQUE(workflow_version_job_schema_id, output_name),
             FOREIGN KEY(workflow_version_job_schema_id) REFERENCES workflow_version_job_schemas(id) ON DELETE CASCADE
         );
@@ -2091,6 +2163,70 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
     if !columns.iter().any(|name| name == "output_metadata_json") {
         tx.execute_batch("ALTER TABLE job_runs ADD COLUMN output_metadata_json TEXT;")?;
     }
+    add_column_if_missing(
+        &tx,
+        "runner_jobs",
+        "concurrency",
+        "TEXT NOT NULL DEFAULT 'parallel'",
+    )?;
+    add_column_if_missing(
+        &tx,
+        "runner_jobs",
+        "timeout_seconds",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        &tx,
+        "workflow_version_job_schemas",
+        "concurrency",
+        "TEXT NOT NULL DEFAULT 'parallel'",
+    )?;
+    add_column_if_missing(
+        &tx,
+        "workflow_version_job_schemas",
+        "timeout_seconds",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        &tx,
+        "runner_job_inputs",
+        "sensitive",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(&tx, "runner_job_inputs", "max_length", "INTEGER")?;
+    add_column_if_missing(&tx, "runner_job_inputs", "pattern", "TEXT")?;
+    add_column_if_missing(&tx, "runner_job_inputs", "max_json_bytes", "INTEGER")?;
+    add_column_if_missing(
+        &tx,
+        "runner_job_outputs",
+        "output_path",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column_if_missing(
+        &tx,
+        "workflow_version_job_schema_inputs",
+        "sensitive",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column_if_missing(
+        &tx,
+        "workflow_version_job_schema_inputs",
+        "max_length",
+        "INTEGER",
+    )?;
+    add_column_if_missing(&tx, "workflow_version_job_schema_inputs", "pattern", "TEXT")?;
+    add_column_if_missing(
+        &tx,
+        "workflow_version_job_schema_inputs",
+        "max_json_bytes",
+        "INTEGER",
+    )?;
+    add_column_if_missing(
+        &tx,
+        "workflow_version_job_schema_outputs",
+        "output_path",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     tx.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?1)",
         [now()],
@@ -2099,6 +2235,29 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
         "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (2, ?1)",
         [now()],
     )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (3, ?1)",
+        [now()],
+    )?;
     tx.commit()?;
+    Ok(())
+}
+
+fn add_column_if_missing(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+    if !columns.iter().any(|name| name == column) {
+        tx.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition};"
+        ))?;
+    }
     Ok(())
 }

@@ -2,18 +2,16 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+pub use strait_lib::{
+    FailureCategory, JobArtifactMetadata, JobCreatedResponse, JobDefinitionResponse,
+    JobInputDefinitionResponse, JobLogsResponse, JobOutput, JobOutputDefinitionResponse,
+    JobOutputMetadata, JobStatus, JobStatusResponse, JobStreamMetadata, TerminalReason,
+};
 
-use crate::manifest::{Concurrency, InputType, JobManifest, OutputType};
+use crate::manifest::JobManifest;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobCreated {
-    pub job_id: String,
-    pub status: JobStatus,
-    pub started_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JobCreatedResponse {
     pub job_id: String,
     pub status: JobStatus,
     pub started_at: String,
@@ -47,155 +45,6 @@ pub struct JobMetadata {
 pub struct JobLogs {
     pub stdout: String,
     pub stderr: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JobLogsResponse {
-    pub stdout: String,
-    pub stderr: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum JobOutput {
-    Artifact {
-        artifact_id: String,
-        sha256: String,
-        size: u64,
-    },
-    String {
-        value: String,
-    },
-    Integer {
-        value: i64,
-    },
-    Boolean {
-        value: bool,
-    },
-    Json {
-        value: Value,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct JobStatusResponse {
-    pub job_id: String,
-    pub name: String,
-    pub status: JobStatus,
-    pub started_at: String,
-    pub finished_at: Option<String>,
-    #[serde(default)]
-    pub duration_ms: Option<u64>,
-    pub exit_code: Option<i32>,
-    #[serde(default)]
-    pub terminal_reason: Option<TerminalReason>,
-    #[serde(default)]
-    pub failure_category: Option<FailureCategory>,
-    pub outputs: BTreeMap<String, JobOutput>,
-    #[serde(default)]
-    pub output_metadata: JobOutputMetadata,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TerminalReason {
-    Success,
-    ExitCode,
-    Timeout,
-    Canceled,
-    Shutdown,
-    SpawnError,
-    WaitError,
-    CaptureError,
-    LogLimitExceeded,
-    MissingRequiredOutput,
-    OutputRegistrationFailed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FailureCategory {
-    Job,
-    Infra,
-    Timeout,
-    Canceled,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct JobOutputMetadata {
-    #[serde(default)]
-    pub stdout: JobStreamMetadata,
-    #[serde(default)]
-    pub stderr: JobStreamMetadata,
-    #[serde(default)]
-    pub artifacts: JobArtifactMetadata,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct JobStreamMetadata {
-    pub bytes: u64,
-    #[serde(default)]
-    pub truncated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct JobArtifactMetadata {
-    pub count: u64,
-    pub bytes: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JobDefinitionResponse {
-    pub name: String,
-    pub concurrency: Concurrency,
-    pub timeout_seconds: u64,
-    pub inputs: BTreeMap<String, JobInputDefinitionResponse>,
-    pub outputs: BTreeMap<String, JobOutputDefinitionResponse>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JobInputDefinitionResponse {
-    #[serde(rename = "type")]
-    pub kind: InputType,
-    pub required: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub sensitive: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_length: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pattern: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_json_bytes: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JobOutputDefinitionResponse {
-    #[serde(rename = "type")]
-    pub kind: OutputType,
-    pub path: String,
-    pub required: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum JobStatus {
-    Running,
-    CancelRequested,
-    Canceling,
-    Success,
-    Failed,
-    TimedOut,
-    Canceled,
-    Rejected,
-}
-
-impl JobStatus {
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Success | Self::Failed | Self::TimedOut | Self::Canceled | Self::Rejected
-        )
-    }
 }
 
 pub(super) struct JobExecution {
@@ -301,8 +150,4 @@ impl From<JobManifest> for JobDefinitionResponse {
                 .collect(),
         }
     }
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }

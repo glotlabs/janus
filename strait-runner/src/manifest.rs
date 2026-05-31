@@ -5,7 +5,8 @@ use std::{
 };
 
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+pub use strait_lib::{Concurrency, InputType, OutputType};
 
 pub(crate) const RESERVED_INPUT_NAMES: &[&str] = &[
     "id",
@@ -143,26 +144,6 @@ impl JobManifest {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum InputType {
-    String,
-    Integer,
-    Boolean,
-    Artifact,
-    Json,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OutputType {
-    Artifact,
-    String,
-    Integer,
-    Boolean,
-    Json,
-}
-
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct InputSpec {
     #[serde(rename = "type")]
@@ -181,14 +162,6 @@ pub struct OutputSpec {
     pub kind: OutputType,
     pub path: String,
     pub required: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Concurrency {
-    Parallel,
-    JobExclusive,
-    GlobalExclusive,
 }
 
 #[derive(Debug)]

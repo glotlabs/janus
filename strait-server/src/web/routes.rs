@@ -31,7 +31,7 @@ use crate::{
     },
     git,
     models::{
-        self, PipelineRun, Repo, RunnerJobSchema, User, Workflow, WorkflowDefinition,
+        self, PipelineRun, Repo, RunnerJobDefinition, User, Workflow, WorkflowDefinition,
         WorkflowInputBinding, WorkflowJobDefinition, WorkflowJobOutcomePolicy, WorkflowTrigger,
         parse_job_output_binding,
     },
@@ -1061,7 +1061,7 @@ async fn refresh_single_runner(state: &Arc<AppState>, runner_id: &str) -> Result
 struct ParsedWorkflow {
     trigger_json: String,
     definition_json: String,
-    job_schemas: Vec<RunnerJobSchema>,
+    job_schemas: Vec<RunnerJobDefinition>,
 }
 
 fn parse_workflow_form(
@@ -1162,7 +1162,7 @@ fn parse_workflow_form_jobs(input: &str) -> Result<Vec<WorkflowJobDefinition>, R
 fn validate_workflow_runners(
     state: &Arc<AppState>,
     definition: &WorkflowDefinition,
-) -> Result<Vec<RunnerJobSchema>, Response> {
+) -> Result<Vec<RunnerJobDefinition>, Response> {
     let mut runner_job_defs = BTreeMap::new();
     for (job_index, job) in definition.jobs.iter().enumerate() {
         let runner = state
@@ -1308,7 +1308,7 @@ fn describe_json_value_kind(value: &Value) -> &'static str {
 struct WorkflowRunnerCatalogEntry {
     id: String,
     name: String,
-    jobs: Vec<RunnerJobSchema>,
+    jobs: Vec<RunnerJobDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1408,9 +1408,9 @@ fn workflow_form_view(
                 .iter()
                 .any(|item| item.name == job.runner_job_name)
             {
-                runner.jobs.push(RunnerJobSchema {
+                runner.jobs.push(RunnerJobDefinition {
                     name: job.runner_job_name.clone(),
-                    ..RunnerJobSchema::default()
+                    ..RunnerJobDefinition::default()
                 });
                 runner
                     .jobs
@@ -1420,9 +1420,9 @@ fn workflow_form_view(
             catalog.push(WorkflowRunnerCatalogEntry {
                 id: job.runner_id.clone(),
                 name: job.runner_id.clone(),
-                jobs: vec![RunnerJobSchema {
+                jobs: vec![RunnerJobDefinition {
                     name: job.runner_job_name.clone(),
-                    ..RunnerJobSchema::default()
+                    ..RunnerJobDefinition::default()
                 }],
             });
         }

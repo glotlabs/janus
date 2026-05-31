@@ -1,10 +1,10 @@
 use maud::{Markup, html};
 
-use crate::models::{Runner, RunnerJobSchema};
+use crate::models::{Runner, RunnerJobDefinition};
 
 use super::components::{badge, csrf_input, layout, page_intro, runner_state_tone};
 
-pub(crate) fn runners_page(runners: Vec<(Runner, Vec<RunnerJobSchema>)>, csrf: &str) -> Markup {
+pub(crate) fn runners_page(runners: Vec<(Runner, Vec<RunnerJobDefinition>)>, csrf: &str) -> Markup {
     layout(
         "Runners",
         html! {

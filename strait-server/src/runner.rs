@@ -1,8 +1,13 @@
 use reqwest::{Client, StatusCode};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub use strait_lib::{
+    ArtifactUploadResponse, HEADER_IDEMPOTENCY_KEY, HEADER_SHA256, JobCreatedResponse,
+    JobLogsResponse, JobOutputMetadata, JobStatusResponse, ROUTE_RUNNER_ARTIFACTS,
+    ROUTE_RUNNER_JOBS, runner_artifact_path, runner_job_run_path, runner_run_logs_path,
+    runner_run_path,
+};
 
-use crate::models::{Runner, RunnerJobSchema};
+use crate::models::{Runner, RunnerJobDefinition};
 
 #[derive(Debug, Clone)]
 pub struct RunnerClient {
@@ -19,10 +24,10 @@ impl RunnerClient {
     pub async fn list_jobs(
         &self,
         runner: &Runner,
-    ) -> Result<Vec<RunnerJobSchema>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Vec<RunnerJobDefinition>, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .get(format!("{}/jobs", runner.base_url.trim_end_matches('/')))
+            .get(runner_url(runner, ROUTE_RUNNER_JOBS))
             .bearer_auth(&runner.token)
             .send()
             .await?;
@@ -40,12 +45,9 @@ impl RunnerClient {
     ) -> Result<ArtifactUploadResponse, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .post(format!(
-                "{}/artifacts",
-                runner.base_url.trim_end_matches('/')
-            ))
+            .post(runner_url(runner, ROUTE_RUNNER_ARTIFACTS))
             .bearer_auth(&runner.token)
-            .header("x-sha256", sha256)
+            .header(HEADER_SHA256, sha256)
             .body(bytes)
             .send()
             .await?;
@@ -64,13 +66,9 @@ impl RunnerClient {
     ) -> Result<JobCreatedResponse, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .post(format!(
-                "{}/jobs/{}/runs",
-                runner.base_url.trim_end_matches('/'),
-                runner_job_name
-            ))
+            .post(runner_url(runner, &runner_job_run_path(runner_job_name)))
             .bearer_auth(&runner.token)
-            .header("x-idempotency-key", idempotency_key)
+            .header(HEADER_IDEMPOTENCY_KEY, idempotency_key)
             .json(&body)
             .send()
             .await?;
@@ -87,11 +85,7 @@ impl RunnerClient {
     ) -> Result<JobStatusResponse, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .get(format!(
-                "{}/runs/{}",
-                runner.base_url.trim_end_matches('/'),
-                runner_run_id
-            ))
+            .get(runner_url(runner, &runner_run_path(runner_run_id)))
             .bearer_auth(&runner.token)
             .send()
             .await?;
@@ -108,11 +102,7 @@ impl RunnerClient {
     ) -> Result<JobLogsResponse, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .get(format!(
-                "{}/runs/{}/logs",
-                runner.base_url.trim_end_matches('/'),
-                runner_run_id
-            ))
+            .get(runner_url(runner, &runner_run_logs_path(runner_run_id)))
             .bearer_auth(&runner.token)
             .send()
             .await?;
@@ -129,11 +119,7 @@ impl RunnerClient {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .delete(format!(
-                "{}/runs/{}",
-                runner.base_url.trim_end_matches('/'),
-                runner_run_id
-            ))
+            .delete(runner_url(runner, &runner_run_path(runner_run_id)))
             .bearer_auth(&runner.token)
             .send()
             .await?;
@@ -150,11 +136,7 @@ impl RunnerClient {
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         let response = self
             .http
-            .get(format!(
-                "{}/artifacts/{}",
-                runner.base_url.trim_end_matches('/'),
-                artifact_id
-            ))
+            .get(runner_url(runner, &runner_artifact_path(artifact_id)))
             .bearer_auth(&runner.token)
             .send()
             .await?;
@@ -163,6 +145,10 @@ impl RunnerClient {
         }
         Ok(response.bytes().await?.to_vec())
     }
+}
+
+fn runner_url(runner: &Runner, path: &str) -> String {
+    format!("{}{}", runner.base_url.trim_end_matches('/'), path)
 }
 
 async fn runner_http_error(
@@ -196,141 +182,4 @@ async fn runner_http_error(
         Some(detail) => format!("{context} with {status}: {detail}{retry_after}").into(),
         None => format!("{context} with {status}{retry_after}").into(),
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArtifactUploadResponse {
-    pub artifact_id: String,
-    pub sha256: String,
-    pub size: u64,
-    pub expires_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobCreatedResponse {
-    pub job_id: String,
-    pub status: String,
-    pub started_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobStatusResponse {
-    pub job_id: String,
-    pub name: String,
-    pub status: String,
-    pub started_at: String,
-    pub finished_at: Option<String>,
-    pub duration_ms: Option<u64>,
-    pub exit_code: Option<i32>,
-    pub terminal_reason: Option<TerminalReason>,
-    pub failure_category: Option<FailureCategory>,
-    #[serde(default)]
-    pub outputs: std::collections::BTreeMap<String, JobOutputResponse>,
-    #[serde(default)]
-    pub output_metadata: JobOutputMetadata,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum JobOutputResponse {
-    Artifact {
-        artifact_id: String,
-        sha256: String,
-        size: u64,
-    },
-    String {
-        value: String,
-    },
-    Integer {
-        value: i64,
-    },
-    Boolean {
-        value: bool,
-    },
-    Json {
-        value: Value,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobLogsResponse {
-    pub stdout: String,
-    pub stderr: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TerminalReason {
-    Success,
-    ExitCode,
-    Timeout,
-    Canceled,
-    Shutdown,
-    SpawnError,
-    WaitError,
-    CaptureError,
-    LogLimitExceeded,
-    MissingRequiredOutput,
-    OutputRegistrationFailed,
-}
-
-impl TerminalReason {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::ExitCode => "exit_code",
-            Self::Timeout => "timeout",
-            Self::Canceled => "canceled",
-            Self::Shutdown => "shutdown",
-            Self::SpawnError => "spawn_error",
-            Self::WaitError => "wait_error",
-            Self::CaptureError => "capture_error",
-            Self::LogLimitExceeded => "log_limit_exceeded",
-            Self::MissingRequiredOutput => "missing_required_output",
-            Self::OutputRegistrationFailed => "output_registration_failed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FailureCategory {
-    Job,
-    Infra,
-    Timeout,
-    Canceled,
-}
-
-impl FailureCategory {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Job => "job",
-            Self::Infra => "infra",
-            Self::Timeout => "timeout",
-            Self::Canceled => "canceled",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct JobOutputMetadata {
-    #[serde(default)]
-    pub stdout: JobStreamMetadata,
-    #[serde(default)]
-    pub stderr: JobStreamMetadata,
-    #[serde(default)]
-    pub artifacts: JobArtifactMetadata,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct JobStreamMetadata {
-    pub bytes: u64,
-    #[serde(default)]
-    pub truncated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct JobArtifactMetadata {
-    pub count: u64,
-    pub bytes: u64,
 }

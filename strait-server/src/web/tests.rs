@@ -4,7 +4,7 @@ use crate::{
     auth::{hash_password, session_cookie},
     git,
     models::{
-        Repo, RunnerJobSchema, User, WorkflowDefinition, WorkflowInputBinding,
+        Repo, RunnerJobDefinition, User, WorkflowDefinition, WorkflowInputBinding,
         WorkflowJobDefinition, WorkflowJobOutcomePolicy, WorkflowTrigger,
     },
     scheduler,
@@ -27,6 +27,10 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+};
+use strait_lib::{
+    HEADER_IDEMPOTENCY_KEY, ROUTE_RUNNER_ARTIFACT_BY_ID, ROUTE_RUNNER_ARTIFACTS,
+    ROUTE_RUNNER_JOB_RUNS, ROUTE_RUNNER_JOBS, ROUTE_RUNNER_RUN_BY_ID, ROUTE_RUNNER_RUN_LOGS,
 };
 use tokio::time::sleep;
 use tower::util::ServiceExt;
@@ -72,10 +76,10 @@ async fn workflows_page_renders_runner_job_builder() {
         .replace_runner_jobs(
             &fixture.runner_id,
             &[
-                runner_job_schema(
+                runner_job_definition(
                     r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
                 ),
-                runner_job_schema(
+                runner_job_definition(
                     r#"{"name":"test-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true}},"outputs":{}}"#,
                 ),
             ],
@@ -171,7 +175,7 @@ async fn workflows_page_marks_stale_workflow_schemas() {
         .db
         .replace_runner_jobs(
             &fixture.runner_id,
-            &[runner_job_schema(
+            &[runner_job_definition(
                 r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true},"published":{"type":"boolean","required":false}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
             )],
         )
@@ -275,7 +279,7 @@ async fn api_workflow_includes_schema_status() {
         .db
         .replace_runner_jobs(
             &fixture.runner_id,
-            &[runner_job_schema(
+            &[runner_job_definition(
                 r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true}},"outputs":{}}"#,
             )],
         )
@@ -382,10 +386,10 @@ async fn workflow_form_rejects_missing_job_output_reference() {
         .replace_runner_jobs(
             &fixture.runner_id,
             &[
-                runner_job_schema(
+                runner_job_definition(
                     r#"{"name":"produce","timeout_seconds":60,"inputs":{},"outputs":{"version":{"type":"string","required":true}}}"#,
                 ),
-                runner_job_schema(
+                runner_job_definition(
                     r#"{"name":"consume","timeout_seconds":60,"inputs":{"version":{"type":"string","required":true}},"outputs":{}}"#,
                 ),
             ],
@@ -449,10 +453,10 @@ async fn workflow_form_rejects_typed_output_input_mismatch() {
         .replace_runner_jobs(
             &fixture.runner_id,
             &[
-                runner_job_schema(
+                runner_job_definition(
                     r#"{"name":"produce","timeout_seconds":60,"inputs":{},"outputs":{"build_number":{"type":"integer","required":true}}}"#,
                 ),
-                runner_job_schema(
+                runner_job_definition(
                     r#"{"name":"consume","timeout_seconds":60,"inputs":{"build_number":{"type":"string","required":true}},"outputs":{}}"#,
                 ),
             ],
@@ -519,7 +523,7 @@ async fn workflow_form_rejects_literal_input_type_mismatch() {
         .db
         .replace_runner_jobs(
             &fixture.runner_id,
-            &[runner_job_schema(
+            &[runner_job_definition(
                 r#"{"name":"build-app","timeout_seconds":60,"inputs":{"published":{"type":"boolean","required":true}},"outputs":{}}"#,
             )],
         )
@@ -697,7 +701,7 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
         .db
         .replace_runner_jobs(
             &producer_runner_id,
-            &[runner_job_schema(
+            &[runner_job_definition(
                 r#"{"name":"produce-typed","timeout_seconds":60,"inputs":{},"outputs":{"version":{"type":"string","required":true},"build_number":{"type":"integer","required":true},"published":{"type":"boolean","required":true},"metadata":{"type":"json","required":true}}}"#,
             )],
         )
@@ -712,7 +716,7 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
         .db
         .replace_runner_jobs(
             &consumer_runner_id,
-            &[runner_job_schema(
+            &[runner_job_definition(
                 r#"{"name":"consume-typed","timeout_seconds":60,"inputs":{"version":{"type":"string","required":true},"build_number":{"type":"integer","required":true},"published":{"type":"boolean","required":true},"metadata":{"type":"json","required":true}},"outputs":{}}"#,
             )],
         )
@@ -814,7 +818,7 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
         .db
         .replace_runner_jobs(
             &producer_runner_id,
-            &[runner_job_schema(
+            &[runner_job_definition(
                 r#"{"name":"produce-int","timeout_seconds":60,"inputs":{},"outputs":{"build_number":{"type":"integer","required":true}}}"#,
             )],
         )
@@ -829,7 +833,7 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
         .db
         .replace_runner_jobs(
             &consumer_runner_id,
-            &[runner_job_schema(
+            &[runner_job_definition(
                 r#"{"name":"consume-string","timeout_seconds":60,"inputs":{"build_number":{"type":"string","required":true}},"outputs":{}}"#,
             )],
         )
@@ -1164,7 +1168,7 @@ async fn enqueue_workflow_run_allows_stale_schema() {
         .db
         .replace_runner_jobs(
             &fixture.runner_id,
-            &[runner_job_schema(
+            &[runner_job_definition(
                 r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true},"published":{"type":"boolean","required":false}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
             )],
         )
@@ -1664,7 +1668,7 @@ async fn test_fixture_with_runner(base_url: &str) -> TestFixture {
             .db
             .replace_runner_jobs(
                 &runner_id,
-                &[runner_job_schema(
+                &[runner_job_definition(
                     r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
                 )],
             )
@@ -1779,7 +1783,7 @@ fn binding(value: JsonValue) -> WorkflowInputBinding {
 fn workflow_job_schemas(
     state: &Arc<crate::app::AppState>,
     jobs: &[WorkflowJobDefinition],
-) -> Vec<RunnerJobSchema> {
+) -> Vec<RunnerJobDefinition> {
     jobs.iter()
         .map(|job| {
             state
@@ -1793,7 +1797,7 @@ fn workflow_job_schemas(
         .collect::<Vec<_>>()
 }
 
-fn runner_job_schema(schema: &str) -> RunnerJobSchema {
+fn runner_job_definition(schema: &str) -> RunnerJobDefinition {
     serde_json::from_str(schema).expect("runner job schema")
 }
 
@@ -1960,12 +1964,15 @@ async fn spawn_mock_runner_with_options(
         terminal_outcome,
     });
     let app = Router::new()
-        .route("/jobs", get(mock_list_jobs))
-        .route("/jobs/{name}/runs", post(mock_create_run))
-        .route("/runs/{job_id}", get(mock_get_run).delete(mock_cancel_run))
-        .route("/runs/{job_id}/logs", get(mock_logs))
-        .route("/artifacts", post(mock_artifact_upload))
-        .route("/artifacts/{artifact_id}", get(mock_artifact_download))
+        .route(ROUTE_RUNNER_JOBS, get(mock_list_jobs))
+        .route(ROUTE_RUNNER_JOB_RUNS, post(mock_create_run))
+        .route(
+            ROUTE_RUNNER_RUN_BY_ID,
+            get(mock_get_run).delete(mock_cancel_run),
+        )
+        .route(ROUTE_RUNNER_RUN_LOGS, get(mock_logs))
+        .route(ROUTE_RUNNER_ARTIFACTS, post(mock_artifact_upload))
+        .route(ROUTE_RUNNER_ARTIFACT_BY_ID, get(mock_artifact_download))
         .with_state(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -2024,7 +2031,7 @@ async fn mock_create_run(
     let body = to_bytes(body, usize::MAX).await.expect("bytes");
     let request_body: JsonValue = serde_json::from_slice(&body).expect("json request body");
     let key = headers
-        .get("x-idempotency-key")
+        .get(HEADER_IDEMPOTENCY_KEY)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("missing")
         .to_string();

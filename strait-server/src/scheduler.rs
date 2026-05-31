@@ -3,6 +3,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use glob::Pattern;
 use serde_json::{Map, Value, json};
+use strait_lib::{FailureCategory, JobOutput, JobStatus as RunnerJobStatus};
 use tokio::time::{self, Duration, MissedTickBehavior};
 use tracing::{error, info, warn};
 
@@ -10,10 +11,10 @@ use crate::{
     app::AppState,
     git,
     models::{
-        JobRun, RunnerJobSchema, Workflow, WorkflowDefinition, WorkflowInputBinding,
+        JobRun, RunnerJobDefinition, Workflow, WorkflowDefinition, WorkflowInputBinding,
         WorkflowTrigger,
     },
-    runner::JobOutputMetadata,
+    runner::{JobLogsResponse, JobOutputMetadata},
     state_machine::{self, JobStatus, PipelineStatus},
 };
 
@@ -348,18 +349,20 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
             .get_job_run(&runner, runner_run_id)
             .await
         {
-            Ok(status) => match status.status.as_str() {
-                "running" | "cancel_requested" | "canceling" => {
-                    let next_status = match status.status.as_str() {
-                        "canceling" => JobStatus::Canceling,
-                        "cancel_requested" => {
+            Ok(status) => match &status.status {
+                RunnerJobStatus::Running
+                | RunnerJobStatus::CancelRequested
+                | RunnerJobStatus::Canceling => {
+                    let next_status = match &status.status {
+                        RunnerJobStatus::Canceling => JobStatus::Canceling,
+                        RunnerJobStatus::CancelRequested => {
                             if job.status == JobStatus::Canceling.as_str() {
                                 JobStatus::Canceling
                             } else {
                                 JobStatus::CancelRequested
                             }
                         }
-                        "running" => {
+                        RunnerJobStatus::Running => {
                             if matches!(job.status.as_str(), "cancel_requested" | "canceling") {
                                 JobStatus::parse(&job.status).unwrap_or(JobStatus::Running)
                             } else {
@@ -380,7 +383,7 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
                         .await
                         .unwrap_or_else(|error| {
                             error!(%error, "failed to fetch runner logs");
-                            crate::runner::JobLogsResponse {
+                            JobLogsResponse {
                                 stdout: String::new(),
                                 stderr: String::new(),
                             }
@@ -401,9 +404,9 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
                         continue;
                     }
                     let outputs = status.outputs.into_iter().collect::<Vec<_>>();
-                    let terminal = match status.status.as_str() {
-                        "success" => JobStatus::Success,
-                        "canceled" => JobStatus::Canceled,
+                    let terminal = match &status.status {
+                        RunnerJobStatus::Success => JobStatus::Success,
+                        RunnerJobStatus::Canceled => JobStatus::Canceled,
                         _ => JobStatus::Failed,
                     };
                     let outputs =
@@ -542,11 +545,8 @@ fn should_retry_infra_failure(
     status: &crate::runner::JobStatusResponse,
     max_infra_retries: u32,
 ) -> bool {
-    status.status == "failed"
-        && matches!(
-            status.failure_category,
-            Some(crate::runner::FailureCategory::Infra)
-        )
+    status.status == RunnerJobStatus::Failed
+        && matches!(status.failure_category, Some(FailureCategory::Infra))
         && job.infra_retry_count < i64::from(max_infra_retries)
 }
 
@@ -614,7 +614,7 @@ async fn resolve_job_inputs(
     pipeline: &crate::models::PipelineRun,
     job_run_id: &str,
     job_definition: &crate::models::WorkflowJobDefinition,
-    runner_job_definition: &RunnerJobSchema,
+    runner_job_definition: &RunnerJobDefinition,
 ) -> Result<Map<String, Value>, Box<dyn std::error::Error>> {
     let mut resolved = Map::new();
     for (key, value) in &job_definition.inputs {
@@ -866,12 +866,12 @@ async fn persist_job_outputs(
     state: Arc<AppState>,
     runner: &crate::models::Runner,
     job_run_id: &str,
-    outputs: Vec<(String, crate::runner::JobOutputResponse)>,
+    outputs: Vec<(String, JobOutput)>,
 ) -> Result<Vec<crate::models::JobRunOutput>, Box<dyn std::error::Error>> {
     let mut persisted = Vec::new();
     for (name, output) in outputs {
         match output {
-            crate::runner::JobOutputResponse::Artifact {
+            JobOutput::Artifact {
                 artifact_id,
                 sha256,
                 size,
@@ -896,7 +896,7 @@ async fn persist_job_outputs(
                     size_bytes: Some(size as i64),
                 });
             }
-            crate::runner::JobOutputResponse::String { value } => {
+            JobOutput::String { value } => {
                 persisted.push(crate::models::JobRunOutput {
                     output_name: name,
                     kind: "string".to_string(),
@@ -907,7 +907,7 @@ async fn persist_job_outputs(
                     size_bytes: None,
                 });
             }
-            crate::runner::JobOutputResponse::Integer { value } => {
+            JobOutput::Integer { value } => {
                 persisted.push(crate::models::JobRunOutput {
                     output_name: name,
                     kind: "integer".to_string(),
@@ -918,7 +918,7 @@ async fn persist_job_outputs(
                     size_bytes: None,
                 });
             }
-            crate::runner::JobOutputResponse::Boolean { value } => {
+            JobOutput::Boolean { value } => {
                 persisted.push(crate::models::JobRunOutput {
                     output_name: name,
                     kind: "boolean".to_string(),
@@ -929,7 +929,7 @@ async fn persist_job_outputs(
                     size_bytes: None,
                 });
             }
-            crate::runner::JobOutputResponse::Json { value } => {
+            JobOutput::Json { value } => {
                 persisted.push(crate::models::JobRunOutput {
                     output_name: name,
                     kind: "json".to_string(),

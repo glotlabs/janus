@@ -17,6 +17,10 @@ use axum::{
 };
 use serde_json::{Map, json};
 use sha2::Digest;
+use strait_lib::{
+    HEADER_IDEMPOTENCY_KEY, ROUTE_RUNNER_JOB_RUNS, ROUTE_RUNNER_JOBS, ROUTE_RUNNER_RUN_BY_ID,
+    ROUTE_RUNNER_RUN_LOGS, runner_job_run_path, runner_run_logs_path, runner_run_path,
+};
 use tokio::time::{Duration, sleep};
 use tower::util::ServiceExt;
 use uuid::Uuid;
@@ -44,7 +48,7 @@ async fn create_job(
     mut headers: HeaderMap,
     body: Body,
 ) -> Result<(StatusCode, axum::Json<JobCreatedResponse>), super::JobError> {
-    headers.entry("x-idempotency-key").or_insert_with(|| {
+    headers.entry(HEADER_IDEMPOTENCY_KEY).or_insert_with(|| {
         let value = TEST_IDEMPOTENCY_COUNTER.fetch_add(1, Ordering::Relaxed);
         HeaderValue::from_str(&format!("test_dispatch_{value:016x}"))
             .expect("idempotency header should be valid")
@@ -1133,6 +1137,92 @@ async fn lists_job_definitions_over_http() {
     assert_eq!(jobs[0].timeout_seconds, 600);
     assert!(jobs[0].inputs.contains_key("commit"));
     assert!(jobs[0].inputs["commit"].required);
+}
+
+#[tokio::test]
+async fn runner_http_contract_serializes_shared_dtos() {
+    let temp = temp_dir("runner_http_contract");
+    let state = test_state(&temp);
+    let app = Router::new()
+        .route(ROUTE_RUNNER_JOBS, get(list_jobs))
+        .route(ROUTE_RUNNER_JOB_RUNS, post(create_job_impl))
+        .route(ROUTE_RUNNER_RUN_BY_ID, get(get_job))
+        .route(ROUTE_RUNNER_RUN_LOGS, get(get_job_logs))
+        .with_state(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(ROUTE_RUNNER_JOBS)
+                .header("authorization", "Bearer runner-token")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let definitions: Vec<strait_lib::JobDefinitionResponse> =
+        serde_json::from_slice(&body).expect("shared job definitions");
+    assert_eq!(definitions[0].name, "build-app");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post(runner_job_run_path("build-app"))
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .header(HEADER_IDEMPOTENCY_KEY, "contract_dispatch_1")
+                .body(Body::from(
+                    json!({"commit":"abc123","branch":"main"}).to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let created: strait_lib::JobCreatedResponse =
+        serde_json::from_slice(&body).expect("shared create response");
+    assert_eq!(created.status, JobStatus::Running);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get(runner_run_path(&created.job_id))
+                .header("authorization", "Bearer runner-token")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let status: strait_lib::JobStatusResponse =
+        serde_json::from_slice(&body).expect("shared status response");
+    assert_eq!(status.job_id, created.job_id);
+
+    let response = app
+        .oneshot(
+            Request::get(runner_run_logs_path(&created.job_id))
+                .header("authorization", "Bearer runner-token")
+                .body(Body::empty())
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let _logs: strait_lib::JobLogsResponse =
+        serde_json::from_slice(&body).expect("shared logs response");
 }
 
 #[tokio::test]

@@ -6,6 +6,7 @@ use axum::{
 };
 use serde_json::Value;
 use std::time::Duration;
+use strait_lib::HEADER_IDEMPOTENCY_KEY;
 use tracing::{info, warn};
 
 use crate::auth::{Authorized, JobsRead, JobsRun, LogsRead};
@@ -49,7 +50,7 @@ pub async fn create_job(
         .await
         .map_err(|_| JobError::RequestTooLarge { max_bytes })?;
     let idempotency_key = headers
-        .get("x-idempotency-key")
+        .get(HEADER_IDEMPOTENCY_KEY)
         .ok_or(JobError::MissingIdempotencyKey)?
         .to_str()
         .map_err(|_| JobError::InvalidIdempotencyKey("<invalid header>".to_string()))?

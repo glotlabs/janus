@@ -22,6 +22,10 @@ use jobs::JobStore;
 use manifest::ManifestStore;
 use rate_limit::RateLimiter;
 use serde::Serialize;
+use strait_lib::{
+    ROUTE_RUNNER_ARTIFACT_BY_ID, ROUTE_RUNNER_ARTIFACTS, ROUTE_RUNNER_JOB_RUNS, ROUTE_RUNNER_JOBS,
+    ROUTE_RUNNER_RUN_BY_ID, ROUTE_RUNNER_RUN_LOGS,
+};
 use tokio::time::{self, MissedTickBehavior};
 use tracing::{info, warn};
 
@@ -247,18 +251,18 @@ fn build_app(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ready", get(readiness))
         .route("/readiness", get(readiness))
-        .route("/jobs", get(jobs::list_jobs))
-        .route("/artifacts", post(artifacts::upload_artifact))
+        .route(ROUTE_RUNNER_JOBS, get(jobs::list_jobs))
+        .route(ROUTE_RUNNER_ARTIFACTS, post(artifacts::upload_artifact))
         .route(
-            "/artifacts/{artifact_id}",
+            ROUTE_RUNNER_ARTIFACT_BY_ID,
             get(artifacts::download_artifact),
         )
-        .route("/jobs/{name}/runs", post(jobs::create_job))
+        .route(ROUTE_RUNNER_JOB_RUNS, post(jobs::create_job))
         .route(
-            "/runs/{job_id}",
+            ROUTE_RUNNER_RUN_BY_ID,
             get(jobs::get_job).delete(jobs::cancel_job),
         )
-        .route("/runs/{job_id}/logs", get(jobs::get_job_logs))
+        .route(ROUTE_RUNNER_RUN_LOGS, get(jobs::get_job_logs))
         .with_state(state)
 }
 
