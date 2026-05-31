@@ -4,7 +4,7 @@ use std::{
 };
 
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, types::Type};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -12,6 +12,7 @@ use crate::models::{
     JobRun, JobRunDetail, JobRunOutput, PipelineRun, PipelineSnapshot, PreviousJobSummary,
     PushEvent, PushEventRef, Repo, Runner, RunnerInputType, RunnerJobInputSchema,
     RunnerJobOutputSchema, RunnerJobSchema, RunnerOutputType, ServerArtifact, User, Workflow,
+    WorkflowJobOutcomePolicy,
 };
 use crate::runner::JobOutputMetadata;
 use crate::state_machine::{self, JobStatus};
@@ -667,13 +668,13 @@ impl Database {
         job_index: i64,
         runner_id: &str,
         runner_job_name: &str,
-        allow_failure: bool,
+        outcome_policy: &WorkflowJobOutcomePolicy,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let id = Uuid::now_v7().to_string();
         let dispatch_idempotency_key = next_dispatch_idempotency_key();
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
-            "INSERT INTO job_runs (id, pipeline_run_id, job_index, runner_id, runner_job_name, dispatch_idempotency_key, status, allow_failure)
+            "INSERT INTO job_runs (id, pipeline_run_id, job_index, runner_id, runner_job_name, dispatch_idempotency_key, status, outcome_policy)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
             params![
                 id,
@@ -682,7 +683,7 @@ impl Database {
                 runner_id,
                 runner_job_name,
                 dispatch_idempotency_key,
-                allow_failure as i64
+                outcome_policy.as_str()
             ],
         )?;
         conn.execute(
@@ -793,7 +794,7 @@ impl Database {
             return Ok(None);
         };
         let mut stmt = conn.prepare(
-            "SELECT id, pipeline_run_id, job_index, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json
+            "SELECT id, pipeline_run_id, job_index, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, outcome_policy, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json
              FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_index",
         )?;
         let job_rows = stmt
@@ -807,7 +808,7 @@ impl Database {
                     dispatch_idempotency_key: row.get(5)?,
                     runner_run_id: row.get(6)?,
                     status: row.get(7)?,
-                    allow_failure: row.get::<_, i64>(8)? != 0,
+                    outcome_policy: outcome_policy_from_row(row, 8)?,
                     started_at: row.get(9)?,
                     duration_ms: row.get(10)?,
                     exit_code: row.get(11)?,
@@ -886,7 +887,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut query = String::from(
-            "SELECT id, pipeline_run_id, job_index, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json FROM job_runs WHERE status IN (",
+            "SELECT id, pipeline_run_id, job_index, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, outcome_policy, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json FROM job_runs WHERE status IN (",
         );
         for idx in 0..statuses.len() {
             if idx > 0 {
@@ -909,7 +910,7 @@ impl Database {
                     dispatch_idempotency_key: row.get(5)?,
                     runner_run_id: row.get(6)?,
                     status: row.get(7)?,
-                    allow_failure: row.get::<_, i64>(8)? != 0,
+                    outcome_policy: outcome_policy_from_row(row, 8)?,
                     started_at: row.get(9)?,
                     duration_ms: row.get(10)?,
                     exit_code: row.get(11)?,
@@ -936,7 +937,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT jr.id, jr.pipeline_run_id, jr.job_index, jr.runner_id, jr.runner_job_name, jr.dispatch_idempotency_key, jr.runner_run_id, jr.status, jr.allow_failure, jr.started_at, jr.duration_ms, jr.exit_code, jr.terminal_reason, jr.failure_category, jr.cancel_reason, jr.cancel_requested_at, jr.cancel_started_at, jr.cancel_retry_count, jr.last_cancel_retry_at, jr.infra_retry_count, jr.last_infra_retry_at, jr.finished_at, jr.output_metadata_json
+            "SELECT jr.id, jr.pipeline_run_id, jr.job_index, jr.runner_id, jr.runner_job_name, jr.dispatch_idempotency_key, jr.runner_run_id, jr.status, jr.outcome_policy, jr.started_at, jr.duration_ms, jr.exit_code, jr.terminal_reason, jr.failure_category, jr.cancel_reason, jr.cancel_requested_at, jr.cancel_started_at, jr.cancel_retry_count, jr.last_cancel_retry_at, jr.infra_retry_count, jr.last_infra_retry_at, jr.finished_at, jr.output_metadata_json
              FROM job_run_previous d
              JOIN job_runs jr ON jr.id = d.previous_job_run_id
              WHERE d.job_run_id = ?1
@@ -952,7 +953,7 @@ impl Database {
                 dispatch_idempotency_key: row.get(5)?,
                 runner_run_id: row.get(6)?,
                 status: row.get(7)?,
-                allow_failure: row.get::<_, i64>(8)? != 0,
+                outcome_policy: outcome_policy_from_row(row, 8)?,
                 started_at: row.get(9)?,
                 duration_ms: row.get(10)?,
                 exit_code: row.get(11)?,
@@ -1268,7 +1269,7 @@ impl Database {
     ) -> Result<Vec<JobRun>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT id, pipeline_run_id, job_index, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, allow_failure, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json
+            "SELECT id, pipeline_run_id, job_index, runner_id, runner_job_name, dispatch_idempotency_key, runner_run_id, status, outcome_policy, started_at, duration_ms, exit_code, terminal_reason, failure_category, cancel_reason, cancel_requested_at, cancel_started_at, cancel_retry_count, last_cancel_retry_at, infra_retry_count, last_infra_retry_at, finished_at, output_metadata_json
              FROM job_runs WHERE pipeline_run_id = ?1 ORDER BY job_index",
         )?;
         let rows = stmt.query_map([pipeline_id], |row| {
@@ -1281,7 +1282,7 @@ impl Database {
                 dispatch_idempotency_key: row.get(5)?,
                 runner_run_id: row.get(6)?,
                 status: row.get(7)?,
-                allow_failure: row.get::<_, i64>(8)? != 0,
+                outcome_policy: outcome_policy_from_row(row, 8)?,
                 started_at: row.get(9)?,
                 duration_ms: row.get(10)?,
                 exit_code: row.get(11)?,
@@ -1343,15 +1344,15 @@ impl Database {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt =
-            conn.prepare("SELECT status, allow_failure FROM job_runs WHERE pipeline_run_id = ?1")?;
+            conn.prepare("SELECT status, outcome_policy FROM job_runs WHERE pipeline_run_id = ?1")?;
         let rows = stmt
             .query_map([pipeline_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0))
+                Ok((row.get::<_, String>(0)?, outcome_policy_from_row(row, 1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         let pipeline_status = state_machine::terminal_pipeline_status(rows.iter().filter_map(
-            |(status, allow_failure)| {
-                JobStatus::parse(status).map(|parsed| (parsed, *allow_failure))
+            |(status, outcome_policy)| {
+                JobStatus::parse(status).map(|parsed| (parsed, outcome_policy.allows_failure()))
             },
         ));
 
@@ -1541,6 +1542,23 @@ fn now() -> String {
 fn parse_output_metadata(raw: Option<String>) -> JobOutputMetadata {
     raw.and_then(|value| serde_json::from_str(&value).ok())
         .unwrap_or_default()
+}
+
+fn outcome_policy_from_row(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<WorkflowJobOutcomePolicy> {
+    let value = row.get::<_, String>(index)?;
+    WorkflowJobOutcomePolicy::parse(&value).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid job outcome policy {value}"),
+            )),
+        )
+    })
 }
 
 fn parse_job_run_output_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRunOutput> {
@@ -1933,7 +1951,7 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             dispatch_idempotency_key TEXT NOT NULL,
             runner_run_id TEXT,
             status TEXT NOT NULL,
-            allow_failure INTEGER NOT NULL,
+            outcome_policy TEXT NOT NULL,
             started_at TEXT,
             duration_ms INTEGER,
             exit_code INTEGER,

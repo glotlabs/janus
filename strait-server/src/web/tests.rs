@@ -5,7 +5,7 @@ use crate::{
     git,
     models::{
         Repo, RunnerJobSchema, User, WorkflowDefinition, WorkflowInputBinding,
-        WorkflowJobDefinition, WorkflowTrigger,
+        WorkflowJobDefinition, WorkflowJobOutcomePolicy, WorkflowTrigger,
     },
     scheduler,
 };
@@ -258,7 +258,7 @@ async fn workflow_form_submission_accepts_structured_jobs_json() {
             "branch": { "kind": "branch" },
             "source": { "kind": "source_artifact" }
         },
-        "allow_failure": false
+        "outcome_policy": "allowed_to_fail"
     })])
     .expect("jobs json");
     let body = form_urlencoded::Serializer::new(String::new())
@@ -297,6 +297,10 @@ async fn workflow_form_submission_accepts_structured_jobs_json() {
     assert_eq!(definition.jobs.len(), 1);
     assert_eq!(definition.jobs[0].runner_job_name, "build-app");
     assert_eq!(
+        definition.jobs[0].outcome_policy,
+        WorkflowJobOutcomePolicy::AllowedToFail
+    );
+    assert_eq!(
         definition.jobs[0].inputs.get("source"),
         Some(&WorkflowInputBinding::SourceArtifact)
     );
@@ -328,7 +332,7 @@ async fn workflow_form_rejects_missing_job_output_reference() {
             "runner_id": fixture.runner_id,
             "runner_job_name": "produce",
             "inputs": {},
-            "allow_failure": false
+            "outcome_policy": "required"
         }),
         json!({
             "runner_id": fixture.runner_id,
@@ -336,7 +340,7 @@ async fn workflow_form_rejects_missing_job_output_reference() {
             "inputs": {
                 "version": { "kind": "job_output", "job_index": 0, "output_name": "missing" }
             },
-            "allow_failure": false
+            "outcome_policy": "required"
         }),
     ])
     .expect("jobs json");
@@ -395,7 +399,7 @@ async fn workflow_form_rejects_typed_output_input_mismatch() {
             "runner_id": fixture.runner_id,
             "runner_job_name": "produce",
             "inputs": {},
-            "allow_failure": false
+            "outcome_policy": "required"
         }),
         json!({
             "runner_id": fixture.runner_id,
@@ -403,7 +407,7 @@ async fn workflow_form_rejects_typed_output_input_mismatch() {
             "inputs": {
                 "build_number": { "kind": "job_output", "job_index": 0, "output_name": "build_number" }
             },
-            "allow_failure": false
+            "outcome_policy": "required"
         }),
     ])
     .expect("jobs json");
@@ -462,7 +466,7 @@ async fn workflow_form_rejects_literal_input_type_mismatch() {
         "inputs": {
             "published": { "kind": "literal", "value": "true" }
         },
-        "allow_failure": false
+        "outcome_policy": "required"
     })])
     .expect("jobs json");
     let body = form_urlencoded::Serializer::new(String::new())
@@ -506,7 +510,7 @@ async fn workflow_form_rejects_unknown_literal_input_name() {
         "inputs": {
             "bogus": { "kind": "literal", "value": 123 }
         },
-        "allow_failure": false
+        "outcome_policy": "required"
     })])
     .expect("jobs json");
     let body = form_urlencoded::Serializer::new(String::new())
@@ -661,7 +665,7 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
                 runner_id: producer_runner_id,
                 runner_job_name: "produce-typed".to_string(),
                 inputs: BTreeMap::new(),
-                allow_failure: false,
+                outcome_policy: WorkflowJobOutcomePolicy::Required,
             },
             WorkflowJobDefinition {
                 runner_id: consumer_runner_id,
@@ -692,7 +696,7 @@ async fn scheduler_passes_typed_outputs_to_downstream_job_inputs() {
                         ),
                     ),
                 ]),
-                allow_failure: false,
+                outcome_policy: WorkflowJobOutcomePolicy::Required,
             },
         ],
     );
@@ -778,7 +782,7 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
                 runner_id: producer_runner_id,
                 runner_job_name: "produce-int".to_string(),
                 inputs: BTreeMap::new(),
-                allow_failure: false,
+                outcome_policy: WorkflowJobOutcomePolicy::Required,
             },
             WorkflowJobDefinition {
                 runner_id: consumer_runner_id,
@@ -789,7 +793,7 @@ async fn scheduler_rejects_mismatched_typed_output_binding() {
                         json!({ "kind": "job_output", "job_index": 0, "output_name": "build_number" }),
                     ),
                 )]),
-                allow_failure: false,
+                outcome_policy: WorkflowJobOutcomePolicy::Required,
             },
         ],
     );
@@ -1537,7 +1541,7 @@ fn create_workflow_direct(state: &Arc<crate::app::AppState>, repo_id: &str, runn
             ("commit".to_string(), WorkflowInputBinding::Commit),
             ("branch".to_string(), WorkflowInputBinding::Branch),
         ]),
-        allow_failure: false,
+        outcome_policy: WorkflowJobOutcomePolicy::Required,
     }];
     let definition =
         serde_json::to_string(&WorkflowDefinition { jobs: jobs.clone() }).expect("definition");

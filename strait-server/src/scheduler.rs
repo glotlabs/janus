@@ -110,7 +110,7 @@ pub(crate) fn enqueue_workflow_run(
             job_index as i64,
             &job.runner_id,
             &job.runner_job_name,
-            job.allow_failure,
+            &job.outcome_policy,
         )?;
         if let Some(previous) = previous_run_id.as_deref() {
             state.db.add_previous_job(&run_id, previous)?;
@@ -226,7 +226,8 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
         let previous_jobs = state.db.previous_jobs_for_job_run(&job.id)?;
         let previous_job_state =
             state_machine::next_ready_job_status(previous_jobs.iter().filter_map(|item| {
-                JobStatus::parse(&item.status).map(|status| (status, item.allow_failure))
+                JobStatus::parse(&item.status)
+                    .map(|status| (status, item.outcome_policy.allows_failure()))
             }));
         if previous_job_state == Some(JobStatus::Blocked) {
             state

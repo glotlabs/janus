@@ -164,7 +164,7 @@ pub struct JobRun {
     pub dispatch_idempotency_key: String,
     pub runner_run_id: Option<String>,
     pub status: String,
-    pub allow_failure: bool,
+    pub outcome_policy: WorkflowJobOutcomePolicy,
     pub started_at: Option<String>,
     pub duration_ms: Option<i64>,
     pub exit_code: Option<i32>,
@@ -200,7 +200,36 @@ pub struct WorkflowJobDefinition {
     #[serde(default)]
     pub inputs: BTreeMap<String, WorkflowInputBinding>,
     #[serde(default)]
-    pub allow_failure: bool,
+    pub outcome_policy: WorkflowJobOutcomePolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowJobOutcomePolicy {
+    #[default]
+    Required,
+    AllowedToFail,
+}
+
+impl WorkflowJobOutcomePolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::AllowedToFail => "allowed_to_fail",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "required" => Some(Self::Required),
+            "allowed_to_fail" => Some(Self::AllowedToFail),
+            _ => None,
+        }
+    }
+
+    pub fn allows_failure(&self) -> bool {
+        matches!(self, Self::AllowedToFail)
+    }
 }
 
 impl WorkflowDefinition {

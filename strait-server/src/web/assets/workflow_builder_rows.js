@@ -2,7 +2,11 @@ import {
   cloneTemplate,
   replaceOptions,
 } from './workflow_builder_dom.js';
-import { buildDerivedJobs } from './workflow_builder_state.js';
+import {
+  OUTCOME_POLICY_OPTIONS,
+  buildDerivedJobs,
+  outcomePolicyFromJob,
+} from './workflow_builder_state.js';
 
 export function addWorkflowRow({
   job,
@@ -17,7 +21,7 @@ export function addWorkflowRow({
 }) {
   const row = cloneTemplate(jobRowTemplate);
   row._inputs = job.inputs || {};
-  row._allowFailure = Boolean(job.allow_failure);
+  row._outcomePolicy = outcomePolicyFromJob(job);
 
   const controls = rowControls(row);
   fillRunnerOptions(controls.runnerSelect, catalog, job.runner_id);
@@ -28,6 +32,7 @@ export function addWorkflowRow({
     list,
     getRunnerJobs,
   });
+  fillOutcomePolicyOptions(controls.outcomePolicySelect, row._outcomePolicy);
 
   controls.runnerSelect.addEventListener('change', () => {
     fillJobOptions({
@@ -46,6 +51,10 @@ export function addWorkflowRow({
     row._inputs = {};
     renderInputTable(row);
     renderOutputTable(currentDerivedJobs(list, getRunner));
+    syncJobsJson();
+  });
+  controls.outcomePolicySelect.addEventListener('change', () => {
+    row._outcomePolicy = controls.outcomePolicySelect.value;
     syncJobsJson();
   });
   controls.inputSummary.addEventListener('click', () => openDialog(controls.inputsDialog));
@@ -68,6 +77,14 @@ export function addWorkflowRow({
   renderOutputTable(currentDerivedJobs(list, getRunner));
   syncJobsJson();
   return row;
+}
+
+export function fillOutcomePolicyOptions(select, selectedPolicy) {
+  replaceOptions(
+    select,
+    OUTCOME_POLICY_OPTIONS.map(([value, label]) => ({ value, label })),
+    selectedPolicy
+  );
 }
 
 export function fillRunnerOptions(select, catalog, selectedRunnerId) {
@@ -109,6 +126,7 @@ function rowControls(row) {
   return {
     runnerSelect: row.querySelector('[data-field="runner_id"]'),
     jobSelect: row.querySelector('[data-field="runner_job_name"]'),
+    outcomePolicySelect: row.querySelector('[data-field="outcome_policy"]'),
     inputSummary: row.querySelector('[data-input-summary]'),
     outputSummary: row.querySelector('[data-output-summary]'),
     inputsDialog: row.querySelector('[data-inputs-dialog]'),

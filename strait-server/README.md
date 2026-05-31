@@ -48,7 +48,7 @@ Workflow JSON shape:
         "branch": "$branch",
         "source": "$source"
       },
-      "allow_failure": false
+      "outcome_policy": "required"
     }
   ]
 }

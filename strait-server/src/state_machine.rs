@@ -73,7 +73,7 @@ pub fn next_ready_job_status(
     let statuses = previous_job_statuses.collect::<Vec<_>>();
     if statuses
         .iter()
-        .any(|(status, allow_failure)| *status == JobStatus::Failed && !allow_failure)
+        .any(|(status, can_fail)| *status == JobStatus::Failed && !can_fail)
     {
         return Some(JobStatus::Blocked);
     }
@@ -110,7 +110,7 @@ pub fn terminal_pipeline_status(
     }
     if statuses
         .iter()
-        .any(|(status, allow_failure)| *status == JobStatus::Failed && !allow_failure)
+        .any(|(status, can_fail)| *status == JobStatus::Failed && !can_fail)
     {
         return PipelineStatus::Failed;
     }

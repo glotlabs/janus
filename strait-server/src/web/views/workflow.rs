@@ -188,6 +188,10 @@ fn workflow_form_fields(form: WorkflowFormView) -> Markup {
                             select data-field="runner_job_name" {}
                         }
                         label {
+                            span { "Outcome" }
+                            select data-field="outcome_policy" {}
+                        }
+                        label {
                             span { "Inputs" }
                             button type="button" class="input-summary-trigger ghost" data-input-summary="true" {}
                         }

@@ -117,7 +117,7 @@ async fn git_push_triggers_pipeline_end_to_end() {
                         "commit": { "kind": "commit" },
                         "branch": { "kind": "branch" }
                     },
-                    "allow_failure": false
+                    "outcome_policy": "required"
                 }
             ]
         }))

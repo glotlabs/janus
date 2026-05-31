@@ -4,15 +4,16 @@ import test from 'node:test';
 import {
   buildDerivedJobs,
   createCatalogLookup,
+  OutcomePolicy,
   inferBinding,
   outputOptionsFor,
   readInputBinding,
   serializeJobs,
 } from './workflow_builder_state.js';
 
-function fieldRow(fields, inputRows = [], allowFailure = false) {
+function fieldRow(fields, inputRows = [], outcomePolicy = OutcomePolicy.REQUIRED) {
   return {
-    _allowFailure: allowFailure,
+    _outcomePolicy: outcomePolicy,
     querySelector(selector) {
       const match = selector.match(/^\[data-field="(.+)"\]$/);
       if (!match) return null;
@@ -156,7 +157,7 @@ test('serializeJobs filters empty rows and preserves parsed inputs', () => {
         inputRow({ name: 'commit', kind: 'string', mode: 'commit' }),
         inputRow({ name: 'source', kind: 'artifact', mode: 'source_artifact' })
       ],
-      true
+      OutcomePolicy.ALLOWED
     ),
     fieldRow({ runner_id: '', runner_job_name: '' }, [])
   ];
@@ -170,7 +171,7 @@ test('serializeJobs filters empty rows and preserves parsed inputs', () => {
         commit: { kind: 'commit' },
         source: { kind: 'source_artifact' }
       },
-      allow_failure: true
+      outcome_policy: 'allowed_to_fail'
     }
   ]);
 });

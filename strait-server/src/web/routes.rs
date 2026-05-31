@@ -32,7 +32,8 @@ use crate::{
     git,
     models::{
         self, PipelineRun, Repo, RunnerJobSchema, User, Workflow, WorkflowDefinition,
-        WorkflowInputBinding, WorkflowJobDefinition, WorkflowTrigger, parse_job_output_binding,
+        WorkflowInputBinding, WorkflowJobDefinition, WorkflowJobOutcomePolicy, WorkflowTrigger,
+        parse_job_output_binding,
     },
     scheduler,
 };
@@ -768,7 +769,7 @@ struct ApiWorkflowJob {
     #[serde(default)]
     inputs: BTreeMap<String, WorkflowInputBinding>,
     #[serde(default)]
-    allow_failure: bool,
+    outcome_policy: WorkflowJobOutcomePolicy,
 }
 
 async fn api_me(
@@ -1067,7 +1068,7 @@ fn parse_api_workflow_request(
             runner_id: job.runner_id.clone(),
             runner_job_name: job.runner_job_name.clone(),
             inputs: job.inputs.clone(),
-            allow_failure: job.allow_failure,
+            outcome_policy: job.outcome_policy.clone(),
         })
         .collect::<Vec<_>>();
     let definition = WorkflowDefinition { jobs };
@@ -1087,7 +1088,7 @@ struct SubmittedWorkflowJob {
     #[serde(default)]
     inputs: BTreeMap<String, WorkflowInputBinding>,
     #[serde(default)]
-    allow_failure: bool,
+    outcome_policy: WorkflowJobOutcomePolicy,
 }
 
 fn parse_workflow_form_jobs(input: &str) -> Result<Vec<WorkflowJobDefinition>, Response> {
@@ -1102,7 +1103,7 @@ fn parse_workflow_form_jobs(input: &str) -> Result<Vec<WorkflowJobDefinition>, R
             runner_id: job.runner_id,
             runner_job_name: job.runner_job_name,
             inputs: job.inputs,
-            allow_failure: job.allow_failure,
+            outcome_policy: job.outcome_policy,
         })
         .collect())
 }
@@ -1263,7 +1264,7 @@ struct WorkflowRunnerCatalogEntry {
 struct WorkflowEditorJob {
     runner_id: String,
     runner_job_name: String,
-    allow_failure: bool,
+    outcome_policy: WorkflowJobOutcomePolicy,
     #[serde(default)]
     inputs: BTreeMap<String, WorkflowInputBinding>,
 }
@@ -1382,7 +1383,7 @@ fn workflow_form_view(
         .map(|job| WorkflowEditorJob {
             runner_id: job.runner_id.clone(),
             runner_job_name: job.runner_job_name.clone(),
-            allow_failure: job.allow_failure,
+            outcome_policy: job.outcome_policy.clone(),
             inputs: job.inputs.clone(),
         })
         .collect::<Vec<_>>();
@@ -1411,7 +1412,7 @@ fn workflow_form_view(
         initial_jobs.push(WorkflowEditorJob {
             runner_id,
             runner_job_name,
-            allow_failure: false,
+            outcome_policy: WorkflowJobOutcomePolicy::Required,
             inputs: BTreeMap::new(),
         });
     }

@@ -1,3 +1,19 @@
+export const OutcomePolicy = Object.freeze({
+  REQUIRED: 'required',
+  ALLOWED: 'allowed_to_fail',
+});
+
+export const OUTCOME_POLICY_OPTIONS = Object.freeze([
+  [OutcomePolicy.REQUIRED, 'Must succeed'],
+  [OutcomePolicy.ALLOWED, 'Can fail'],
+]);
+
+export function outcomePolicyFromJob(job) {
+  if (job.outcome_policy === OutcomePolicy.ALLOWED) return OutcomePolicy.ALLOWED;
+  if (job.outcome_policy === OutcomePolicy.REQUIRED) return OutcomePolicy.REQUIRED;
+  return OutcomePolicy.REQUIRED;
+}
+
 export function createCatalogLookup(catalog) {
   const catalogById = new Map(catalog.map((runner) => [runner.id, runner]));
 
@@ -118,7 +134,9 @@ export function serializeJobs(derivedJobs, readBinding = readInputBinding) {
       runner_id: job.runnerId,
       runner_job_name: job.runnerJobName,
       inputs: inputsMap,
-      allow_failure: Boolean(job.row._allowFailure)
+      outcome_policy: job.row._outcomePolicy === OutcomePolicy.ALLOWED
+        ? OutcomePolicy.ALLOWED
+        : OutcomePolicy.REQUIRED
     };
   }).filter((job) => job.runner_id || job.runner_job_name || Object.keys(job.inputs).length > 0);
 }

@@ -3,9 +3,11 @@ import test from 'node:test';
 
 import {
   addWorkflowRow,
+  fillOutcomePolicyOptions,
   fillJobOptions,
   fillRunnerOptions,
 } from './workflow_builder_rows.js';
+import { OutcomePolicy } from './workflow_builder_state.js';
 import { fakeElement, withFakeDocument } from './workflow_builder_test_dom.mjs';
 
 function rowTemplate() {
@@ -15,6 +17,8 @@ function rowTemplate() {
   runnerSelect.setAttribute('data-field', 'runner_id');
   const jobSelect = fakeElement('select');
   jobSelect.setAttribute('data-field', 'runner_job_name');
+  const outcomePolicySelect = fakeElement('select');
+  outcomePolicySelect.setAttribute('data-field', 'outcome_policy');
   const inputSummary = fakeElement('button');
   inputSummary.setAttribute('data-input-summary', 'true');
   const outputSummary = fakeElement('button');
@@ -33,6 +37,7 @@ function rowTemplate() {
   row.append(
     runnerSelect,
     jobSelect,
+    outcomePolicySelect,
     inputSummary,
     outputSummary,
     inputsDialog,
@@ -83,6 +88,22 @@ test('fillRunnerOptions auto-selects one runner and uses select placeholder', ()
   assert.equal(select.value, 'runner-1');
 }));
 
+test('fillOutcomePolicyOptions renders string outcome policy choices', () => withFakeDocument(() => {
+  const select = fakeElement('select');
+
+  fillOutcomePolicyOptions(select, OutcomePolicy.ALLOWED);
+
+  assert.deepEqual(select.options.map((option) => ({
+    value: option.value,
+    textContent: option.textContent,
+    selected: option.selected
+  })), [
+    { value: 'required', textContent: 'Must succeed', selected: false },
+    { value: 'allowed_to_fail', textContent: 'Can fail', selected: true }
+  ]);
+  assert.equal(select.value, 'allowed_to_fail');
+}));
+
 test('fillJobOptions excludes earlier selected jobs for the same runner', () => withFakeDocument(() => {
   const list = fakeElement('div');
   const earlierRow = rowTemplate().content.firstElementChild.cloneNode(true);
@@ -113,7 +134,12 @@ test('addWorkflowRow renders, opens dialogs, closes dialogs, and removes row', (
   let syncs = 0;
 
   const row = addWorkflowRow({
-    job: { runner_id: 'runner-1', runner_job_name: 'build', inputs: {}, allow_failure: true },
+    job: {
+      runner_id: 'runner-1',
+      runner_job_name: 'build',
+      inputs: {},
+      outcome_policy: 'allowed_to_fail'
+    },
     catalog,
     list,
     jobRowTemplate: rowTemplate(),
@@ -132,6 +158,7 @@ test('addWorkflowRow renders, opens dialogs, closes dialogs, and removes row', (
 
   const inputSummary = row.querySelector('[data-input-summary]');
   const outputSummary = row.querySelector('[data-output-summary]');
+  const outcomePolicySelect = row.querySelector('[data-field="outcome_policy"]');
   const inputsDialog = row.querySelector('[data-inputs-dialog]');
   const outputsDialog = row.querySelector('[data-outputs-dialog]');
   const inputClose = row.querySelector('[data-dialog-close="inputs"]');
@@ -139,7 +166,8 @@ test('addWorkflowRow renders, opens dialogs, closes dialogs, and removes row', (
   const removeButton = row.querySelector('[data-remove-job]');
 
   assert.equal(list.children.length, 1);
-  assert.equal(row._allowFailure, true);
+  assert.equal(row._outcomePolicy, OutcomePolicy.ALLOWED);
+  assert.equal(outcomePolicySelect.value, 'allowed_to_fail');
   assert.equal(renderInputs, 1);
   assert.equal(renderOutputs, 1);
   assert.equal(syncs, 1);
@@ -157,6 +185,32 @@ test('addWorkflowRow renders, opens dialogs, closes dialogs, and removes row', (
   removeButton.listeners.click[0]();
   assert.equal(row.removed, true);
   assert.equal(list.children.length, 0);
+  assert.equal(syncs, 2);
+}));
+
+test('addWorkflowRow syncs when outcome policy changes', () => withFakeDocument(() => {
+  const list = fakeElement('div');
+  let syncs = 0;
+
+  const row = addWorkflowRow({
+    job: { runner_id: 'runner-1', runner_job_name: 'build', inputs: {}, outcome_policy: 'required' },
+    catalog,
+    list,
+    jobRowTemplate: rowTemplate(),
+    getRunner,
+    getRunnerJobs,
+    renderInputTable() {},
+    renderOutputTable() {},
+    syncJobsJson() {
+      syncs += 1;
+    },
+  });
+
+  const outcomePolicySelect = row.querySelector('[data-field="outcome_policy"]');
+  outcomePolicySelect.value = OutcomePolicy.ALLOWED;
+  outcomePolicySelect.listeners.change[0]();
+
+  assert.equal(row._outcomePolicy, OutcomePolicy.ALLOWED);
   assert.equal(syncs, 2);
 }));
 
