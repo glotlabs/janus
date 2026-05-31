@@ -276,10 +276,6 @@ fn workflow_form_fields(form: WorkflowFormView) -> Markup {
         textarea id="workflow-jobs-json" name="jobs_json" hidden {
             (form.jobs_json)
         }
-        div class="inline-note" {
-            "Artifact inputs can point to " code { "source.tar.gz" }
-            ". Typed inputs can bind to matching outputs from earlier jobs in the workflow."
-        }
         script type="application/json" id="workflow-runner-catalog" {
             (form.runner_catalog_json)
         }
