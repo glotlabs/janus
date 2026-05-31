@@ -10,12 +10,15 @@ import {
   buildDerivedJobs,
   createCatalogLookup,
   serializeJobs,
+  validateJobs,
 } from '/assets/workflow_builder_state.js';
 
 (() => {
   const list = document.getElementById('workflow-job-list');
   const addButton = document.getElementById('workflow-add-job');
   const jobsJsonField = document.getElementById('workflow-jobs-json');
+  const form = jobsJsonField.closest('form');
+  const validationErrors = document.getElementById('workflow-validation-errors');
   const jobRowTemplate = document.getElementById('workflow-job-row-template');
   const inputsEmptyTemplate = document.getElementById('workflow-inputs-empty-template');
   const outputsEmptyTemplate = document.getElementById('workflow-outputs-empty-template');
@@ -36,6 +39,23 @@ import {
     renderOutputBindingOptions({ derivedJobs, getJobDefinition });
     jobsJsonField.value = JSON.stringify(serializeJobs(derivedJobs));
     renderOutputTable(derivedJobs);
+    clearValidationErrors();
+  }
+
+  function currentSerializedJobs() {
+    return serializeJobs(currentDerivedJobs());
+  }
+
+  function clearValidationErrors() {
+    if (!validationErrors) return;
+    validationErrors.hidden = true;
+    validationErrors.textContent = '';
+  }
+
+  function showValidationErrors(errors) {
+    if (!validationErrors) return;
+    validationErrors.hidden = errors.length === 0;
+    validationErrors.textContent = errors.join(' ');
   }
 
   function currentDerivedJobs() {
@@ -78,5 +98,16 @@ import {
 
   for (const job of initialJobs) {
     addRow(job);
+  }
+
+  if (form) {
+    form.addEventListener('submit', (event) => {
+      syncJobsJson();
+      const errors = validateJobs(currentSerializedJobs(), getJobDefinition);
+      if (errors.length === 0) return;
+      event.preventDefault();
+      showValidationErrors(errors);
+      validationErrors?.focus?.();
+    });
   }
 })();

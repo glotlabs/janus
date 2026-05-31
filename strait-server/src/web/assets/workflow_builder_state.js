@@ -141,6 +141,53 @@ export function serializeJobs(derivedJobs, readBinding = readInputBinding) {
   }).filter((job) => job.runner_id || job.runner_job_name || Object.keys(job.inputs).length > 0);
 }
 
+export function validateJobs(jobs, getJobDefinition) {
+  const errors = [];
+  if (jobs.length === 0) {
+    errors.push('Add at least one job.');
+    return errors;
+  }
+
+  jobs.forEach((job, index) => {
+    const label = `Job ${index + 1}`;
+    if (!job.runner_id) {
+      errors.push(`${label}: choose a runner.`);
+    }
+    if (!job.runner_job_name) {
+      errors.push(`${label}: choose a job.`);
+    }
+    if (!job.runner_id || !job.runner_job_name) return;
+
+    const definition = getJobDefinition(job.runner_id, job.runner_job_name);
+    if (!definition) {
+      errors.push(`${label}: selected job is not available for this runner.`);
+      return;
+    }
+
+    for (const [inputName, inputDef] of Object.entries(definition.inputs || {})) {
+      const binding = job.inputs[inputName];
+      if (inputDef.required && bindingIsMissing(binding)) {
+        errors.push(`${label}: set required input ${inputName}.`);
+      }
+    }
+  });
+  return errors;
+}
+
+function bindingIsMissing(binding) {
+  if (!binding) return true;
+  if (binding.kind === 'literal') {
+    const value = binding.value;
+    if (value === null || value === undefined) return true;
+    if (typeof value === 'string') return value.trim() === '';
+    return false;
+  }
+  if (binding.kind === 'job_output') {
+    return binding.output_name === '';
+  }
+  return false;
+}
+
 export function outputOptionsFor(currentRow, derivedJobs, expectedKind, getJobDefinition) {
   const options = [];
   const currentIndex = derivedJobs.findIndex((job) => job.row === currentRow);

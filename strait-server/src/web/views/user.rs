@@ -2,9 +2,15 @@ use maud::{Markup, html};
 
 use crate::models::User;
 
-use super::components::{badge, csrf_input, layout, layout_public, page_intro};
+use super::components::{badge, csrf_input, form_error, layout, layout_public, page_intro};
 
-pub(crate) fn login_page() -> Markup {
+#[derive(Default)]
+pub(crate) struct CreateUserFormView {
+    pub username: String,
+    pub role: String,
+}
+
+pub(crate) fn login_page(error: Option<&str>, username: &str) -> Markup {
     layout_public(
         "Login",
         html! {
@@ -15,9 +21,10 @@ pub(crate) fn login_page() -> Markup {
                     p class="muted" {
                         "Manage repositories, runners, workflows, and pipeline execution from one place."
                     }
+                    (form_error(error))
                     form method="post" action="/login" class="stack-lg" {
-                        label { span { "Username" } input name="username" autocomplete="username"; }
-                        label { span { "Password" } input name="password" type="password" autocomplete="current-password"; }
+                        label { span { "Username" } input name="username" value=(username) autocomplete="username" required data-validate data-trim-required="true"; }
+                        label { span { "Password" } input name="password" type="password" autocomplete="current-password" required data-validate; }
                         div class="actions" {
                             button type="submit" { "Login" }
                         }
@@ -28,7 +35,12 @@ pub(crate) fn login_page() -> Markup {
     )
 }
 
-pub(crate) fn users_page(users: Vec<User>, csrf: &str) -> Markup {
+pub(crate) fn users_page(
+    users: Vec<User>,
+    csrf: &str,
+    error: Option<&str>,
+    form: CreateUserFormView,
+) -> Markup {
     layout(
         "Users",
         html! {
@@ -45,14 +57,15 @@ pub(crate) fn users_page(users: Vec<User>, csrf: &str) -> Markup {
                 }
                 form method="post" action="/users" class="stack-lg" {
                     (csrf_input(csrf))
+                    (form_error(error))
                     div class="form-grid form-grid-3" {
-                        label { span { "Username" } input name="username"; }
-                        label { span { "Password" } input name="password" type="password"; }
+                        label { span { "Username" } input name="username" value=(form.username) required minlength="3" maxlength="64" data-validate data-trim-required="true" data-username="true"; }
+                        label { span { "Password" } input name="password" type="password" required minlength="8" data-validate; }
                         label {
                             span { "Role" }
-                            select name="role" {
-                                option value="developer" { "developer" }
-                                option value="admin" { "admin" }
+                            select name="role" required {
+                                option value="developer" selected[form.role != "admin"] { "developer" }
+                                option value="admin" selected[form.role == "admin"] { "admin" }
                             }
                         }
                     }

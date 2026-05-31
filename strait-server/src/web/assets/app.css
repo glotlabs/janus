@@ -113,6 +113,12 @@ textarea:focus {
     border-color: var(--accent)
 }
 
+input:invalid,
+select:invalid,
+textarea:invalid {
+    border-color: rgba(180, 35, 24, .55)
+}
+
 textarea {
     min-height: 120px;
     resize: vertical
@@ -484,6 +490,15 @@ thead th {
     min-height: 118px;
     padding: 1.35rem 3.3rem 1.1rem 1.1rem;
     background: #fff
+}
+
+.form-error {
+    border: 1px solid rgba(180, 35, 24, .28);
+    border-radius: 14px;
+    padding: .85rem 1rem;
+    background: rgba(180, 35, 24, .07);
+    color: var(--danger);
+    font-weight: 600
 }
 
 .job-builder-summary {

@@ -2,11 +2,17 @@ use maud::{Markup, html};
 
 use crate::models::{Repo, User};
 
-use super::components::{badge, csrf_input, layout, page_intro};
+use super::components::{badge, csrf_input, form_error, layout, page_intro};
 
 pub(crate) struct RepoCard {
     pub repo: Repo,
     pub clone_url: String,
+}
+
+pub(crate) struct RepoFormView {
+    pub name: String,
+    pub owner_id: String,
+    pub default_branch: String,
 }
 
 pub(crate) fn repos_page(
@@ -14,6 +20,8 @@ pub(crate) fn repos_page(
     users: Vec<User>,
     repos: Vec<RepoCard>,
     csrf: &str,
+    error: Option<&str>,
+    form: RepoFormView,
 ) -> Markup {
     layout(
         "Repos",
@@ -31,14 +39,15 @@ pub(crate) fn repos_page(
                 }
                 form method="post" action="/repos" class="stack-lg" {
                     (csrf_input(csrf))
+                    (form_error(error))
                     div class="form-grid form-grid-3" {
-                        label { span { "Name" } input name="name"; }
+                        label { span { "Name" } input name="name" value=(form.name) maxlength="80" required data-validate data-trim-required="true"; }
                         @if current_user.role == "admin" {
                             label {
                                 span { "Owner" }
-                                select name="owner_id" {
+                                select name="owner_id" required {
                                     @for candidate in &users {
-                                        option value=(candidate.id) selected[candidate.id == current_user.id] {
+                                        option value=(candidate.id) selected[candidate.id == form.owner_id] {
                                             (candidate.username)
                                         }
                                     }
@@ -53,7 +62,7 @@ pub(crate) fn repos_page(
                         }
                         label {
                             span { "Default branch" }
-                            input name="default_branch" value="main";
+                            input name="default_branch" value=(form.default_branch) maxlength="255" required data-validate data-trim-required="true" data-no-whitespace="true";
                         }
                     }
                     div class="actions" {
@@ -89,11 +98,11 @@ pub(crate) fn repos_page(
                                 div class="inline-fields" {
                                     label {
                                         span { "Branch ref" }
-                                        input name="branch" value=(format!("refs/heads/{}", card.repo.default_branch));
+                                        input name="branch" value=(format!("refs/heads/{}", card.repo.default_branch)) data-validate data-no-whitespace="true";
                                     }
                                     label {
                                         span { "Commit" }
-                                        input name="commit" value="HEAD";
+                                        input name="commit" value="HEAD" data-validate data-no-whitespace="true";
                                     }
                                 }
                                 div class="actions" {

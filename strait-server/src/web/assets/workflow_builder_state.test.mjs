@@ -9,6 +9,7 @@ import {
   outputOptionsFor,
   readInputBinding,
   serializeJobs,
+  validateJobs,
 } from './workflow_builder_state.js';
 
 function fieldRow(fields, inputRows = [], outcomePolicy = OutcomePolicy.REQUIRED) {
@@ -46,6 +47,10 @@ const catalog = [
     jobs: [
       {
         name: 'build',
+        inputs: {
+          source: { type: 'artifact', required: true },
+          version: { type: 'string', required: false }
+        },
         outputs: {
           app: { type: 'artifact', required: true },
           version: { type: 'string', required: false }
@@ -174,6 +179,24 @@ test('serializeJobs filters empty rows and preserves parsed inputs', () => {
       outcome_policy: 'allowed_to_fail'
     }
   ]);
+});
+
+test('validateJobs reports missing selections and required inputs', () => {
+  const lookup = createCatalogLookup(catalog);
+
+  assert.deepEqual(validateJobs([], lookup.getJobDefinition), ['Add at least one job.']);
+  assert.deepEqual(
+    validateJobs([{ runner_id: '', runner_job_name: '', inputs: {} }], lookup.getJobDefinition),
+    ['Job 1: choose a runner.', 'Job 1: choose a job.']
+  );
+  assert.deepEqual(
+    validateJobs([{
+      runner_id: 'runner-1',
+      runner_job_name: 'build',
+      inputs: { source: { kind: 'literal', value: '' } }
+    }], lookup.getJobDefinition),
+    ['Job 1: set required input source.']
+  );
 });
 
 test('outputOptionsFor only exposes earlier matching outputs', () => {

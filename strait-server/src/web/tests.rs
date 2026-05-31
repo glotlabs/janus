@@ -117,6 +117,18 @@ async fn workflows_page_renders_runner_job_builder() {
         .app
         .clone()
         .oneshot(
+            Request::get("/assets/form_validation.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
             Request::get("/assets/workflow_builder_state.js")
                 .body(Body::empty())
                 .expect("request"),
@@ -432,6 +444,155 @@ async fn api_workflow_reports_additive_schema_diff_without_stale_status() {
 }
 
 #[tokio::test]
+async fn api_create_runner_rejects_empty_token() {
+    let fixture = test_fixture().await;
+    let admin = admin_user(&fixture.state);
+    let token = csrf_token(&fixture.state, &admin);
+    let cookie = session_cookie_value(&fixture.state, &admin.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/api/runners")
+                .header("content-type", "application/json")
+                .header("cookie", cookie)
+                .body(Body::from(
+                    json!({
+                        "csrf_token": token,
+                        "name": "runner",
+                        "base_url": "http://127.0.0.1:1",
+                        "token": " "
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: JsonValue = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["error"]["code"], json!("bad_request"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("runner token cannot be empty")
+    );
+}
+
+#[tokio::test]
+async fn api_create_workflow_rejects_empty_branch_entry() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "api-empty-workflow-branch");
+    let token = csrf_token(&fixture.state, &fixture.user);
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/api/workflows")
+                .header("content-type", "application/json")
+                .header("cookie", cookie)
+                .body(Body::from(
+                    json!({
+                        "csrf_token": token,
+                        "repo_id": repo.id,
+                        "name": "wf",
+                        "enabled": true,
+                        "trigger_kind": "push",
+                        "branches": [" "],
+                        "jobs": []
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: JsonValue = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["error"]["code"], json!("bad_request"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("workflow branch cannot be empty")
+    );
+}
+
+#[tokio::test]
+async fn repo_manual_trigger_rejects_whitespace_commit() {
+    let fixture = test_fixture().await;
+    let repo = create_repo_direct(
+        &fixture.state,
+        &fixture.user,
+        "manual-trigger-invalid-commit",
+    );
+    let token = csrf_token(&fixture.state, &fixture.user);
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf_token", &token)
+        .append_pair("branch", "refs/heads/main")
+        .append_pair("commit", "bad ref")
+        .finish();
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post(format!("/repos/{}/trigger", repo.id))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", cookie)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let text = String::from_utf8(body.to_vec()).expect("text");
+    assert!(text.contains("commit must not contain whitespace"));
+}
+
+#[tokio::test]
+async fn repo_form_validation_rerenders_form_with_submitted_values() {
+    let fixture = test_fixture().await;
+    let token = csrf_token(&fixture.state, &fixture.user);
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf_token", &token)
+        .append_pair("owner_id", &fixture.user.id)
+        .append_pair("name", "demo-invalid")
+        .append_pair("default_branch", "bad branch")
+        .finish();
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/repos")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", cookie)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let html = String::from_utf8(body.to_vec()).expect("html");
+    assert!(html.contains("default branch is invalid"));
+    assert!(html.contains("value=\"demo-invalid\""));
+    assert!(html.contains("Create repository"));
+}
+
+#[tokio::test]
 async fn workflow_form_submission_accepts_structured_jobs_json() {
     let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
     let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
@@ -491,6 +652,105 @@ async fn workflow_form_submission_accepts_structured_jobs_json() {
         definition.jobs[0].inputs.get("source"),
         Some(&WorkflowInputBinding::SourceArtifact)
     );
+}
+
+#[tokio::test]
+async fn workflow_form_rejects_missing_required_runner_input() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo-missing-required-input");
+    let token = csrf_token(&fixture.state, &fixture.user);
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let jobs_json = serde_json::to_string(&vec![json!({
+        "runner_id": fixture.runner_id,
+        "runner_job_name": "build-app",
+        "inputs": {
+            "commit": { "kind": "commit" },
+            "branch": { "kind": "branch" }
+        },
+        "outcome_policy": "required"
+    })])
+    .expect("jobs json");
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf_token", &token)
+        .append_pair("repo_id", &repo.id)
+        .append_pair("name", "wf")
+        .append_pair("trigger_kind", "push")
+        .append_pair("branch_name", "main")
+        .append_pair("jobs_json", &jobs_json)
+        .finish();
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/workflows")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", cookie)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let text = String::from_utf8(body.to_vec()).expect("text");
+    assert!(text.contains("workflow job 1 missing required input source for runner job build-app"));
+}
+
+#[tokio::test]
+async fn workflow_form_rejects_empty_required_literal_input() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    fixture
+        .state
+        .db
+        .replace_runner_jobs(
+            &fixture.runner_id,
+            &[runner_job_definition(
+                r#"{"name":"release","timeout_seconds":60,"inputs":{"version":{"type":"string","required":true}},"outputs":{}}"#,
+            )],
+        )
+        .expect("runner jobs");
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo-empty-required-input");
+    let token = csrf_token(&fixture.state, &fixture.user);
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let jobs_json = serde_json::to_string(&vec![json!({
+        "runner_id": fixture.runner_id,
+        "runner_job_name": "release",
+        "inputs": {
+            "version": { "kind": "literal", "value": "  " }
+        },
+        "outcome_policy": "required"
+    })])
+    .expect("jobs json");
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf_token", &token)
+        .append_pair("repo_id", &repo.id)
+        .append_pair("name", "wf")
+        .append_pair("trigger_kind", "push")
+        .append_pair("branch_name", "main")
+        .append_pair("jobs_json", &jobs_json)
+        .finish();
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/workflows")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", cookie)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let text = String::from_utf8(body.to_vec()).expect("text");
+    assert!(text.contains("workflow job 1 missing required input version for runner job release"));
 }
 
 #[tokio::test]

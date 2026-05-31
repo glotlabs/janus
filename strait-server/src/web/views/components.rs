@@ -9,6 +9,7 @@ pub(super) fn layout(title: &str, body: Markup) -> Markup {
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) }
                 link rel="stylesheet" href="/assets/app.css";
+                script type="module" src="/assets/form_validation.js" {}
             }
             body {
                 div class="app-shell" {
@@ -44,6 +45,7 @@ pub(super) fn layout_public(title: &str, body: Markup) -> Markup {
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) }
                 link rel="stylesheet" href="/assets/app.css";
+                script type="module" src="/assets/form_validation.js" {}
             }
             body {
                 main class="public-shell" { (body) }
@@ -55,6 +57,14 @@ pub(super) fn layout_public(title: &str, body: Markup) -> Markup {
 pub(super) fn csrf_input(token: &str) -> Markup {
     html! {
         input type="hidden" name="csrf_token" value=(token);
+    }
+}
+
+pub(super) fn form_error(error: Option<&str>) -> Markup {
+    html! {
+        @if let Some(message) = error {
+            div class="form-error" role="alert" { (message) }
+        }
     }
 }
 

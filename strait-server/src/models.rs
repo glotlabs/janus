@@ -169,6 +169,17 @@ impl WorkflowDefinition {
         if self.jobs.is_empty() {
             return Err("workflow must contain at least one job".to_string());
         }
+        for (index, job) in self.jobs.iter().enumerate() {
+            if job.runner_id.trim().is_empty() {
+                return Err(format!("workflow job {} must choose a runner", index + 1));
+            }
+            if job.runner_job_name.trim().is_empty() {
+                return Err(format!(
+                    "workflow job {} must choose a runner job",
+                    index + 1
+                ));
+            }
+        }
         Ok(())
     }
 }

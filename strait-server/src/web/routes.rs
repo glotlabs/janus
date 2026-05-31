@@ -32,9 +32,9 @@ use crate::{
     },
     git,
     models::{
-        self, PipelineRun, Repo, RunnerJobDefinition, User, Workflow, WorkflowDefinition,
-        WorkflowInputBinding, WorkflowJobDefinition, WorkflowJobOutcomePolicy, WorkflowTrigger,
-        parse_job_output_binding,
+        self, PipelineRun, Repo, RunnerJobDefinition, RunnerJobInputDefinition, User, Workflow,
+        WorkflowDefinition, WorkflowInputBinding, WorkflowJobDefinition, WorkflowJobOutcomePolicy,
+        WorkflowTrigger, parse_job_output_binding,
     },
     scheduler,
     schema_diff::{WorkflowSchemaDiff, workflow_schema_report},
@@ -55,6 +55,7 @@ pub(crate) fn build_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/assets/app.css", get(asset_app_css))
+        .route("/assets/form_validation.js", get(asset_form_validation_js))
         .route(
             "/assets/workflow_builder.js",
             get(asset_workflow_builder_js),
@@ -145,6 +146,12 @@ impl IntoResponse for EmbeddedAsset {
 async fn asset_app_css() -> EmbeddedAsset {
     embedded_asset("text/css; charset=utf-8", include_str!("assets/app.css"))
 }
+async fn asset_form_validation_js() -> EmbeddedAsset {
+    embedded_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("assets/form_validation.js"),
+    )
+}
 async fn asset_workflow_builder_js() -> EmbeddedAsset {
     embedded_asset(
         "text/javascript; charset=utf-8",
@@ -195,7 +202,7 @@ async fn index() -> impl IntoResponse {
 }
 
 async fn login_form() -> Markup {
-    user_view::login_page()
+    user_view::login_page(None, "")
 }
 
 #[derive(Deserialize)]
@@ -205,6 +212,12 @@ struct LoginForm {
 }
 
 async fn login(State(state): State<Arc<AppState>>, Form(form): Form<LoginForm>) -> Response {
+    if form.username.trim().is_empty() || form.password.is_empty() {
+        return html_bad_request(user_view::login_page(
+            Some("username and password are required"),
+            form.username.trim(),
+        ));
+    }
     if !state.allow_login_attempt(&form.username) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -322,7 +335,12 @@ async fn users_page(
 ) -> Result<Markup, Response> {
     let csrf = csrf_token(&state, &user);
     let users = state.db.list_users().map_err(internal_error)?;
-    Ok(user_view::users_page(users, &csrf))
+    Ok(user_view::users_page(
+        users,
+        &csrf,
+        None,
+        user_view::CreateUserFormView::default(),
+    ))
 }
 
 async fn create_user(
@@ -332,13 +350,16 @@ async fn create_user(
     Form(form): Form<CreateUserForm>,
 ) -> Result<Redirect, Response> {
     verify_csrf(&state, &user, &form.csrf_token)?;
-    validate_username(&form.username)?;
-    validate_password(&form.password)?;
-    validate_role(&form.role)?;
+    validate_username(&form.username)
+        .map_err(|error| render_users_form_error(&state, &user, &form, error))?;
+    validate_password(&form.password)
+        .map_err(|error| render_users_form_error(&state, &user, &form, error))?;
+    validate_role(&form.role)
+        .map_err(|error| render_users_form_error(&state, &user, &form, error))?;
     let hash = hash_password(&form.password).map_err(internal_error_text)?;
     state
         .db
-        .create_user(&form.username, &hash, &form.role)
+        .create_user(form.username.trim(), &hash, form.role.trim())
         .map_err(internal_error)?;
     Ok(Redirect::to("/users"))
 }
@@ -358,7 +379,14 @@ async fn repos_page(
             repo,
         })
         .collect::<Vec<_>>();
-    Ok(repo_view::repos_page(&user, users, repo_cards, &csrf))
+    Ok(repo_view::repos_page(
+        &user,
+        users,
+        repo_cards,
+        &csrf,
+        None,
+        repo_form_view(None, &user),
+    ))
 }
 
 async fn create_repo(
@@ -367,25 +395,44 @@ async fn create_repo(
     Form(form): Form<CreateRepoForm>,
 ) -> Result<Redirect, Response> {
     verify_csrf(&state, &user, &form.csrf_token)?;
-    if user.role != "admin" && form.owner_id != user.id {
+    let owner_id = form.owner_id.trim();
+    if owner_id.is_empty() {
+        return Err(render_repos_form_error(
+            &state,
+            &user,
+            &form,
+            "owner is required",
+        ));
+    }
+    if user.role != "admin" && owner_id != user.id {
         return Err(forbidden("developers can only create their own repos"));
     }
     let owner = state
         .db
-        .get_user(&form.owner_id)
+        .get_user(owner_id)
         .map_err(internal_error)?
         .ok_or_else(|| bad_request("owner not found"))?;
-    let normalized = git::validate_repo_name(&form.name).map_err(bad_request)?;
-    validate_branch_name(&form.default_branch)?;
+    if form.name.trim().chars().count() > 80 {
+        return Err(render_repos_form_error(
+            &state,
+            &user,
+            &form,
+            "repository name must be 80 characters or fewer",
+        ));
+    }
+    let normalized = git::validate_repo_name(&form.name)
+        .map_err(|error| render_repos_form_error(&state, &user, &form, error.to_string()))?;
+    validate_branch_name(&form.default_branch)
+        .map_err(|error| render_repos_form_error(&state, &user, &form, error))?;
     let bare_path = PathBuf::from(&state.config.repos_dir).join(format!("{}.git", Uuid::now_v7()));
     let repo_id = state
         .db
         .create_repo(
             &owner.id,
-            &form.name,
+            form.name.trim(),
             &normalized,
             &bare_path.display().to_string(),
-            &form.default_branch,
+            form.default_branch.trim(),
         )
         .map_err(internal_error)?;
     let repo = state
@@ -412,10 +459,12 @@ async fn trigger_repo(
 ) -> Result<Redirect, Response> {
     verify_csrf(&state, &user, &form.csrf_token)?;
     let repo = authorized_repo(&state, &user, &repo_id)?;
-    let branch = form
-        .branch
+    let branch = optional_trimmed_value(form.branch.as_deref())
         .unwrap_or_else(|| format!("refs/heads/{}", repo.default_branch));
-    let commit = form.commit.unwrap_or_else(|| "HEAD".to_string());
+    validate_manual_ref("branch", &branch).map_err(bad_request)?;
+    let commit =
+        optional_trimmed_value(form.commit.as_deref()).unwrap_or_else(|| "HEAD".to_string());
+    validate_manual_ref("commit", &commit).map_err(bad_request)?;
     let refs = vec![models::PushEventRef {
         old_rev: "0000000000000000000000000000000000000000".to_string(),
         new_rev: commit,
@@ -446,7 +495,12 @@ async fn runners_page(
             Ok((runner, jobs))
         })
         .collect::<Result<Vec<_>, Response>>()?;
-    Ok(runner_view::runners_page(runners_with_jobs, &csrf))
+    Ok(runner_view::runners_page(
+        runners_with_jobs,
+        &csrf,
+        None,
+        runner_view::RunnerFormView::default(),
+    ))
 }
 
 async fn create_runner(
@@ -456,14 +510,15 @@ async fn create_runner(
     Form(form): Form<CreateRunnerForm>,
 ) -> Result<Redirect, Response> {
     verify_csrf(&state, &user, &form.csrf_token)?;
-    validate_runner_name(&form.name)?;
-    validate_base_url(&form.base_url)?;
-    if form.token.trim().is_empty() {
-        return Err(bad_request("runner token cannot be empty"));
-    }
+    validate_runner_name(&form.name)
+        .map_err(|error| render_runners_form_error(&state, &user, &form, error))?;
+    validate_base_url(&form.base_url)
+        .map_err(|error| render_runners_form_error(&state, &user, &form, error))?;
+    validate_runner_token(&form.token)
+        .map_err(|error| render_runners_form_error(&state, &user, &form, error))?;
     let runner_id = state
         .db
-        .create_runner(&form.name, &form.base_url, &form.token)
+        .create_runner(form.name.trim(), form.base_url.trim(), form.token.trim())
         .map_err(internal_error)?;
     refresh_single_runner(&state, &runner_id)
         .await
@@ -499,7 +554,7 @@ async fn update_runner(
     Form(form): Form<UpdateRunnerForm>,
 ) -> Result<Redirect, Response> {
     verify_csrf(&state, &user, &form.csrf_token)?;
-    validate_runner_name(&form.name)?;
+    validate_runner_name(&form.name).map_err(bad_request)?;
     state
         .db
         .get_runner(&runner_id)
@@ -536,34 +591,7 @@ async fn workflows_page(
     let csrf = csrf_token(&state, &user);
     let repo_select = workflow_view::repo_selector(&repos);
     let form = workflow_form_view(None, &runner_catalog, repo_select);
-    let workflow_cards = workflows
-        .into_iter()
-        .filter_map(|workflow| {
-            let repo = repos
-                .iter()
-                .find(|repo| repo.id == workflow.repo_id)?
-                .clone();
-            let schema_report = workflow_schema_report(&state, &workflow).map_err(internal_error);
-            Some((workflow, repo, schema_report))
-        })
-        .map(|(workflow, repo, schema_report)| {
-            let schema_report = schema_report?;
-            let trigger: WorkflowTrigger =
-                serde_json::from_str(&workflow.trigger_json).unwrap_or(WorkflowTrigger {
-                    kind: "push".to_string(),
-                    branches: Vec::new(),
-                });
-            let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)
-                .unwrap_or(WorkflowDefinition { jobs: Vec::new() });
-            Ok(workflow_view::WorkflowCard {
-                workflow,
-                repo,
-                schema_report,
-                trigger,
-                job_count: definition.jobs.len(),
-            })
-        })
-        .collect::<Result<Vec<_>, Response>>()?;
+    let workflow_cards = workflow_cards_for_repos(&state, &repos, workflows)?;
     Ok(workflow_view::workflows_page(form, workflow_cards, &csrf))
 }
 
@@ -599,7 +627,8 @@ async fn create_workflow(
 ) -> Result<Redirect, Response> {
     verify_csrf(&state, &user, &form.csrf_token)?;
     let repo = authorized_repo(&state, &user, &form.repo_id)?;
-    let parsed = parse_workflow_form(&state, &form)?;
+    let parsed = parse_workflow_form(&state, &form)
+        .map_err(|error| render_create_workflow_form_error(&state, &user, &form, error))?;
     state
         .db
         .create_workflow(
@@ -625,7 +654,9 @@ async fn update_workflow(
     if workflow.repo_id != form.repo_id {
         return Err(bad_request("workflow repo cannot be changed"));
     }
-    let parsed = parse_workflow_form(&state, &form)?;
+    let parsed = parse_workflow_form(&state, &form).map_err(|error| {
+        render_update_workflow_form_error(&state, &user, &workflow, &form, error)
+    })?;
     state
         .db
         .update_workflow(
@@ -793,6 +824,15 @@ struct SessionInfo {
     user: User,
     csrf_token: String,
 }
+#[derive(Serialize)]
+struct ApiErrorEnvelope {
+    error: ApiErrorBody,
+}
+#[derive(Serialize)]
+struct ApiErrorBody {
+    code: &'static str,
+    message: String,
+}
 #[derive(Deserialize)]
 struct ApiRepoCreateRequest {
     owner_id: Option<String>,
@@ -847,27 +887,39 @@ async fn api_create_repo(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ApiRepoCreateRequest>,
 ) -> Result<Json<Repo>, Response> {
-    verify_csrf(&state, &user, &request.csrf_token)?;
-    let owner_id = request.owner_id.unwrap_or_else(|| user.id.clone());
+    verify_csrf(&state, &user, &request.csrf_token)
+        .map_err(|_| api_forbidden("csrf validation failed"))?;
+    let owner_id = request
+        .owner_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| user.id.clone());
     if user.role != "admin" && owner_id != user.id {
-        return Err(forbidden("developers can only create their own repos"));
+        return Err(api_forbidden("developers can only create their own repos"));
     }
     let owner = state
         .db
         .get_user(&owner_id)
-        .map_err(internal_error)?
-        .ok_or_else(|| bad_request("owner not found"))?;
-    let normalized = git::validate_repo_name(&request.name).map_err(bad_request)?;
-    validate_branch_name(&request.default_branch)?;
+        .map_err(api_internal_error)?
+        .ok_or_else(|| api_bad_request("owner not found"))?;
+    if request.name.trim().chars().count() > 80 {
+        return Err(api_bad_request(
+            "repository name must be 80 characters or fewer",
+        ));
+    }
+    let normalized = git::validate_repo_name(&request.name).map_err(api_bad_request)?;
+    validate_branch_name(&request.default_branch).map_err(api_bad_request)?;
     let bare_path = PathBuf::from(&state.config.repos_dir).join(format!("{}.git", Uuid::now_v7()));
     let repo_id = state
         .db
         .create_repo(
             &owner.id,
-            &request.name,
+            request.name.trim(),
             &normalized,
             &bare_path.display().to_string(),
-            &request.default_branch,
+            request.default_branch.trim(),
         )
         .map_err(internal_error)?;
     let repo = state
@@ -897,12 +949,18 @@ async fn api_create_runner(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ApiRunnerCreateRequest>,
 ) -> Result<Json<models::Runner>, Response> {
-    verify_csrf(&state, &user, &request.csrf_token)?;
-    validate_runner_name(&request.name)?;
-    validate_base_url(&request.base_url)?;
+    verify_csrf(&state, &user, &request.csrf_token)
+        .map_err(|_| api_forbidden("csrf validation failed"))?;
+    validate_runner_name(&request.name).map_err(api_bad_request)?;
+    validate_base_url(&request.base_url).map_err(api_bad_request)?;
+    validate_runner_token(&request.token).map_err(api_bad_request)?;
     let runner_id = state
         .db
-        .create_runner(&request.name, &request.base_url, &request.token)
+        .create_runner(
+            request.name.trim(),
+            request.base_url.trim(),
+            request.token.trim(),
+        )
         .map_err(internal_error)?;
     refresh_single_runner(&state, &runner_id)
         .await
@@ -943,14 +1001,15 @@ async fn api_create_workflow(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ApiWorkflowRequest>,
 ) -> Result<Json<WorkflowApiView>, Response> {
-    verify_csrf(&state, &user, &request.csrf_token)?;
+    verify_csrf(&state, &user, &request.csrf_token)
+        .map_err(|_| api_forbidden("csrf validation failed"))?;
     let repo = authorized_repo(&state, &user, &request.repo_id)?;
-    let parsed = parse_api_workflow_request(&state, &request)?;
+    let parsed = parse_api_workflow_request(&state, &request).map_err(api_bad_request)?;
     state
         .db
         .create_workflow(
             &repo.id,
-            &request.name,
+            request.name.trim(),
             request.enabled,
             &parsed.trigger_json,
             &parsed.definition_json,
@@ -962,7 +1021,7 @@ async fn api_create_workflow(
         .workflows_for_repo(&repo.id)
         .map_err(internal_error)?
         .into_iter()
-        .find(|workflow| workflow.name == request.name)
+        .find(|workflow| workflow.name == request.name.trim())
         .ok_or_else(|| internal_error_text("workflow missing after create"))?;
     let schema_report = workflow_schema_report(&state, &workflow).map_err(internal_error)?;
     Ok(Json(WorkflowApiView {
@@ -990,17 +1049,18 @@ async fn api_update_workflow(
     AxumPath(workflow_id): AxumPath<String>,
     Json(request): Json<ApiWorkflowRequest>,
 ) -> Result<Json<WorkflowApiView>, Response> {
-    verify_csrf(&state, &user, &request.csrf_token)?;
+    verify_csrf(&state, &user, &request.csrf_token)
+        .map_err(|_| api_forbidden("csrf validation failed"))?;
     let workflow = authorized_workflow(&state, &user, &workflow_id)?;
     if workflow.repo_id != request.repo_id {
-        return Err(bad_request("workflow repo cannot be changed"));
+        return Err(api_bad_request("workflow repo cannot be changed"));
     }
-    let parsed = parse_api_workflow_request(&state, &request)?;
+    let parsed = parse_api_workflow_request(&state, &request).map_err(api_bad_request)?;
     state
         .db
         .update_workflow(
             &workflow.id,
-            &request.name,
+            request.name.trim(),
             request.enabled,
             &parsed.trigger_json,
             &parsed.definition_json,
@@ -1095,18 +1155,19 @@ struct ParsedWorkflow {
 fn parse_workflow_form(
     state: &Arc<AppState>,
     form: &WorkflowForm,
-) -> Result<ParsedWorkflow, Response> {
+) -> Result<ParsedWorkflow, String> {
     if form.name.trim().is_empty() {
-        return Err(bad_request("workflow name cannot be empty"));
+        return Err("workflow name cannot be empty".to_string());
+    }
+    if form.name.trim().chars().count() > 120 {
+        return Err("workflow name must be 120 characters or fewer".to_string());
     }
     let trigger_kind = form.trigger_kind.trim();
     if !matches!(trigger_kind, "push" | "manual") {
-        return Err(bad_request("trigger kind must be push or manual"));
+        return Err("trigger kind must be push or manual".to_string());
     }
     let branch_name = form.branch_name.trim();
-    if branch_name.contains(',') {
-        return Err(bad_request("branch name must contain only one branch"));
-    }
+    validate_workflow_branch_filter(branch_name)?;
     let trigger = WorkflowTrigger {
         kind: trigger_kind.to_string(),
         branches: if branch_name.is_empty() {
@@ -1117,11 +1178,11 @@ fn parse_workflow_form(
     };
     let jobs = parse_workflow_form_jobs(&form.jobs_json)?;
     let definition = WorkflowDefinition { jobs };
-    definition.validate().map_err(bad_request)?;
+    definition.validate()?;
     let job_schemas = validate_workflow_runners(state, &definition)?;
     Ok(ParsedWorkflow {
-        trigger_json: serde_json::to_string(&trigger).map_err(internal_error_text)?,
-        definition_json: serde_json::to_string(&definition).map_err(internal_error_text)?,
+        trigger_json: serde_json::to_string(&trigger).map_err(|error| error.to_string())?,
+        definition_json: serde_json::to_string(&definition).map_err(|error| error.to_string())?,
         job_schemas,
     })
 }
@@ -1129,33 +1190,49 @@ fn parse_workflow_form(
 fn parse_api_workflow_request(
     state: &Arc<AppState>,
     request: &ApiWorkflowRequest,
-) -> Result<ParsedWorkflow, Response> {
+) -> Result<ParsedWorkflow, String> {
     if request.name.trim().is_empty() {
-        return Err(bad_request("workflow name cannot be empty"));
+        return Err("workflow name cannot be empty".to_string());
     }
-    if !matches!(request.trigger_kind.as_str(), "push" | "manual") {
-        return Err(bad_request("trigger kind must be push or manual"));
+    if request.name.trim().chars().count() > 120 {
+        return Err("workflow name must be 120 characters or fewer".to_string());
     }
+    let trigger_kind = request.trigger_kind.trim();
+    if !matches!(trigger_kind, "push" | "manual") {
+        return Err("trigger kind must be push or manual".to_string());
+    }
+    let branches = request
+        .branches
+        .iter()
+        .map(|branch| {
+            let branch = branch.trim().to_string();
+            if branch.is_empty() {
+                return Err("workflow branch cannot be empty".to_string());
+            }
+            validate_workflow_branch_filter(&branch)?;
+            Ok(branch)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let trigger = WorkflowTrigger {
-        kind: request.trigger_kind.clone(),
-        branches: request.branches.clone(),
+        kind: trigger_kind.to_string(),
+        branches,
     };
     let jobs = request
         .jobs
         .iter()
         .map(|job| WorkflowJobDefinition {
-            runner_id: job.runner_id.clone(),
-            runner_job_name: job.runner_job_name.clone(),
+            runner_id: job.runner_id.trim().to_string(),
+            runner_job_name: job.runner_job_name.trim().to_string(),
             inputs: job.inputs.clone(),
             outcome_policy: job.outcome_policy.clone(),
         })
         .collect::<Vec<_>>();
     let definition = WorkflowDefinition { jobs };
-    definition.validate().map_err(bad_request)?;
+    definition.validate()?;
     let job_schemas = validate_workflow_runners(state, &definition)?;
     Ok(ParsedWorkflow {
-        trigger_json: serde_json::to_string(&trigger).map_err(internal_error_text)?,
-        definition_json: serde_json::to_string(&definition).map_err(internal_error_text)?,
+        trigger_json: serde_json::to_string(&trigger).map_err(|error| error.to_string())?,
+        definition_json: serde_json::to_string(&definition).map_err(|error| error.to_string())?,
         job_schemas,
     })
 }
@@ -1170,17 +1247,17 @@ struct SubmittedWorkflowJob {
     outcome_policy: WorkflowJobOutcomePolicy,
 }
 
-fn parse_workflow_form_jobs(input: &str) -> Result<Vec<WorkflowJobDefinition>, Response> {
+fn parse_workflow_form_jobs(input: &str) -> Result<Vec<WorkflowJobDefinition>, String> {
     let jobs = serde_json::from_str::<Vec<SubmittedWorkflowJob>>(input)
-        .map_err(|error| bad_request(format!("invalid workflow jobs payload: {error}")))?;
+        .map_err(|error| format!("invalid workflow jobs payload: {error}"))?;
     if jobs.is_empty() {
-        return Err(bad_request("workflow must contain at least one job"));
+        return Err("workflow must contain at least one job".to_string());
     }
     Ok(jobs
         .into_iter()
         .map(|job| WorkflowJobDefinition {
-            runner_id: job.runner_id,
-            runner_job_name: job.runner_job_name,
+            runner_id: job.runner_id.trim().to_string(),
+            runner_job_name: job.runner_job_name.trim().to_string(),
             inputs: job.inputs,
             outcome_policy: job.outcome_policy,
         })
@@ -1190,26 +1267,26 @@ fn parse_workflow_form_jobs(input: &str) -> Result<Vec<WorkflowJobDefinition>, R
 fn validate_workflow_runners(
     state: &Arc<AppState>,
     definition: &WorkflowDefinition,
-) -> Result<Vec<RunnerJobDefinition>, Response> {
+) -> Result<Vec<RunnerJobDefinition>, String> {
     let mut runner_job_defs = BTreeMap::new();
     for (job_index, job) in definition.jobs.iter().enumerate() {
         let runner = state
             .db
             .get_runner(&job.runner_id)
-            .map_err(internal_error)?
-            .ok_or_else(|| bad_request(format!("unknown runner {}", job.runner_id)))?;
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("unknown runner {}", job.runner_id))?;
         let jobs = state
             .db
             .list_runner_jobs(&runner.id)
-            .map_err(internal_error)?;
+            .map_err(|error| error.to_string())?;
         let Some(runner_job) = jobs
             .into_iter()
             .find(|schema| schema.name == job.runner_job_name)
         else {
-            return Err(bad_request(format!(
+            return Err(format!(
                 "runner {} does not advertise job {}",
                 runner.name, job.runner_job_name
-            )));
+            ));
         };
         runner_job_defs.insert(job_index, runner_job);
     }
@@ -1217,85 +1294,84 @@ fn validate_workflow_runners(
     for (job_index, job) in definition.jobs.iter().enumerate() {
         let runner_job = runner_job_defs
             .get(&job_index)
-            .ok_or_else(|| internal_error("missing parsed runner job definition"))?;
+            .ok_or_else(|| "missing parsed runner job definition".to_string())?;
         for (input_name, value) in &job.inputs {
-            let expected_kind = runner_job
-                .inputs
-                .get(input_name)
-                .map(|entry| entry.kind.as_str())
-                .ok_or_else(|| {
-                    bad_request(format!(
-                        "workflow job {} provides unknown input {} for runner job {}",
-                        job_index + 1,
-                        input_name,
-                        job.runner_job_name
-                    ))
-                })?;
+            let input_definition = runner_job.inputs.get(input_name).ok_or_else(|| {
+                format!(
+                    "workflow job {} provides unknown input {} for runner job {}",
+                    job_index + 1,
+                    input_name,
+                    job.runner_job_name
+                )
+            })?;
+            let expected_kind = input_definition.kind.as_str();
             match value {
                 WorkflowInputBinding::Commit | WorkflowInputBinding::Branch => {
                     if expected_kind != "string" {
-                        return Err(bad_request(format!(
+                        return Err(format!(
                             "workflow input {input_name} expects {expected_kind} but built-in binding is string"
-                        )));
+                        ));
                     }
                     continue;
                 }
                 WorkflowInputBinding::SourceArtifact => {
                     if expected_kind != "artifact" {
-                        return Err(bad_request(format!(
+                        return Err(format!(
                             "workflow input {input_name} expects {expected_kind} but source binding is artifact"
-                        )));
+                        ));
                     }
                     continue;
                 }
                 WorkflowInputBinding::Literal { value } => {
                     if !value_matches_input_kind(value, expected_kind) {
-                        return Err(bad_request(format!(
+                        return Err(format!(
                             "workflow input {input_name} expects {expected_kind} but got {}",
                             describe_json_value_kind(value)
-                        )));
+                        ));
                     }
+                    validate_literal_input_constraints(input_name, input_definition, value)?;
                     continue;
                 }
                 WorkflowInputBinding::JobOutput { .. } => {}
             }
             if let Some(binding) = parse_job_output_binding(value) {
                 if binding.job_index >= definition.jobs.len() {
-                    return Err(bad_request(format!(
+                    return Err(format!(
                         "workflow input {input_name} references unknown job job-{}",
                         binding.job_index + 1
-                    )));
+                    ));
                 }
                 if binding.job_index >= job_index {
-                    return Err(bad_request(format!(
+                    return Err(format!(
                         "workflow input {input_name} references job-{}.{} but only earlier jobs can be referenced",
                         binding.job_index + 1,
                         binding.output_name
-                    )));
+                    ));
                 }
                 let upstream_runner_job = runner_job_defs
                     .get(&binding.job_index)
-                    .ok_or_else(|| internal_error("missing upstream runner job definition"))?;
+                    .ok_or_else(|| "missing upstream runner job definition".to_string())?;
                 let output = upstream_runner_job
                     .outputs
                     .get(&binding.output_name)
                     .ok_or_else(|| {
-                        bad_request(format!(
+                        format!(
                             "workflow input {input_name} references missing output job-{}.{}",
                             binding.job_index + 1,
                             binding.output_name
-                        ))
+                        )
                     })?;
                 if output.kind.as_str() != expected_kind {
-                    return Err(bad_request(format!(
+                    return Err(format!(
                         "workflow input {input_name} expects {expected_kind} but job-{}.{} is {}",
                         binding.job_index + 1,
                         binding.output_name,
                         output.kind.as_str()
-                    )));
+                    ));
                 }
             }
         }
+        validate_required_workflow_inputs(job_index, job, runner_job)?;
     }
     Ok(definition
         .jobs
@@ -1303,6 +1379,76 @@ fn validate_workflow_runners(
         .enumerate()
         .filter_map(|(job_index, _)| runner_job_defs.get(&job_index).cloned())
         .collect())
+}
+
+fn validate_required_workflow_inputs(
+    job_index: usize,
+    job: &WorkflowJobDefinition,
+    runner_job: &RunnerJobDefinition,
+) -> Result<(), String> {
+    for (input_name, input_definition) in &runner_job.inputs {
+        if !input_definition.required {
+            continue;
+        }
+        let Some(binding) = job.inputs.get(input_name) else {
+            return Err(format!(
+                "workflow job {} missing required input {} for runner job {}",
+                job_index + 1,
+                input_name,
+                job.runner_job_name
+            ));
+        };
+        if workflow_input_binding_is_empty(binding) {
+            return Err(format!(
+                "workflow job {} missing required input {} for runner job {}",
+                job_index + 1,
+                input_name,
+                job.runner_job_name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn workflow_input_binding_is_empty(binding: &WorkflowInputBinding) -> bool {
+    match binding {
+        WorkflowInputBinding::Literal { value } => match value {
+            Value::Null => true,
+            Value::String(value) => value.trim().is_empty(),
+            _ => false,
+        },
+        WorkflowInputBinding::JobOutput { output_name, .. } => output_name.trim().is_empty(),
+        WorkflowInputBinding::Commit
+        | WorkflowInputBinding::Branch
+        | WorkflowInputBinding::SourceArtifact => false,
+    }
+}
+
+fn validate_literal_input_constraints(
+    input_name: &str,
+    input_definition: &RunnerJobInputDefinition,
+    value: &Value,
+) -> Result<(), String> {
+    if let Some(max_length) = input_definition.max_length {
+        if let Some(value) = value.as_str()
+            && value.chars().count() > max_length
+        {
+            return Err(format!(
+                "workflow input {input_name} exceeds max length {max_length}"
+            ));
+        }
+    }
+    if let Some(max_json_bytes) = input_definition.max_json_bytes {
+        let byte_len = serde_json::to_vec(value)
+            .map_err(|error| error.to_string())?
+            .len();
+        if byte_len > max_json_bytes {
+            return Err(format!(
+                "workflow input {input_name} exceeds max JSON size {max_json_bytes} bytes"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn value_matches_input_kind(value: &Value, expected_kind: &str) -> bool {
@@ -1339,7 +1485,7 @@ struct WorkflowRunnerCatalogEntry {
     jobs: Vec<RunnerJobDefinition>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WorkflowEditorJob {
     runner_id: String,
     runner_job_name: String,
@@ -1478,7 +1624,236 @@ fn workflow_form_view(
             &serde_json::to_string(&initial_jobs).unwrap_or_else(|_| "[]".to_string()),
         ),
         is_edit: workflow.is_some(),
+        error: None,
     }
+}
+
+fn workflow_form_view_from_submission(
+    form: &WorkflowForm,
+    runner_catalog: &[WorkflowRunnerCatalogEntry],
+    repo_field: Markup,
+    is_edit: bool,
+    error: String,
+) -> workflow_view::WorkflowFormView {
+    let jobs = serde_json::from_str::<Vec<WorkflowEditorJob>>(&form.jobs_json).unwrap_or_default();
+    workflow_view::WorkflowFormView {
+        name: form.name.clone(),
+        trigger_kind: form.trigger_kind.clone(),
+        branch_name: form.branch_name.clone(),
+        jobs_json: form.jobs_json.clone(),
+        repo_field,
+        runner_catalog_json: workflow_view::script_json(
+            &serde_json::to_string(runner_catalog).unwrap_or_else(|_| "[]".to_string()),
+        ),
+        initial_jobs_json: workflow_view::script_json(
+            &serde_json::to_string(&jobs).unwrap_or_else(|_| "[]".to_string()),
+        ),
+        is_edit,
+        error: Some(error),
+    }
+}
+
+fn repo_form_view(form: Option<&CreateRepoForm>, user: &User) -> repo_view::RepoFormView {
+    repo_view::RepoFormView {
+        name: form.map(|form| form.name.clone()).unwrap_or_default(),
+        owner_id: form
+            .map(|form| form.owner_id.clone())
+            .unwrap_or_else(|| user.id.clone()),
+        default_branch: form
+            .map(|form| form.default_branch.clone())
+            .unwrap_or_else(|| "main".to_string()),
+    }
+}
+
+fn runner_form_view(form: &CreateRunnerForm) -> runner_view::RunnerFormView {
+    runner_view::RunnerFormView {
+        name: form.name.clone(),
+        base_url: form.base_url.clone(),
+    }
+}
+
+fn render_users_form_error(
+    state: &Arc<AppState>,
+    user: &User,
+    form: &CreateUserForm,
+    error: String,
+) -> Response {
+    match state.db.list_users() {
+        Ok(users) => html_bad_request(user_view::users_page(
+            users,
+            &csrf_token(state, user),
+            Some(&error),
+            user_view::CreateUserFormView {
+                username: form.username.clone(),
+                role: form.role.clone(),
+            },
+        )),
+        Err(error) => internal_error(error),
+    }
+}
+
+fn render_repos_form_error(
+    state: &Arc<AppState>,
+    user: &User,
+    form: &CreateRepoForm,
+    error: impl std::fmt::Display,
+) -> Response {
+    let result = (|| {
+        let repos = state.db.list_repos().map_err(internal_error)?;
+        let users = state.db.list_users().map_err(internal_error)?;
+        let repo_cards = repos
+            .into_iter()
+            .filter(|repo| can_view_repo(user, repo))
+            .map(|repo| repo_view::RepoCard {
+                clone_url: repo_clone_url(state, &repo),
+                repo,
+            })
+            .collect::<Vec<_>>();
+        Ok::<_, Response>(repo_view::repos_page(
+            user,
+            users,
+            repo_cards,
+            &csrf_token(state, user),
+            Some(&error.to_string()),
+            repo_form_view(Some(form), user),
+        ))
+    })();
+    match result {
+        Ok(markup) => html_bad_request(markup),
+        Err(response) => response,
+    }
+}
+
+fn render_runners_form_error(
+    state: &Arc<AppState>,
+    user: &User,
+    form: &CreateRunnerForm,
+    error: String,
+) -> Response {
+    let result = (|| {
+        let runners_with_jobs = runners_with_jobs(state)?;
+        Ok::<_, Response>(runner_view::runners_page(
+            runners_with_jobs,
+            &csrf_token(state, user),
+            Some(&error),
+            runner_form_view(form),
+        ))
+    })();
+    match result {
+        Ok(markup) => html_bad_request(markup),
+        Err(response) => response,
+    }
+}
+
+fn workflow_cards_for_repos(
+    state: &Arc<AppState>,
+    repos: &[Repo],
+    workflows: Vec<Workflow>,
+) -> Result<Vec<workflow_view::WorkflowCard>, Response> {
+    workflows
+        .into_iter()
+        .filter_map(|workflow| {
+            let repo = repos
+                .iter()
+                .find(|repo| repo.id == workflow.repo_id)?
+                .clone();
+            let schema_report = workflow_schema_report(state, &workflow).map_err(internal_error);
+            Some((workflow, repo, schema_report))
+        })
+        .map(|(workflow, repo, schema_report)| {
+            let schema_report = schema_report?;
+            let trigger: WorkflowTrigger =
+                serde_json::from_str(&workflow.trigger_json).unwrap_or(WorkflowTrigger {
+                    kind: "push".to_string(),
+                    branches: Vec::new(),
+                });
+            let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)
+                .unwrap_or(WorkflowDefinition { jobs: Vec::new() });
+            Ok(workflow_view::WorkflowCard {
+                workflow,
+                repo,
+                schema_report,
+                trigger,
+                job_count: definition.jobs.len(),
+            })
+        })
+        .collect::<Result<Vec<_>, Response>>()
+}
+
+fn render_create_workflow_form_error(
+    state: &Arc<AppState>,
+    user: &User,
+    form: &WorkflowForm,
+    error: String,
+) -> Response {
+    let result = (|| {
+        let repos = visible_repos_for_user(state, user)?;
+        let workflows = state.db.list_workflows().map_err(internal_error)?;
+        let runner_catalog = workflow_runner_catalog(state)?;
+        let workflow_cards = workflow_cards_for_repos(state, &repos, workflows)?;
+        let repo_field = workflow_view::repo_selector(&repos);
+        let form_view =
+            workflow_form_view_from_submission(form, &runner_catalog, repo_field, false, error);
+        Ok::<_, Response>(workflow_view::workflows_page(
+            form_view,
+            workflow_cards,
+            &csrf_token(state, user),
+        ))
+    })();
+    match result {
+        Ok(markup) => html_bad_request(markup),
+        Err(response) => response,
+    }
+}
+
+fn render_update_workflow_form_error(
+    state: &Arc<AppState>,
+    user: &User,
+    workflow: &Workflow,
+    form: &WorkflowForm,
+    error: String,
+) -> Response {
+    let result = (|| {
+        let repo = state
+            .db
+            .get_repo(&workflow.repo_id)
+            .map_err(internal_error)?
+            .ok_or_else(|| not_found("repo"))?;
+        let runner_catalog = workflow_runner_catalog(state)?;
+        let repo_field = workflow_view::fixed_repo_field(workflow, &repo);
+        let schema_report = workflow_schema_report(state, workflow).map_err(internal_error)?;
+        let form_view =
+            workflow_form_view_from_submission(form, &runner_catalog, repo_field, true, error);
+        Ok::<_, Response>(workflow_view::workflow_detail_page(
+            workflow,
+            &repo,
+            schema_report,
+            form_view,
+            &csrf_token(state, user),
+        ))
+    })();
+    match result {
+        Ok(markup) => html_bad_request(markup),
+        Err(response) => response,
+    }
+}
+
+fn runners_with_jobs(
+    state: &Arc<AppState>,
+) -> Result<Vec<(models::Runner, Vec<RunnerJobDefinition>)>, Response> {
+    state
+        .db
+        .list_runners()
+        .map_err(internal_error)?
+        .into_iter()
+        .map(|runner| {
+            let jobs = state
+                .db
+                .list_runner_jobs(&runner.id)
+                .map_err(internal_error)?;
+            Ok((runner, jobs))
+        })
+        .collect::<Result<Vec<_>, Response>>()
 }
 
 fn visible_repos_for_user(state: &Arc<AppState>, user: &User) -> Result<Vec<Repo>, Response> {
@@ -1544,51 +1919,98 @@ fn repo_clone_url(state: &Arc<AppState>, repo: &Repo) -> String {
         repo.name
     )
 }
-fn validate_username(username: &str) -> Result<(), Response> {
+fn validate_username(username: &str) -> Result<(), String> {
     let trimmed = username.trim();
     if trimmed.len() < 3 {
-        return Err(bad_request("username must be at least 3 characters"));
+        return Err("username must be at least 3 characters".to_string());
+    }
+    if trimmed.chars().count() > 64 {
+        return Err("username must be 64 characters or fewer".to_string());
     }
     if !trimmed
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
     {
-        return Err(bad_request("username contains invalid characters"));
+        return Err("username contains invalid characters".to_string());
     }
     Ok(())
 }
-fn validate_password(password: &str) -> Result<(), Response> {
+fn validate_password(password: &str) -> Result<(), String> {
     if password.len() < 8 {
-        Err(bad_request("password must be at least 8 characters"))
+        Err("password must be at least 8 characters".to_string())
     } else {
         Ok(())
     }
 }
-fn validate_role(role: &str) -> Result<(), Response> {
+fn validate_role(role: &str) -> Result<(), String> {
     if matches!(role, "admin" | "developer") {
         Ok(())
     } else {
-        Err(bad_request("role must be admin or developer"))
+        Err("role must be admin or developer".to_string())
     }
 }
-fn validate_branch_name(branch: &str) -> Result<(), Response> {
+fn validate_branch_name(branch: &str) -> Result<(), String> {
     if branch.trim().is_empty() || branch.contains(' ') {
-        Err(bad_request("default branch is invalid"))
+        Err("default branch is invalid".to_string())
+    } else if branch.trim().chars().count() > 255 {
+        Err("default branch must be 255 characters or fewer".to_string())
     } else {
         Ok(())
     }
 }
-fn validate_runner_name(name: &str) -> Result<(), Response> {
+fn validate_workflow_branch_filter(branch: &str) -> Result<(), String> {
+    if branch.is_empty() {
+        return Ok(());
+    }
+    if branch.contains(',') {
+        return Err("branch name must contain only one branch".to_string());
+    }
+    if branch.chars().any(char::is_whitespace) {
+        return Err("branch name must not contain whitespace".to_string());
+    }
+    if branch.chars().count() > 255 {
+        return Err("branch name must be 255 characters or fewer".to_string());
+    }
+    Ok(())
+}
+fn validate_manual_ref(field: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{field} cannot be empty"));
+    }
+    if value.chars().any(char::is_whitespace) {
+        return Err(format!("{field} must not contain whitespace"));
+    }
+    Ok(())
+}
+fn validate_runner_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
-        Err(bad_request("runner name cannot be empty"))
+        Err("runner name cannot be empty".to_string())
+    } else if name.trim().chars().count() > 120 {
+        Err("runner name must be 120 characters or fewer".to_string())
     } else {
         Ok(())
     }
 }
-fn validate_base_url(url: &str) -> Result<(), Response> {
-    url::Url::parse(url)
+fn validate_runner_token(token: &str) -> Result<(), String> {
+    if token.trim().is_empty() {
+        Err("runner token cannot be empty".to_string())
+    } else {
+        Ok(())
+    }
+}
+fn validate_base_url(url: &str) -> Result<(), String> {
+    if url.trim().chars().count() > 2048 {
+        return Err("base_url must be 2048 characters or fewer".to_string());
+    }
+    url::Url::parse(url.trim())
         .map(|_| ())
-        .map_err(|_| bad_request("base_url must be a valid URL"))
+        .map_err(|_| "base_url must be a valid URL".to_string())
+}
+fn optional_trimmed_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 pub(super) fn csrf_token(state: &Arc<AppState>, user: &User) -> String {
     let mut mac = HmacSha256::new_from_slice(state.config.auth.session_secret.as_bytes())
@@ -1612,6 +2034,30 @@ fn internal_error_text(error: impl std::fmt::Display) -> Response {
 }
 fn bad_request(error: impl std::fmt::Display) -> Response {
     (StatusCode::BAD_REQUEST, error.to_string()).into_response()
+}
+fn html_bad_request(markup: Markup) -> Response {
+    (StatusCode::BAD_REQUEST, markup).into_response()
+}
+fn api_error(status: StatusCode, code: &'static str, message: impl std::fmt::Display) -> Response {
+    (
+        status,
+        Json(ApiErrorEnvelope {
+            error: ApiErrorBody {
+                code,
+                message: message.to_string(),
+            },
+        }),
+    )
+        .into_response()
+}
+fn api_bad_request(error: impl std::fmt::Display) -> Response {
+    api_error(StatusCode::BAD_REQUEST, "bad_request", error)
+}
+fn api_forbidden(error: impl std::fmt::Display) -> Response {
+    api_error(StatusCode::FORBIDDEN, "forbidden", error)
+}
+fn api_internal_error(error: impl std::fmt::Display) -> Response {
+    api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", error)
 }
 fn forbidden(error: impl std::fmt::Display) -> Response {
     (StatusCode::FORBIDDEN, error.to_string()).into_response()

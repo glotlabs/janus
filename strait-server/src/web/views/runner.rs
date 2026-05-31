@@ -2,9 +2,20 @@ use maud::{Markup, html};
 
 use crate::models::{Runner, RunnerJobDefinition};
 
-use super::components::{badge, csrf_input, layout, page_intro, runner_state_tone};
+use super::components::{badge, csrf_input, form_error, layout, page_intro, runner_state_tone};
 
-pub(crate) fn runners_page(runners: Vec<(Runner, Vec<RunnerJobDefinition>)>, csrf: &str) -> Markup {
+#[derive(Default)]
+pub(crate) struct RunnerFormView {
+    pub name: String,
+    pub base_url: String,
+}
+
+pub(crate) fn runners_page(
+    runners: Vec<(Runner, Vec<RunnerJobDefinition>)>,
+    csrf: &str,
+    error: Option<&str>,
+    form: RunnerFormView,
+) -> Markup {
     layout(
         "Runners",
         html! {
@@ -21,13 +32,14 @@ pub(crate) fn runners_page(runners: Vec<(Runner, Vec<RunnerJobDefinition>)>, csr
                 }
                 form method="post" action="/runners" class="stack-lg" {
                     (csrf_input(csrf))
+                    (form_error(error))
                     div class="form-grid form-grid-3" {
-                        label { span { "Name" } input name="name"; }
+                        label { span { "Name" } input name="name" value=(form.name) maxlength="120" required data-validate data-trim-required="true"; }
                         label {
                             span { "Base URL" }
-                            input name="base_url" placeholder="http://127.0.0.1:8080";
+                            input name="base_url" type="url" value=(form.base_url) placeholder="http://127.0.0.1:8080" maxlength="2048" required data-validate data-trim-required="true";
                         }
-                        label { span { "Token" } input name="token"; }
+                        label { span { "Token" } input name="token" required data-validate data-trim-required="true"; }
                     }
                     div class="actions" {
                         button type="submit" { "Add runner" }
@@ -65,7 +77,7 @@ pub(crate) fn runners_page(runners: Vec<(Runner, Vec<RunnerJobDefinition>)>, csr
                                 (csrf_input(csrf))
                                 label {
                                     span { "Runner name" }
-                                    input name="name" value=(runner.name);
+                                    input name="name" value=(runner.name) required data-validate data-trim-required="true";
                                 }
                                 div class="actions" {
                                     button type="submit" class="secondary" { "Save name" }

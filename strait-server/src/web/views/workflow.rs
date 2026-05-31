@@ -2,7 +2,7 @@ use maud::{Markup, PreEscaped, html};
 
 use crate::models::{Repo, Workflow, WorkflowTrigger};
 
-use super::components::{badge, csrf_input, layout, page_intro, x_mark};
+use super::components::{badge, csrf_input, form_error, layout, page_intro, x_mark};
 use crate::schema_diff::{WorkflowSchemaDiff, WorkflowSchemaReport};
 
 pub(crate) struct WorkflowCard {
@@ -22,6 +22,7 @@ pub(crate) struct WorkflowFormView {
     pub runner_catalog_json: PreEscaped<String>,
     pub initial_jobs_json: PreEscaped<String>,
     pub is_edit: bool,
+    pub error: Option<String>,
 }
 
 pub(crate) fn workflows_page(
@@ -189,7 +190,7 @@ fn schema_diff_details(diff: &[WorkflowSchemaDiff]) -> Markup {
 
 pub(crate) fn repo_selector(repos: &[Repo]) -> Markup {
     html! {
-        select name="repo_id" {
+        select name="repo_id" required {
             @for repo in repos {
                 option value=(repo.id) { (repo.owner_username) "/" (repo.name) }
             }
@@ -213,11 +214,11 @@ fn workflow_form_fields(form: WorkflowFormView) -> Markup {
         div class="form-grid form-grid-2" {
             label {
                 span { "Workflow name" }
-                input name="name" value=(form.name);
+                input name="name" value=(form.name) maxlength="120" required data-validate data-trim-required="true";
             }
             label {
                 span { "Trigger" }
-                select name="trigger_kind" {
+                select name="trigger_kind" required {
                     option value="push" selected[form.trigger_kind == "push"] { "push" }
                     option value="manual" selected[form.trigger_kind == "manual"] { "manual" }
                 }
@@ -230,9 +231,10 @@ fn workflow_form_fields(form: WorkflowFormView) -> Markup {
             }
             label {
                 span { "Branch" }
-                input name="branch_name" value=(form.branch_name);
+                input name="branch_name" value=(form.branch_name) maxlength="255" data-validate data-no-whitespace="true" data-single-branch="true";
             }
         }
+        (form_error(form.error.as_deref()))
         div class="card soft-card" {
             div class="section-head" {
                 div {
@@ -339,6 +341,7 @@ fn workflow_form_fields(form: WorkflowFormView) -> Markup {
                     }
                 }
                 div id="workflow-job-list" class="stack-md" {}
+                div id="workflow-validation-errors" class="form-error" tabindex="-1" hidden {}
                 div class="actions" {
                     button type="button" id="workflow-add-job" class="secondary" { "Add job" }
                 }
