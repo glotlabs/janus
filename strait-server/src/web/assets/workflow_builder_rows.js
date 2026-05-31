@@ -90,7 +90,7 @@ export function fillOutcomePolicyOptions(select, selectedPolicy) {
 export function fillRunnerOptions(select, catalog, selectedRunnerId) {
   replaceOptions(
     select,
-    catalog.map((runner) => ({ value: runner.id, label: `${runner.name} (${runner.id})` })),
+    catalog.map((runner) => ({ value: runner.id, label: runner.name })),
     selectedRunnerId,
     {
       placeholder: { label: catalog.length <= 1 ? 'Select runner' : 'Choose runner' },

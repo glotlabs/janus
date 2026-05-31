@@ -76,6 +76,14 @@ pub(super) fn badge(label: &str, tone: &str) -> Markup {
     }
 }
 
+pub(super) fn x_mark() -> Markup {
+    html! {
+        svg class="size-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" {
+            path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" {}
+        }
+    }
+}
+
 pub(super) fn display_status(status: &str) -> String {
     match status {
         "cancel_requested" => "cancel requested".to_string(),

@@ -2,7 +2,7 @@ use maud::{Markup, PreEscaped, html};
 
 use crate::models::{Repo, Workflow, WorkflowDefinition, WorkflowTrigger};
 
-use super::components::{badge, csrf_input, layout, page_intro, render_workflow_job_chips};
+use super::components::{badge, csrf_input, layout, page_intro, render_workflow_job_chips, x_mark};
 use crate::web::routes::WorkflowSchemaStatus;
 
 pub(crate) struct WorkflowCard {
@@ -236,7 +236,7 @@ fn workflow_form_fields(form: WorkflowFormView) -> Markup {
                             }
                         }
                         div class="job-row-remove" {
-                            button type="button" class="ghost" data-remove-job="true" { "Remove job" }
+                            button type="button" class="job-remove-button ghost" data-remove-job="true" aria-label="Remove job" title="Remove job" { (x_mark()) }
                         }
                     }
                 }

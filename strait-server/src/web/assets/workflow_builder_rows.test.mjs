@@ -83,7 +83,7 @@ test('fillRunnerOptions auto-selects one runner and uses select placeholder', ()
     selected: option.selected
   })), [
     { value: '', textContent: 'Select runner', selected: true },
-    { value: 'runner-1', textContent: 'Linux (runner-1)', selected: false }
+    { value: 'runner-1', textContent: 'Linux', selected: false }
   ]);
   assert.equal(select.value, 'runner-1');
 }));
