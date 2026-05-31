@@ -12,6 +12,8 @@ pub struct Config {
     pub runner_auth: RunnerAuthConfig,
     pub scheduler: SchedulerConfig,
     pub runners: RunnersConfig,
+    pub runner_url_policy: RunnerUrlPolicyConfig,
+    pub limits: LimitsConfig,
 }
 
 impl Config {
@@ -84,4 +86,30 @@ pub struct SchedulerConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RunnersConfig {
     pub healthcheck_interval_seconds: u64,
+    pub connect_timeout_seconds: u64,
+    pub request_timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RunnerUrlPolicyConfig {
+    pub require_https: bool,
+    pub allow_credentials: bool,
+    pub allow_query: bool,
+    pub allow_fragment: bool,
+    pub allow_path: bool,
+    pub allow_localhost: bool,
+    pub allow_private_ips: bool,
+    pub allow_link_local_ips: bool,
+    pub allow_documentation_ips: bool,
+    pub allow_multicast_ips: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LimitsConfig {
+    pub request_body_bytes: usize,
+    pub runner_json_bytes: usize,
+    pub runner_logs_bytes: usize,
+    pub runner_artifact_bytes: usize,
+    pub runner_error_bytes: usize,
+    pub server_artifact_bytes: usize,
 }

@@ -1,16 +1,22 @@
 use std::{
     collections::BTreeMap,
+    net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use axum::{
     Form, Json, Router,
-    extract::{Path as AxumPath, State},
+    body::Body,
+    extract::{DefaultBodyLimit, Path as AxumPath, State},
     http::{
-        HeaderMap, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_TYPE, SET_COOKIE},
+        HeaderMap, Request, StatusCode,
+        header::{
+            CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HeaderName, HeaderValue,
+            REFERRER_POLICY, SET_COOKIE, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
+        },
     },
+    middleware::{Next, from_fn},
     response::{IntoResponse, Redirect, Response, Sse},
     routing::{get, post},
 };
@@ -22,7 +28,22 @@ use serde_json::{Value, json};
 use sha2::Sha256;
 use strait_lib::SUPPORTED_RUNNER_PROTOCOL_VERSIONS;
 use tokio::time;
+use tracing::error;
+use url::Url;
 use uuid::Uuid;
+
+const CONTENT_SECURITY_POLICY_VALUE: &str = concat!(
+    "default-src 'self'; ",
+    "script-src 'self'; ",
+    "style-src 'self'; ",
+    "connect-src 'self'; ",
+    "img-src 'self' data:; ",
+    "object-src 'none'; ",
+    "base-uri 'none'; ",
+    "frame-ancestors 'none'; ",
+    "form-action 'self'"
+);
+const PERMISSIONS_POLICY: HeaderName = HeaderName::from_static("permissions-policy");
 
 use crate::{
     app::AppState,
@@ -30,6 +51,7 @@ use crate::{
         AdminUser, CurrentUser, clear_session_cookie, hash_password, parse_session_cookie,
         session_cookie, verify_password,
     },
+    config::RunnerUrlPolicyConfig,
     git,
     models::{
         self, PipelineRun, Repo, RunnerJobDefinition, RunnerJobInputDefinition, User, UserRole,
@@ -48,6 +70,7 @@ use super::views::{
 type HmacSha256 = Hmac<Sha256>;
 
 pub(crate) fn build_router(state: Arc<AppState>) -> Router {
+    let max_request_body_bytes = state.config.limits.request_body_bytes;
     Router::new()
         .route("/", get(index))
         .route("/login", get(login_form).post(login))
@@ -116,7 +139,26 @@ pub(crate) fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/pipelines", get(api_list_pipelines))
         .route("/api/pipelines/{pipeline_id}", get(api_get_pipeline))
+        .layer(from_fn(security_headers))
+        .layer(DefaultBodyLimit::max(max_request_body_bytes))
         .with_state(state)
+}
+
+async fn security_headers(request: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CONTENT_SECURITY_POLICY_VALUE),
+    );
+    headers.insert(
+        PERMISSIONS_POLICY,
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    response
 }
 
 async fn health() -> Markup {
@@ -410,20 +452,20 @@ async fn create_repo(
             &bare_path.display().to_string(),
             form.default_branch.trim(),
         )
-        .map_err(internal_error)?;
+        .map_err(api_internal_error)?;
     let repo = state
         .db
         .get_repo(&repo_id)
-        .map_err(internal_error)?
-        .ok_or_else(|| internal_error_text("missing repo after create"))?;
-    git::init_bare_repo(Path::new(&repo.bare_path)).map_err(internal_error_text)?;
+        .map_err(api_internal_error)?
+        .ok_or_else(|| api_internal_error("missing repo after create"))?;
+    git::init_bare_repo(Path::new(&repo.bare_path)).map_err(api_internal_error)?;
     git::install_post_receive_hook(
         Path::new(&repo.bare_path),
         state.server_bin.as_path(),
         state.config_path.as_path(),
         &repo.id,
     )
-    .map_err(internal_error_text)?;
+    .map_err(api_internal_error)?;
     Ok(Redirect::to("/repos"))
 }
 
@@ -489,7 +531,7 @@ async fn create_runner(
     verify_csrf(&state, &user, &form.csrf_token)?;
     validate_runner_name(&form.name)
         .map_err(|error| render_runners_form_error(&state, &user, &form, error))?;
-    validate_base_url(&form.base_url)
+    validate_base_url(&form.base_url, &state.config.runner_url_policy)
         .map_err(|error| render_runners_form_error(&state, &user, &form, error))?;
     let runner_id = state
         .db
@@ -883,27 +925,27 @@ async fn api_create_repo(
             &bare_path.display().to_string(),
             request.default_branch.trim(),
         )
-        .map_err(internal_error)?;
+        .map_err(api_internal_error)?;
     let repo = state
         .db
         .get_repo(&repo_id)
-        .map_err(internal_error)?
-        .ok_or_else(|| internal_error_text("missing repo after create"))?;
-    git::init_bare_repo(Path::new(&repo.bare_path)).map_err(internal_error_text)?;
+        .map_err(api_internal_error)?
+        .ok_or_else(|| api_internal_error("missing repo after create"))?;
+    git::init_bare_repo(Path::new(&repo.bare_path)).map_err(api_internal_error)?;
     git::install_post_receive_hook(
         Path::new(&repo.bare_path),
         state.server_bin.as_path(),
         state.config_path.as_path(),
         &repo.id,
     )
-    .map_err(internal_error_text)?;
+    .map_err(api_internal_error)?;
     Ok(Json(repo))
 }
 async fn api_list_runners(
     _: AdminUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<models::Runner>>, Response> {
-    Ok(Json(state.db.list_runners().map_err(internal_error)?))
+    Ok(Json(state.db.list_runners().map_err(api_internal_error)?))
 }
 async fn api_create_runner(
     _: AdminUser,
@@ -914,18 +956,19 @@ async fn api_create_runner(
     verify_csrf(&state, &user, &request.csrf_token)
         .map_err(|_| api_forbidden("csrf validation failed"))?;
     validate_runner_name(&request.name).map_err(api_bad_request)?;
-    validate_base_url(&request.base_url).map_err(api_bad_request)?;
+    validate_base_url(&request.base_url, &state.config.runner_url_policy)
+        .map_err(api_bad_request)?;
     let runner_id = state
         .db
         .create_runner(request.name.trim(), request.base_url.trim())
-        .map_err(internal_error)?;
+        .map_err(api_internal_error)?;
     refresh_single_runner(&state, &runner_id)
         .await
-        .map_err(internal_error_text)?;
+        .map_err(api_internal_error)?;
     let runner = state
         .db
         .get_runner(&runner_id)
-        .map_err(internal_error)?
+        .map_err(api_internal_error)?
         .ok_or_else(|| not_found("runner"))?;
     Ok(Json(runner))
 }
@@ -938,12 +981,12 @@ async fn api_list_workflows(
     let workflows = state
         .db
         .list_workflows()
-        .map_err(internal_error)?
+        .map_err(api_internal_error)?
         .into_iter()
         .filter(|workflow| repo_ids.iter().any(|id| id == &workflow.repo_id))
         .map(|workflow| {
             let schema_report =
-                workflow_schema_report(&state, &workflow).map_err(internal_error)?;
+                workflow_schema_report(&state, &workflow).map_err(api_internal_error)?;
             Ok(WorkflowApiView {
                 schema_status: schema_report.status,
                 schema_diff: schema_report.diff,
@@ -972,15 +1015,15 @@ async fn api_create_workflow(
             &parsed.definition_json,
             &parsed.job_schemas,
         )
-        .map_err(internal_error)?;
+        .map_err(api_internal_error)?;
     let workflow = state
         .db
         .workflows_for_repo(&repo.id)
-        .map_err(internal_error)?
+        .map_err(api_internal_error)?
         .into_iter()
         .find(|workflow| workflow.name == request.name.trim())
-        .ok_or_else(|| internal_error_text("workflow missing after create"))?;
-    let schema_report = workflow_schema_report(&state, &workflow).map_err(internal_error)?;
+        .ok_or_else(|| api_internal_error("workflow missing after create"))?;
+    let schema_report = workflow_schema_report(&state, &workflow).map_err(api_internal_error)?;
     Ok(Json(WorkflowApiView {
         schema_status: schema_report.status,
         schema_diff: schema_report.diff,
@@ -993,7 +1036,7 @@ async fn api_get_workflow(
     AxumPath(workflow_id): AxumPath<String>,
 ) -> Result<Json<WorkflowApiView>, Response> {
     let workflow = authorized_workflow(&state, &user, &workflow_id)?;
-    let schema_report = workflow_schema_report(&state, &workflow).map_err(internal_error)?;
+    let schema_report = workflow_schema_report(&state, &workflow).map_err(api_internal_error)?;
     Ok(Json(WorkflowApiView {
         schema_status: schema_report.status,
         schema_diff: schema_report.diff,
@@ -1023,13 +1066,13 @@ async fn api_update_workflow(
             &parsed.definition_json,
             &parsed.job_schemas,
         )
-        .map_err(internal_error)?;
+        .map_err(api_internal_error)?;
     let workflow = state
         .db
         .get_workflow(&workflow.id)
-        .map_err(internal_error)?
+        .map_err(api_internal_error)?
         .ok_or_else(|| not_found("workflow"))?;
-    let schema_report = workflow_schema_report(&state, &workflow).map_err(internal_error)?;
+    let schema_report = workflow_schema_report(&state, &workflow).map_err(api_internal_error)?;
     Ok(Json(WorkflowApiView {
         schema_status: schema_report.status,
         schema_diff: schema_report.diff,
@@ -1045,7 +1088,7 @@ async fn api_list_pipelines(
     let pipelines = state
         .db
         .list_pipeline_runs()
-        .map_err(internal_error)?
+        .map_err(api_internal_error)?
         .into_iter()
         .filter(|pipeline| repo_ids.iter().any(|id| id == &pipeline.repo_id))
         .collect::<Vec<_>>();
@@ -1061,7 +1104,7 @@ async fn api_get_pipeline(
         state
             .db
             .pipeline_snapshot(&pipeline.id)
-            .map_err(internal_error)?
+            .map_err(api_internal_error)?
             .ok_or_else(|| not_found("pipeline"))?,
     ))
 }
@@ -1940,13 +1983,90 @@ fn validate_runner_name(name: &str) -> Result<(), String> {
         Ok(())
     }
 }
-fn validate_base_url(url: &str) -> Result<(), String> {
+fn validate_base_url(url: &str, policy: &RunnerUrlPolicyConfig) -> Result<(), String> {
     if url.trim().chars().count() > 2048 {
         return Err("base_url must be 2048 characters or fewer".to_string());
     }
-    url::Url::parse(url.trim())
-        .map(|_| ())
-        .map_err(|_| "base_url must be a valid URL".to_string())
+    let parsed = Url::parse(url.trim()).map_err(|_| "base_url must be a valid URL".to_string())?;
+    if policy.require_https && parsed.scheme() != "https" {
+        return Err("base_url must use https".to_string());
+    }
+    if parsed.host_str().is_none() {
+        return Err("base_url must include a host".to_string());
+    }
+    if !policy.allow_credentials && (!parsed.username().is_empty() || parsed.password().is_some()) {
+        return Err("base_url must not include credentials".to_string());
+    }
+    if !policy.allow_query && parsed.query().is_some() {
+        return Err("base_url must not include query".to_string());
+    }
+    if !policy.allow_fragment && parsed.fragment().is_some() {
+        return Err("base_url must not include fragment".to_string());
+    }
+    if !policy.allow_path && !matches!(parsed.path(), "" | "/") {
+        return Err("base_url must not include a path".to_string());
+    }
+    if let Some(host) = parsed.host() {
+        match host {
+            url::Host::Domain(domain) => {
+                let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+                if !policy.allow_localhost
+                    && (matches!(domain.as_str(), "localhost" | "localhost.localdomain")
+                        || domain.ends_with(".localhost"))
+                {
+                    return Err("base_url host must not be localhost".to_string());
+                }
+            }
+            url::Host::Ipv4(ip) => {
+                validate_ipv4_runner_host(ip, policy)?;
+            }
+            url::Host::Ipv6(ip) => {
+                validate_ipv6_runner_host(ip, policy)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_ipv4_runner_host(ip: Ipv4Addr, policy: &RunnerUrlPolicyConfig) -> Result<(), String> {
+    if !policy.allow_localhost && ip.is_loopback() {
+        return Err("base_url host must not be localhost".to_string());
+    }
+    if !policy.allow_private_ips && (ip.is_private() || ip.is_unspecified() || ip.octets()[0] == 0)
+    {
+        return Err("base_url host must not be private or unspecified".to_string());
+    }
+    if !policy.allow_link_local_ips && ip.is_link_local() {
+        return Err("base_url host must not be link-local".to_string());
+    }
+    if !policy.allow_documentation_ips && ip.is_documentation() {
+        return Err("base_url host must not be documentation-only".to_string());
+    }
+    if !policy.allow_multicast_ips && (ip.octets()[0] >= 224 || ip.is_broadcast()) {
+        return Err("base_url host must not be multicast or broadcast".to_string());
+    }
+    Ok(())
+}
+
+fn validate_ipv6_runner_host(ip: Ipv6Addr, policy: &RunnerUrlPolicyConfig) -> Result<(), String> {
+    if !policy.allow_localhost && ip.is_loopback() {
+        return Err("base_url host must not be localhost".to_string());
+    }
+    if !policy.allow_private_ips && (ip.is_unique_local() || ip.is_unspecified()) {
+        return Err("base_url host must not be private or unspecified".to_string());
+    }
+    if !policy.allow_link_local_ips && ip.is_unicast_link_local() {
+        return Err("base_url host must not be link-local".to_string());
+    }
+    if !policy.allow_documentation_ips
+        && matches!(ip.segments()[0], 0x2001 if ip.segments()[1] == 0x0db8)
+    {
+        return Err("base_url host must not be documentation-only".to_string());
+    }
+    if !policy.allow_multicast_ips && ip.is_multicast() {
+        return Err("base_url host must not be multicast or broadcast".to_string());
+    }
+    Ok(())
 }
 fn optional_trimmed_value(value: Option<&str>) -> Option<String> {
     value
@@ -1969,7 +2089,8 @@ fn verify_csrf(state: &Arc<AppState>, user: &User, token: &str) -> Result<(), Re
     }
 }
 fn internal_error(error: impl std::fmt::Display) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response()
+    error!(error = %error, "request failed with internal error");
+    (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
 }
 fn internal_error_text(error: impl std::fmt::Display) -> Response {
     internal_error(error)
@@ -1997,6 +2118,14 @@ fn api_bad_request(error: impl std::fmt::Display) -> Response {
 }
 fn api_forbidden(error: impl std::fmt::Display) -> Response {
     api_error(StatusCode::FORBIDDEN, "forbidden", error)
+}
+fn api_internal_error(error: impl std::fmt::Display) -> Response {
+    error!(error = %error, "api request failed with internal error");
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "internal server error",
+    )
 }
 fn forbidden(error: impl std::fmt::Display) -> Response {
     (StatusCode::FORBIDDEN, error.to_string()).into_response()

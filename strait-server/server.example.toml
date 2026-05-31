@@ -22,3 +22,25 @@ max_infra_retries = 2
 
 [runners]
 healthcheck_interval_seconds = 30
+connect_timeout_seconds = 5
+request_timeout_seconds = 120
+
+[runner_url_policy]
+require_https = false
+allow_credentials = true
+allow_query = true
+allow_fragment = true
+allow_path = true
+allow_localhost = true
+allow_private_ips = true
+allow_link_local_ips = true
+allow_documentation_ips = true
+allow_multicast_ips = true
+
+[limits]
+request_body_bytes = 1048576
+runner_json_bytes = 4194304
+runner_logs_bytes = 8388608
+runner_artifact_bytes = 268435456
+runner_error_bytes = 16384
+server_artifact_bytes = 268435456

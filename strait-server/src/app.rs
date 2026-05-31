@@ -43,12 +43,14 @@ pub(crate) fn build_state(
     let db = Database::open(&config.database.path)?;
     db.cleanup_expired_sessions()?;
     let runner_signer = RunnerSigner::load_or_generate(&config.runner_auth)?;
+    let limits = config.limits.clone();
+    let runners = config.runners.clone();
 
     Ok(Arc::new(AppState {
-        artifacts: ArtifactStore::new(&config.data_dir)?,
+        artifacts: ArtifactStore::new(&config.data_dir, config.limits.server_artifact_bytes)?,
         config,
         db,
-        runner_client: RunnerClient::new(runner_signer.clone()),
+        runner_client: RunnerClient::new(runner_signer.clone(), limits, runners),
         runner_signer,
         config_path: Arc::new(config_path),
         server_bin: Arc::new(server_bin),

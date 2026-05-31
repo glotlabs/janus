@@ -414,6 +414,28 @@ max_infra_retries = 2
 
 [runners]
 healthcheck_interval_seconds = 60
+connect_timeout_seconds = 5
+request_timeout_seconds = 120
+
+[runner_url_policy]
+require_https = true
+allow_credentials = false
+allow_query = false
+allow_fragment = false
+allow_path = false
+allow_localhost = false
+allow_private_ips = false
+allow_link_local_ips = false
+allow_documentation_ips = false
+allow_multicast_ips = false
+
+[limits]
+request_body_bytes = 1048576
+runner_json_bytes = 4194304
+runner_logs_bytes = 8388608
+runner_artifact_bytes = 268435456
+runner_error_bytes = 16384
+server_artifact_bytes = 268435456
 "#,
                 temp.join("data").display(),
                 temp.join("repos").display(),
@@ -453,6 +475,28 @@ max_infra_retries = 2
 
 [runners]
 healthcheck_interval_seconds = 60
+connect_timeout_seconds = 5
+request_timeout_seconds = 120
+
+[runner_url_policy]
+require_https = true
+allow_credentials = false
+allow_query = false
+allow_fragment = false
+allow_path = false
+allow_localhost = false
+allow_private_ips = false
+allow_link_local_ips = false
+allow_documentation_ips = false
+allow_multicast_ips = false
+
+[limits]
+request_body_bytes = 1048576
+runner_json_bytes = 4194304
+runner_logs_bytes = 8388608
+runner_artifact_bytes = 268435456
+runner_error_bytes = 16384
+server_artifact_bytes = 268435456
 "#,
                 temp.join("data").display(),
                 temp.join("repos").display(),

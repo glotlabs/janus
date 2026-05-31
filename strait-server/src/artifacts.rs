@@ -11,13 +11,20 @@ use crate::models::ServerArtifact;
 #[derive(Debug, Clone)]
 pub struct ArtifactStore {
     root: PathBuf,
+    max_artifact_bytes: usize,
 }
 
 impl ArtifactStore {
-    pub fn new(data_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        data_dir: &str,
+        max_artifact_bytes: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let root = PathBuf::from(data_dir).join("server-artifacts");
         fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            max_artifact_bytes,
+        })
     }
 
     pub fn store_bytes(
@@ -27,6 +34,13 @@ impl ArtifactStore {
         artifact_name: &str,
         bytes: &[u8],
     ) -> Result<PendingArtifact, Box<dyn std::error::Error>> {
+        if bytes.len() > self.max_artifact_bytes {
+            return Err(format!(
+                "artifact exceeds maximum size of {} bytes",
+                self.max_artifact_bytes
+            )
+            .into());
+        }
         let artifact_id = format!("srvart_{}", Uuid::now_v7().simple());
         let storage_path = self.root.join(format!("{artifact_id}.bin"));
         fs::write(&storage_path, bytes)?;

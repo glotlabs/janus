@@ -16,6 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use reqwest::Client;
+use rusqlite::params;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use strait_lib::{RunnerCapabilitiesResponse, RunnerRouteTemplate};
@@ -29,6 +30,7 @@ async fn git_push_triggers_pipeline_end_to_end() {
     let server_port = free_port();
     let config_path = write_config(&temp, server_port, &runner.base_url);
     bootstrap_admin(&config_path);
+    let runner_id = seed_mock_runner(&temp, &runner.base_url);
     let server = ServerProcess::spawn(&config_path);
 
     wait_for_http(&format!("http://127.0.0.1:{server_port}/health")).await;
@@ -66,22 +68,6 @@ async fn git_push_triggers_pipeline_end_to_end() {
         .await
         .expect("session json");
     let csrf = session["csrf_token"].as_str().expect("csrf");
-
-    let runner = client
-        .post(format!("http://127.0.0.1:{server_port}/api/runners"))
-        .header("cookie", &session_cookie)
-        .json(&json!({
-            "csrf_token": csrf,
-            "name": "mock-runner",
-            "base_url": runner.base_url
-        }))
-        .send()
-        .await
-        .expect("create runner")
-        .json::<Value>()
-        .await
-        .expect("runner json");
-    let runner_id = runner["id"].as_str().expect("runner id");
 
     let repo = client
         .post(format!("http://127.0.0.1:{server_port}/api/repos"))
@@ -221,6 +207,28 @@ max_infra_retries = 2
 
 [runners]
 healthcheck_interval_seconds = 3600
+connect_timeout_seconds = 5
+request_timeout_seconds = 120
+
+[runner_url_policy]
+require_https = true
+allow_credentials = false
+allow_query = false
+allow_fragment = false
+allow_path = false
+allow_localhost = false
+allow_private_ips = false
+allow_link_local_ips = false
+allow_documentation_ips = false
+allow_multicast_ips = false
+
+[limits]
+request_body_bytes = 1048576
+runner_json_bytes = 4194304
+runner_logs_bytes = 8388608
+runner_artifact_bytes = 268435456
+runner_error_bytes = 16384
+server_artifact_bytes = 268435456
 "#,
             temp.join("data").display(),
             temp.join("repos").display(),
@@ -312,6 +320,34 @@ fn bootstrap_admin(config_path: &Path) {
         .expect("write bootstrap password");
     let status = child.wait().expect("bootstrap status");
     assert!(status.success());
+}
+
+fn seed_mock_runner(temp: &Path, base_url: &str) -> String {
+    let db_path = temp.join("data/server.sqlite3");
+    let conn = rusqlite::Connection::open(db_path).expect("open server db");
+    let runner_id = "test-runner".to_string();
+    let runner_job_id = "test-runner-job-build-app";
+    conn.execute(
+        "INSERT INTO runners (id, name, base_url, enabled, last_health_state, created_at)
+         VALUES (?1, 'mock-runner', ?2, 1, 'healthy', ?3)",
+        params![runner_id, base_url, "2026-01-01T00:00:00Z"],
+    )
+    .expect("insert runner");
+    conn.execute(
+        "INSERT INTO runner_jobs (id, runner_id, job_name, concurrency, timeout_seconds, last_refreshed_at)
+         VALUES (?1, ?2, 'build-app', 'parallel', 60, ?3)",
+        params![runner_job_id, runner_id, "2026-01-01T00:00:00Z"],
+    )
+    .expect("insert runner job");
+    for input in ["commit", "branch"] {
+        conn.execute(
+            "INSERT INTO runner_job_inputs (id, runner_job_id, input_name, input_type, required)
+             VALUES (?1, ?2, ?3, 'string', 1)",
+            params![format!("test-input-{input}"), runner_job_id, input],
+        )
+        .expect("insert runner input");
+    }
+    runner_id
 }
 
 impl Drop for ServerProcess {

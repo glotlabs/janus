@@ -481,6 +481,148 @@ async fn api_create_runner_rejects_invalid_base_url() {
 }
 
 #[tokio::test]
+async fn api_create_runner_rejects_local_runner_url() {
+    let fixture = test_fixture().await;
+    let admin = admin_user(&fixture.state);
+    let token = csrf_token(&fixture.state, &admin);
+    let cookie = session_cookie_value(&fixture.state, &admin.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/api/runners")
+                .header("content-type", "application/json")
+                .header("cookie", cookie)
+                .body(Body::from(
+                    json!({
+                        "csrf_token": token,
+                        "name": "runner",
+                        "base_url": "https://127.0.0.1"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: JsonValue = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["error"]["code"], json!("bad_request"));
+    assert_eq!(
+        payload["error"]["message"],
+        json!("base_url host must not be localhost")
+    );
+}
+
+#[tokio::test]
+async fn api_create_runner_can_allow_local_http_by_policy() {
+    let fixture = test_fixture_with_runner_url_policy(
+        r#"require_https = false
+allow_credentials = false
+allow_query = false
+allow_fragment = false
+allow_path = false
+allow_localhost = true
+allow_private_ips = true
+allow_link_local_ips = false
+allow_documentation_ips = false
+allow_multicast_ips = false"#,
+    )
+    .await;
+    let admin = admin_user(&fixture.state);
+    let token = csrf_token(&fixture.state, &admin);
+    let cookie = session_cookie_value(&fixture.state, &admin.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/api/runners")
+                .header("content-type", "application/json")
+                .header("cookie", cookie)
+                .body(Body::from(
+                    json!({
+                        "csrf_token": token,
+                        "name": "runner",
+                        "base_url": "http://127.0.0.1:9"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn responses_include_security_headers() {
+    let fixture = test_fixture().await;
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/health")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(response.headers().get("x-frame-options").unwrap(), "DENY");
+    assert!(
+        response
+            .headers()
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("frame-ancestors 'none'")
+    );
+}
+
+#[tokio::test]
+async fn api_internal_errors_do_not_expose_details() {
+    let fixture = test_fixture().await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "duplicate-api-repo");
+    let token = csrf_token(&fixture.state, &fixture.user);
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/api/repos")
+                .header("content-type", "application/json")
+                .header("cookie", cookie)
+                .body(Body::from(
+                    json!({
+                        "csrf_token": token,
+                        "name": repo.name,
+                        "default_branch": "main"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: JsonValue = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["error"]["code"], json!("internal_error"));
+    assert_eq!(payload["error"]["message"], json!("internal server error"));
+    assert!(!String::from_utf8_lossy(&body).contains("UNIQUE"));
+}
+
+#[tokio::test]
 async fn api_create_workflow_rejects_empty_branch_entry() {
     let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
     let repo = create_repo_direct(&fixture.state, &fixture.user, "api-empty-workflow-branch");
@@ -2100,8 +2242,19 @@ async fn test_fixture() -> TestFixture {
 }
 
 async fn test_fixture_with_runner(base_url: &str) -> TestFixture {
+    test_fixture_with_runner_url_policy_and_runner(base_url, "").await
+}
+
+async fn test_fixture_with_runner_url_policy(policy_overrides: &str) -> TestFixture {
+    test_fixture_with_runner_url_policy_and_runner("http://127.0.0.1:9", policy_overrides).await
+}
+
+async fn test_fixture_with_runner_url_policy_and_runner(
+    base_url: &str,
+    policy_overrides: &str,
+) -> TestFixture {
     let dir = temp_dir("fixture");
-    let config_path = write_test_config(&dir);
+    let config_path = write_test_config_with_runner_url_policy(&dir, policy_overrides);
     let state = build_state(config_path, PathBuf::from("/bin/strait-server")).expect("state");
     let hash = hash_password("password123").expect("hash");
     let username = format!("alice-{}", Uuid::now_v7());
@@ -2269,9 +2422,28 @@ fn admin_user(state: &Arc<crate::app::AppState>) -> User {
 }
 
 fn write_test_config(dir: &Path) -> PathBuf {
+    write_test_config_with_runner_url_policy(dir, "")
+}
+
+fn write_test_config_with_runner_url_policy(dir: &Path, policy_overrides: &str) -> PathBuf {
     let config_path = dir.join("server.toml");
     fs::create_dir_all(dir.join("data")).expect("data dir");
     fs::create_dir_all(dir.join("repos")).expect("repos dir");
+    let runner_url_policy = if policy_overrides.trim().is_empty() {
+        r#"require_https = true
+allow_credentials = false
+allow_query = false
+allow_fragment = false
+allow_path = false
+allow_localhost = false
+allow_private_ips = false
+allow_link_local_ips = false
+allow_documentation_ips = false
+allow_multicast_ips = false"#
+            .to_string()
+    } else {
+        policy_overrides.to_string()
+    };
     fs::write(
         &config_path,
         format!(
@@ -2304,12 +2476,26 @@ max_infra_retries = 2
 
 [runners]
 healthcheck_interval_seconds = 60
+connect_timeout_seconds = 5
+request_timeout_seconds = 120
+
+[runner_url_policy]
+{}
+
+[limits]
+request_body_bytes = 1048576
+runner_json_bytes = 4194304
+runner_logs_bytes = 8388608
+runner_artifact_bytes = 268435456
+runner_error_bytes = 16384
+server_artifact_bytes = 268435456
 "#,
             dir.join("data").display(),
             dir.join("repos").display(),
             dir.join("data/server.sqlite3").display(),
             dir.join("data").display(),
             dir.join("data").display(),
+            runner_url_policy,
         ),
     )
     .expect("config");
