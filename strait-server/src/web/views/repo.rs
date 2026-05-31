@@ -1,0 +1,109 @@
+use maud::{Markup, html};
+
+use crate::models::{Repo, User};
+
+use super::components::{badge, csrf_input, layout, page_intro};
+
+pub(crate) struct RepoCard {
+    pub repo: Repo,
+    pub clone_url: String,
+}
+
+pub(crate) fn repos_page(
+    current_user: &User,
+    users: Vec<User>,
+    repos: Vec<RepoCard>,
+    csrf: &str,
+) -> Markup {
+    layout(
+        "Repos",
+        html! {
+            (page_intro(
+                "Repositories",
+                "Register repos, copy clone URLs, and manually trigger pipeline runs.",
+            ))
+            section class="card" {
+                div class="section-head" {
+                    div {
+                        div class="eyebrow" { "Source Control" }
+                        h2 { "Create repository" }
+                    }
+                }
+                form method="post" action="/repos" class="stack-lg" {
+                    (csrf_input(csrf))
+                    div class="form-grid form-grid-3" {
+                        label { span { "Name" } input name="name"; }
+                        @if current_user.role == "admin" {
+                            label {
+                                span { "Owner" }
+                                select name="owner_id" {
+                                    @for candidate in &users {
+                                        option value=(candidate.id) selected[candidate.id == current_user.id] {
+                                            (candidate.username)
+                                        }
+                                    }
+                                }
+                            }
+                        } @else {
+                            input type="hidden" name="owner_id" value=(current_user.id);
+                            label {
+                                span { "Owner" }
+                                input value=(current_user.username) disabled;
+                            }
+                        }
+                        label {
+                            span { "Default branch" }
+                            input name="default_branch" value="main";
+                        }
+                    }
+                    div class="actions" {
+                        button type="submit" { "Create repository" }
+                    }
+                }
+            }
+            section class="card" {
+                div class="section-head" {
+                    div {
+                        div class="eyebrow" { "Inventory" }
+                        h2 { "Available repositories" }
+                    }
+                }
+                div class="card-grid" {
+                    @for card in &repos {
+                        article class="entity-card" {
+                            div class="entity-head" {
+                                div {
+                                    h3 { (card.repo.owner_username) "/" (card.repo.name) }
+                                    p class="muted" {
+                                        "Default branch: " code { (card.repo.default_branch) }
+                                    }
+                                }
+                                (badge("active", "success"))
+                            }
+                            div class="meta-pair" {
+                                span { "Clone URL" }
+                                code { (card.clone_url) }
+                            }
+                            form method="post" action=(format!("/repos/{}/trigger", card.repo.id)) class="stack-md inset-panel" {
+                                (csrf_input(csrf))
+                                div class="inline-fields" {
+                                    label {
+                                        span { "Branch ref" }
+                                        input name="branch" value=(format!("refs/heads/{}", card.repo.default_branch));
+                                    }
+                                    label {
+                                        span { "Commit" }
+                                        input name="commit" value="HEAD";
+                                    }
+                                }
+                                div class="actions" {
+                                    button type="submit" { "Trigger pipeline" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    )
+}

@@ -1,4 +1,5 @@
 mod routes;
+mod views;
 
 #[cfg(test)]
 mod tests;
