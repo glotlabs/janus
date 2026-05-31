@@ -234,7 +234,7 @@ async fn workflows_page_marks_stale_workflow_schemas() {
         .replace_runner_jobs(
             &fixture.runner_id,
             &[runner_job_definition(
-                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true},"published":{"type":"boolean","required":false}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
+                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":false},"source":{"type":"artifact","required":true}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
             )],
         )
         .expect("runner jobs");
@@ -258,6 +258,7 @@ async fn workflows_page_marks_stale_workflow_schemas() {
         .expect("body");
     let html = String::from_utf8(body.to_vec()).expect("html");
     assert!(html.contains("stale"));
+    assert!(html.contains("input branch changed requiredness from required to optional"));
 }
 
 #[tokio::test]
@@ -338,7 +339,7 @@ async fn api_workflow_includes_schema_status() {
         .replace_runner_jobs(
             &fixture.runner_id,
             &[runner_job_definition(
-                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true}},"outputs":{}}"#,
+                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"integer","required":true},"source":{"type":"artifact","required":true}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
             )],
         )
         .expect("runner jobs");
@@ -369,8 +370,65 @@ async fn api_workflow_includes_schema_status() {
         .await
         .expect("body");
     let payload: JsonValue = serde_json::from_slice(&body).expect("json");
-    assert_eq!(payload["schema_status"], json!("stale"));
+    assert_eq!(payload["schema_status"], json!("incompatible"));
+    assert_eq!(
+        payload["schema_diff"][0]["kind"],
+        json!("input_type_changed")
+    );
+    assert_eq!(
+        payload["schema_diff"][0]["message"],
+        json!("job-1 input branch changed type from string to integer")
+    );
+    assert_eq!(payload["schema_diff"][0]["incompatible"], json!(true));
     assert_eq!(payload["id"], json!(workflow.id));
+}
+
+#[tokio::test]
+async fn api_workflow_reports_additive_schema_diff_without_stale_status() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "additive-workflow-api");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .replace_runner_jobs(
+            &fixture.runner_id,
+            &[runner_job_definition(
+                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true},"published":{"type":"boolean","required":false}},"outputs":{"app":{"type":"artifact","required":true},"image_tag":{"type":"string","required":false}}}"#,
+            )],
+        )
+        .expect("runner jobs");
+
+    let workflow = fixture
+        .state
+        .db
+        .workflows_for_repo(&repo.id)
+        .expect("workflows")
+        .into_iter()
+        .find(|workflow| workflow.name == "wf")
+        .expect("workflow");
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/workflows/{}", workflow.id))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: JsonValue = serde_json::from_slice(&body).expect("json");
+    assert_eq!(payload["schema_status"], json!("current"));
+    assert_eq!(payload["schema_diff"][0]["kind"], json!("input_added"));
+    assert_eq!(payload["schema_diff"][0]["incompatible"], json!(false));
+    assert_eq!(payload["schema_diff"][1]["kind"], json!("output_added"));
 }
 
 #[tokio::test]
@@ -1269,7 +1327,7 @@ async fn enqueue_workflow_run_allows_stale_schema() {
         .replace_runner_jobs(
             &fixture.runner_id,
             &[runner_job_definition(
-                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":true},"source":{"type":"artifact","required":true},"published":{"type":"boolean","required":false}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
+                r#"{"name":"build-app","timeout_seconds":60,"inputs":{"commit":{"type":"string","required":true},"branch":{"type":"string","required":false},"source":{"type":"artifact","required":true}},"outputs":{"app":{"type":"artifact","required":true}}}"#,
             )],
         )
         .expect("runner jobs");

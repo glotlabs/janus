@@ -37,6 +37,7 @@ use crate::{
         parse_job_output_binding,
     },
     scheduler,
+    schema_diff::{WorkflowSchemaDiff, workflow_schema_report},
 };
 
 use super::views::{
@@ -300,37 +301,12 @@ struct WorkflowForm {
     jobs_json: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum WorkflowSchemaStatus {
-    Current,
-    Stale,
-    Incompatible,
-}
-
-impl WorkflowSchemaStatus {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Current => "current",
-            Self::Stale => "stale",
-            Self::Incompatible => "incompatible",
-        }
-    }
-
-    pub(super) fn tone(self) -> &'static str {
-        match self {
-            Self::Current => "success",
-            Self::Stale => "warning",
-            Self::Incompatible => "danger",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 struct WorkflowApiView {
     #[serde(flatten)]
     workflow: Workflow,
-    schema_status: WorkflowSchemaStatus,
+    schema_status: crate::schema_diff::WorkflowSchemaStatus,
+    schema_diff: Vec<WorkflowSchemaDiff>,
 }
 #[derive(Deserialize)]
 struct ManualTriggerForm {
@@ -567,11 +543,11 @@ async fn workflows_page(
                 .iter()
                 .find(|repo| repo.id == workflow.repo_id)?
                 .clone();
-            let schema_status = workflow_schema_status(&state, &workflow).map_err(internal_error);
-            Some((workflow, repo, schema_status))
+            let schema_report = workflow_schema_report(&state, &workflow).map_err(internal_error);
+            Some((workflow, repo, schema_report))
         })
-        .map(|(workflow, repo, schema_status)| {
-            let schema_status = schema_status?;
+        .map(|(workflow, repo, schema_report)| {
+            let schema_report = schema_report?;
             let trigger: WorkflowTrigger =
                 serde_json::from_str(&workflow.trigger_json).unwrap_or(WorkflowTrigger {
                     kind: "push".to_string(),
@@ -582,7 +558,7 @@ async fn workflows_page(
             Ok(workflow_view::WorkflowCard {
                 workflow,
                 repo,
-                schema_status,
+                schema_report,
                 trigger,
                 job_count: definition.jobs.len(),
             })
@@ -605,12 +581,12 @@ async fn workflow_detail_page(
         .ok_or_else(|| not_found("repo"))?;
     let runner_catalog = workflow_runner_catalog(&state)?;
     let repo_field = workflow_view::fixed_repo_field(&workflow, &repo);
-    let schema_status = workflow_schema_status(&state, &workflow).map_err(internal_error)?;
+    let schema_report = workflow_schema_report(&state, &workflow).map_err(internal_error)?;
     let form = workflow_form_view(Some(&workflow), &runner_catalog, repo_field);
     Ok(workflow_view::workflow_detail_page(
         &workflow,
         &repo,
-        schema_status,
+        schema_report,
         form,
         &csrf,
     ))
@@ -951,8 +927,11 @@ async fn api_list_workflows(
         .into_iter()
         .filter(|workflow| repo_ids.iter().any(|id| id == &workflow.repo_id))
         .map(|workflow| {
+            let schema_report =
+                workflow_schema_report(&state, &workflow).map_err(internal_error)?;
             Ok(WorkflowApiView {
-                schema_status: workflow_schema_status(&state, &workflow).map_err(internal_error)?,
+                schema_status: schema_report.status,
+                schema_diff: schema_report.diff,
                 workflow,
             })
         })
@@ -985,8 +964,10 @@ async fn api_create_workflow(
         .into_iter()
         .find(|workflow| workflow.name == request.name)
         .ok_or_else(|| internal_error_text("workflow missing after create"))?;
+    let schema_report = workflow_schema_report(&state, &workflow).map_err(internal_error)?;
     Ok(Json(WorkflowApiView {
-        schema_status: workflow_schema_status(&state, &workflow).map_err(internal_error)?,
+        schema_status: schema_report.status,
+        schema_diff: schema_report.diff,
         workflow,
     }))
 }
@@ -996,8 +977,10 @@ async fn api_get_workflow(
     AxumPath(workflow_id): AxumPath<String>,
 ) -> Result<Json<WorkflowApiView>, Response> {
     let workflow = authorized_workflow(&state, &user, &workflow_id)?;
+    let schema_report = workflow_schema_report(&state, &workflow).map_err(internal_error)?;
     Ok(Json(WorkflowApiView {
-        schema_status: workflow_schema_status(&state, &workflow).map_err(internal_error)?,
+        schema_status: schema_report.status,
+        schema_diff: schema_report.diff,
         workflow,
     }))
 }
@@ -1029,8 +1012,10 @@ async fn api_update_workflow(
         .get_workflow(&workflow.id)
         .map_err(internal_error)?
         .ok_or_else(|| not_found("workflow"))?;
+    let schema_report = workflow_schema_report(&state, &workflow).map_err(internal_error)?;
     Ok(Json(WorkflowApiView {
-        schema_status: workflow_schema_status(&state, &workflow).map_err(internal_error)?,
+        schema_status: schema_report.status,
+        schema_diff: schema_report.diff,
         workflow,
     }))
 }
@@ -1380,37 +1365,6 @@ fn workflow_runner_catalog(
         });
     }
     Ok(catalog)
-}
-
-fn workflow_schema_status(
-    state: &Arc<AppState>,
-    workflow: &Workflow,
-) -> Result<WorkflowSchemaStatus, Box<dyn std::error::Error>> {
-    let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)?;
-    let snapshot = state.db.workflow_job_schemas(&workflow.version_id)?;
-    if snapshot.len() != definition.jobs.len() {
-        return Ok(WorkflowSchemaStatus::Incompatible);
-    }
-
-    let mut status = WorkflowSchemaStatus::Current;
-    for (job_index, job) in definition.jobs.iter().enumerate() {
-        let Some(saved_schema) = snapshot.get(job_index) else {
-            return Ok(WorkflowSchemaStatus::Incompatible);
-        };
-        let current_schema = state
-            .db
-            .list_runner_jobs(&job.runner_id)?
-            .into_iter()
-            .find(|schema| schema.name == job.runner_job_name);
-        let Some(current_schema) = current_schema else {
-            return Ok(WorkflowSchemaStatus::Incompatible);
-        };
-        if &current_schema != saved_schema {
-            status = WorkflowSchemaStatus::Stale;
-        }
-    }
-
-    Ok(status)
 }
 
 fn workflow_form_view(

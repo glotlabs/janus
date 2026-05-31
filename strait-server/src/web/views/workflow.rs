@@ -3,12 +3,12 @@ use maud::{Markup, PreEscaped, html};
 use crate::models::{Repo, Workflow, WorkflowTrigger};
 
 use super::components::{badge, csrf_input, layout, page_intro, x_mark};
-use crate::web::routes::WorkflowSchemaStatus;
+use crate::schema_diff::{WorkflowSchemaDiff, WorkflowSchemaReport};
 
 pub(crate) struct WorkflowCard {
     pub workflow: Workflow,
     pub repo: Repo,
-    pub schema_status: WorkflowSchemaStatus,
+    pub schema_report: WorkflowSchemaReport,
     pub trigger: WorkflowTrigger,
     pub job_count: usize,
 }
@@ -65,7 +65,7 @@ pub(crate) fn workflows_page(
                                     }
                                 }
                                 div class="badge-row" {
-                                    (badge(card.schema_status.as_str(), card.schema_status.tone()))
+                                    (badge(card.schema_report.status.as_str(), card.schema_report.status.tone()))
                                     (badge(&format!("v{}", card.workflow.version), "neutral"))
                                 }
                             }
@@ -82,6 +82,7 @@ pub(crate) fn workflows_page(
                                     manual_default_branch(&card.trigger, &card.repo),
                                 ))
                             }
+                            (schema_diff_summary(&card.schema_report.diff))
                         }
                     }
                 }
@@ -93,7 +94,7 @@ pub(crate) fn workflows_page(
 pub(crate) fn workflow_detail_page(
     workflow: &Workflow,
     repo: &Repo,
-    schema_status: WorkflowSchemaStatus,
+    schema_report: WorkflowSchemaReport,
     form: WorkflowFormView,
     csrf: &str,
 ) -> Markup {
@@ -118,9 +119,10 @@ pub(crate) fn workflow_detail_page(
                         p class="muted" { "Repository: " (repo.owner_username) "/" (repo.name) }
                     }
                     div class="badge-row" {
-                        (badge(schema_status.as_str(), schema_status.tone()))
+                        (badge(schema_report.status.as_str(), schema_report.status.tone()))
                     }
                 }
+                (schema_diff_details(&schema_report.diff))
                 form method="post" action=(format!("/workflows/{}/update", workflow.id)) class="stack-lg" {
                     (csrf_input(csrf))
                     (workflow_form_fields(form))
@@ -143,6 +145,46 @@ pub(crate) fn workflow_detail_page(
             }
         },
     )
+}
+
+fn schema_diff_summary(diff: &[WorkflowSchemaDiff]) -> Markup {
+    html! {
+        @if !diff.is_empty() {
+            div class="schema-diff-summary" {
+                @for item in diff.iter().take(3) {
+                    p class="muted" { (item.message) }
+                }
+                @if diff.len() > 3 {
+                    p class="muted" { (diff.len() - 3) " more schema changes" }
+                }
+            }
+        }
+    }
+}
+
+fn schema_diff_details(diff: &[WorkflowSchemaDiff]) -> Markup {
+    html! {
+        @if !diff.is_empty() {
+            div class="callout" {
+                div class="section-head compact" {
+                    div {
+                        div class="eyebrow" { "Schema diff" }
+                        h3 { "Runner schema changes" }
+                    }
+                }
+                ul class="schema-diff-list" {
+                    @for item in diff {
+                        li {
+                            strong {
+                                @if item.incompatible { "Blocking" } @else { "Notice" }
+                            }
+                            span { (item.message) }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn repo_selector(repos: &[Repo]) -> Markup {

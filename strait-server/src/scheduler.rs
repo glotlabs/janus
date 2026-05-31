@@ -17,15 +17,9 @@ use crate::{
         WorkflowTrigger,
     },
     runner::{JobLogsResponse, JobOutputMetadata},
+    schema_diff::{WorkflowSchemaStatus, workflow_schema_report},
     state_machine::{self, JobStatus, PipelineStatus},
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkflowSchemaStatus {
-    Current,
-    Stale,
-    Incompatible,
-}
 
 pub fn spawn(state: Arc<AppState>) {
     let scheduler_state = Arc::clone(&state);
@@ -80,7 +74,7 @@ pub(crate) fn enqueue_workflow_run(
     trigger_ref: Option<&str>,
     commit_sha: Option<&str>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    match workflow_schema_status(Arc::clone(&state), workflow)? {
+    match workflow_schema_report(&state, workflow)?.status {
         WorkflowSchemaStatus::Current => {}
         WorkflowSchemaStatus::Stale => {
             warn!(
@@ -746,37 +740,6 @@ async fn ensure_source_artifact(
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(upload.artifact_id)
-}
-
-fn workflow_schema_status(
-    state: Arc<AppState>,
-    workflow: &Workflow,
-) -> Result<WorkflowSchemaStatus, Box<dyn std::error::Error>> {
-    let definition: WorkflowDefinition = serde_json::from_str(&workflow.definition_json)?;
-    let snapshot = state.db.workflow_job_schemas(&workflow.version_id)?;
-    if snapshot.len() != definition.jobs.len() {
-        return Ok(WorkflowSchemaStatus::Incompatible);
-    }
-
-    let mut status = WorkflowSchemaStatus::Current;
-    for (job_index, job) in definition.jobs.iter().enumerate() {
-        let Some(saved_schema) = snapshot.get(job_index) else {
-            return Ok(WorkflowSchemaStatus::Incompatible);
-        };
-        let current_schema = state
-            .db
-            .list_runner_jobs(&job.runner_id)?
-            .into_iter()
-            .find(|schema| schema.name == job.runner_job_name);
-        let Some(current_schema) = current_schema else {
-            return Ok(WorkflowSchemaStatus::Incompatible);
-        };
-        if &current_schema != saved_schema {
-            status = WorkflowSchemaStatus::Stale;
-        }
-    }
-
-    Ok(status)
 }
 
 async fn ensure_runner_has_artifact(

@@ -7,6 +7,7 @@ mod git;
 mod models;
 mod runner;
 mod scheduler;
+mod schema_diff;
 mod state_machine;
 mod web;
 
