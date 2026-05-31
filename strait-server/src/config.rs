@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{fmt, fs, path::Path};
 
 use serde::Deserialize;
 
@@ -16,10 +16,36 @@ pub struct Config {
 
 impl Config {
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
+        let path = path.as_ref();
         let raw = fs::read_to_string(path)?;
-        Ok(toml::from_str(&raw)?)
+        toml::from_str(&raw).map_err(|source| {
+            if source.message().contains("missing field `runner_auth`") {
+                Box::<dyn std::error::Error>::from(MissingRunnerAuthConfig {
+                    path: path.display().to_string(),
+                })
+            } else {
+                Box::<dyn std::error::Error>::from(source)
+            }
+        })
     }
 }
+
+#[derive(Debug)]
+struct MissingRunnerAuthConfig {
+    path: String,
+}
+
+impl fmt::Display for MissingRunnerAuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "missing [runner_auth] in {}; run `admin runner-key init --config {}` first",
+            self.path, self.path
+        )
+    }
+}
+
+impl std::error::Error for MissingRunnerAuthConfig {}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {

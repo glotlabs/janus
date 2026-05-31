@@ -18,9 +18,13 @@ Commands:
 cargo run -p strait-server -- serve
 cargo run -p strait-server -- admin seed-user --username alice --password secret --role developer
 cargo run -p strait-server -- admin reconcile-hooks
+cargo run -p strait-server -- admin runner-key init --config server.toml
 cargo run -p strait-server -- admin runner-key show --config server.toml
+cargo run -p strait-server -- admin runner-key show --format toml --config server.toml
 cargo run -p strait-server -- admin runner-key rotate --config server.toml
 ```
+
+Initialize runner signing keys once before first `serve`; this generates `[runner_auth]`, creates the Ed25519 keypair, and writes the generated key ID into the server config.
 
 Runner signing key rotation generates a new key ID, writes a new Ed25519 keypair, updates `[runner_auth]` in the server config, and leaves existing public key files in place for rollout. Add the new public key to every runner as another `[[auth.servers]]` entry before restarting the server with the new key; remove the old runner entry after old in-flight requests have drained.
 

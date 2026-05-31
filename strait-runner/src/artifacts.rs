@@ -721,7 +721,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post(RunnerRoute::Artifacts.path())
-                    .header("authorization", "Bearer artifacts-write-token")
+                    .header("x-strait-key-id", "artifacts-write")
                     .header("content-type", "application/octet-stream")
                     .header(HEADER_SHA256, checksum.as_str())
                     .body(Body::from(payload.to_vec()))
@@ -745,7 +745,7 @@ mod tests {
                     }
                     .path(),
                 )
-                .header("authorization", "Bearer artifacts-read-token")
+                .header("x-strait-key-id", "artifacts-read")
                 .body(Body::empty())
                 .expect("request should build"),
             )
@@ -774,7 +774,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post("/artifacts")
-                    .header("authorization", "Bearer artifacts-write-token")
+                    .header("x-strait-key-id", "artifacts-write")
                     .header("content-type", "application/octet-stream")
                     .header("x-sha256", checksum.as_str())
                     .body(Body::from(payload.to_vec()))
@@ -800,7 +800,7 @@ mod tests {
         let download = app
             .oneshot(
                 Request::get(format!("/artifacts/{}", metadata.artifact_id))
-                    .header("authorization", "Bearer artifacts-read-token")
+                    .header("x-strait-key-id", "artifacts-read")
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -821,7 +821,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::post("/artifacts")
-                    .header("authorization", "Bearer artifacts-write-token")
+                    .header("x-strait-key-id", "artifacts-write")
                     .header("content-type", "application/octet-stream")
                     .header("x-sha256", "deadbeef")
                     .body(Body::from(b"artifact-body".to_vec()))
@@ -844,7 +844,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::post("/artifacts")
-                    .header("authorization", "Bearer artifacts-write-token")
+                    .header("x-strait-key-id", "artifacts-write")
                     .header("content-type", "application/octet-stream")
                     .header(
                         "x-sha256",
@@ -873,7 +873,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::post("/artifacts")
-                    .header("authorization", "Bearer artifacts-write-token")
+                    .header("x-strait-key-id", "artifacts-write")
                     .header("content-type", "application/octet-stream")
                     .header("x-sha256", checksum.as_str())
                     .body(Body::from(payload.to_vec()))
@@ -885,7 +885,7 @@ mod tests {
         let second = app
             .oneshot(
                 Request::post("/artifacts")
-                    .header("authorization", "Bearer artifacts-write-token")
+                    .header("x-strait-key-id", "artifacts-write")
                     .header("content-type", "application/octet-stream")
                     .header("x-sha256", checksum.as_str())
                     .body(Body::from(payload.to_vec()))
@@ -917,7 +917,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::get("/artifacts/not-an-artifact-id")
-                    .header("authorization", "Bearer artifacts-read-token")
+                    .header("x-strait-key-id", "artifacts-read")
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -1008,7 +1008,7 @@ mod tests {
                 listen: "127.0.0.1:0".to_string(),
             },
             auth: crate::config::AuthConfig {
-                mode: "bearer".to_string(),
+                mode: "signed".to_string(),
                 servers: Vec::new(),
             },
             artifacts: crate::config::ArtifactsConfig {
@@ -1029,9 +1029,9 @@ mod tests {
 
         AppState {
             config: std::sync::Arc::new(config.clone()),
-            auth: std::sync::Arc::new(AuthStore::test_with_bearer_tokens(&[
-                ("artifacts-write-token", "writer", &["artifacts:write"]),
-                ("artifacts-read-token", "reader", &["artifacts:read"]),
+            auth: std::sync::Arc::new(AuthStore::test_with_signed_servers(&[
+                ("artifacts-write", "writer", &["artifacts:write"]),
+                ("artifacts-read", "reader", &["artifacts:read"]),
             ])),
             manifests: std::sync::Arc::new(
                 ManifestStore::load_from_dir(&config.manifests_dir).expect("manifests should load"),
@@ -1066,7 +1066,7 @@ mod tests {
                 listen: "127.0.0.1:0".to_string(),
             },
             auth: crate::config::AuthConfig {
-                mode: "bearer".to_string(),
+                mode: "signed".to_string(),
                 servers: Vec::new(),
             },
             artifacts: crate::config::ArtifactsConfig {
@@ -1087,9 +1087,9 @@ mod tests {
 
         AppState {
             config: std::sync::Arc::new(config.clone()),
-            auth: std::sync::Arc::new(AuthStore::test_with_bearer_tokens(&[
-                ("artifacts-write-token", "writer", &["artifacts:write"]),
-                ("artifacts-read-token", "reader", &["artifacts:read"]),
+            auth: std::sync::Arc::new(AuthStore::test_with_signed_servers(&[
+                ("artifacts-write", "writer", &["artifacts:write"]),
+                ("artifacts-read", "reader", &["artifacts:read"]),
             ])),
             manifests: std::sync::Arc::new(
                 ManifestStore::load_from_dir(&config.manifests_dir).expect("manifests should load"),

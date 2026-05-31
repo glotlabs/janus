@@ -17,7 +17,7 @@ use std::env;
 use app::{
     Cli, Command, build_state, hook_post_receive, init_tracing, reconcile_hooks, seed_user, serve,
 };
-use runner_auth::{rotate_runner_key, show_runner_key};
+use runner_auth::{init_runner_key, rotate_runner_key, show_runner_key};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,7 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::from_env()?;
     match &cli.command {
-        Command::AdminRunnerKeyShow => return show_runner_key(&cli.config_path),
+        Command::AdminRunnerKeyInit => return init_runner_key(&cli.config_path),
+        Command::AdminRunnerKeyShow { format } => {
+            return show_runner_key(&cli.config_path, *format);
+        }
         Command::AdminRunnerKeyRotate => {
             return rotate_runner_key(&cli.config_path);
         }
@@ -43,6 +46,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             password,
             role,
         } => seed_user(state, &username, &password, &role),
-        Command::AdminRunnerKeyShow | Command::AdminRunnerKeyRotate => unreachable!(),
+        Command::AdminRunnerKeyInit
+        | Command::AdminRunnerKeyShow { .. }
+        | Command::AdminRunnerKeyRotate => {
+            unreachable!()
+        }
     }
 }

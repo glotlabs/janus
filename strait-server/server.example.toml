@@ -18,11 +18,6 @@ login_rate_limit_per_minute = 10
 username = "admin"
 password = "change-me"
 
-[runner_auth]
-key_id = "main-strait-2026-05"
-private_key_path = "/var/lib/strait-server/keys/runner-signing.key"
-public_key_path = "/var/lib/strait-server/keys/runner-signing.pub"
-
 [scheduler]
 poll_interval_ms = 2000
 cancel_stuck_timeout_seconds = 30

@@ -21,15 +21,39 @@ pub(crate) struct RunnerSigner {
     signing_key: SigningKey,
 }
 
-pub(crate) fn show_runner_key(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Clone, Copy)]
+pub(crate) enum RunnerKeyShowFormat {
+    Text,
+    Toml,
+}
+
+pub(crate) fn show_runner_key(
+    config_path: &Path,
+    format: RunnerKeyShowFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load_from_path(config_path)?;
     let signer = RunnerSigner::load_or_generate(&config.runner_auth)?;
+
+    if matches!(format, RunnerKeyShowFormat::Toml) {
+        print_runner_trust_toml(&signer);
+        return Ok(());
+    }
 
     println!("active runner signing key");
     println!("key_id = {}", signer.key_id());
     println!("public_key = {}", signer.public_key_base64());
     println!();
     println!("runner config snippet");
+    print_runner_trust_toml(&signer);
+
+    if let Some(public_key_path) = &config.runner_auth.public_key_path {
+        print_public_key_files(Path::new(public_key_path))?;
+    }
+
+    Ok(())
+}
+
+fn print_runner_trust_toml(signer: &RunnerSigner) {
     println!("[[auth.servers]]");
     println!("name = \"{}\"", signer.key_id());
     println!("key_id = \"{}\"", signer.key_id());
@@ -37,10 +61,48 @@ pub(crate) fn show_runner_key(config_path: &Path) -> Result<(), Box<dyn std::err
     println!(
         "permissions = [\"artifacts:write\", \"artifacts:read\", \"jobs:run\", \"jobs:read\", \"logs:read\"]"
     );
+}
 
-    if let Some(public_key_path) = &config.runner_auth.public_key_path {
-        print_public_key_files(Path::new(public_key_path))?;
+pub(crate) fn init_runner_key(config_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let raw = fs::read_to_string(config_path)?;
+    let mut document = raw.parse::<toml_edit::DocumentMut>()?;
+    if document.get("runner_auth").is_some() {
+        return Err("[runner_auth] already exists".into());
     }
+
+    let data_dir = document["data_dir"]
+        .as_str()
+        .ok_or("missing data_dir")?
+        .to_string();
+    let key_id = generate_key_id();
+    let keys_dir = Path::new(&data_dir).join("keys");
+    let private_key_path = keys_dir.join(format!("{key_id}.key"));
+    let public_key_path = keys_dir.join(format!("{key_id}.pub"));
+    let signing_key = generate_signing_key();
+
+    write_key_file(&private_key_path, &STANDARD.encode(signing_key.to_bytes()))?;
+    write_public_key(
+        public_key_path
+            .to_str()
+            .ok_or("public key path is not valid UTF-8")?,
+        &signing_key.verifying_key(),
+    )?;
+
+    let mut runner_auth = toml_edit::Table::new();
+    runner_auth["key_id"] = toml_edit::value(key_id.as_str());
+    runner_auth["private_key_path"] = toml_edit::value(private_key_path.display().to_string());
+    runner_auth["public_key_path"] = toml_edit::value(public_key_path.display().to_string());
+    document["runner_auth"] = toml_edit::Item::Table(runner_auth);
+    fs::write(config_path, document.to_string())?;
+
+    println!("initialized runner signing key");
+    println!("key_id = {key_id}");
+    println!("private_key_path = {}", private_key_path.display());
+    println!("public_key_path = {}", public_key_path.display());
+    println!(
+        "public_key = {}",
+        STANDARD.encode(signing_key.verifying_key().to_bytes())
+    );
 
     Ok(())
 }
@@ -283,6 +345,42 @@ mod tests {
         assert!(old_public_key_path.exists());
     }
 
+    #[test]
+    fn init_adds_generated_runner_auth_to_minimal_config() {
+        let temp = temp_dir("runner-key-init");
+        let config_path = temp.join("server.toml");
+        write_minimal_config(&config_path, &temp);
+
+        init_runner_key(&config_path).expect("init should succeed");
+
+        let config = Config::load_from_path(&config_path).expect("config should load");
+        assert!(config.runner_auth.key_id.starts_with("strait-"));
+        assert!(Path::new(&config.runner_auth.private_key_path).exists());
+        assert!(Path::new(config.runner_auth.public_key_path.as_ref().unwrap()).exists());
+    }
+
+    #[test]
+    fn init_rejects_existing_runner_auth() {
+        let temp = temp_dir("runner-key-init-existing");
+        let config_path = temp.join("server.toml");
+        write_config(&config_path, &temp, &temp.join("keys"), "old-key");
+
+        let error = init_runner_key(&config_path).expect_err("existing runner_auth should fail");
+
+        assert!(error.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn missing_runner_auth_reports_init_command() {
+        let temp = temp_dir("runner-key-missing");
+        let config_path = temp.join("server.toml");
+        write_minimal_config(&config_path, &temp);
+
+        let error = Config::load_from_path(&config_path).expect_err("config should fail");
+
+        assert!(error.to_string().contains("admin runner-key init"));
+    }
+
     fn write_config(config_path: &Path, temp: &Path, keys_dir: &Path, key_id: &str) {
         fs::write(
             config_path,
@@ -326,6 +424,47 @@ healthcheck_interval_seconds = 60
                 temp.join("server.sqlite3").display(),
                 keys_dir.join(format!("{key_id}.key")).display(),
                 keys_dir.join(format!("{key_id}.pub")).display(),
+            ),
+        )
+        .expect("config should write");
+    }
+
+    fn write_minimal_config(config_path: &Path, temp: &Path) {
+        fs::write(
+            config_path,
+            format!(
+                r#"data_dir = "{}"
+repos_dir = "{}"
+
+[database]
+path = "{}"
+
+[server]
+listen = "127.0.0.1:0"
+public_base_url = "ci.test"
+
+[auth]
+session_secret = "test-secret"
+session_ttl_days = 1
+session_cookie_secure = false
+login_rate_limit_per_minute = 100
+
+[auth.bootstrap_admin]
+username = "admin"
+password = "password123"
+
+[scheduler]
+poll_interval_ms = 50
+cancel_stuck_timeout_seconds = 1
+max_cancel_retries = 2
+max_infra_retries = 2
+
+[runners]
+healthcheck_interval_seconds = 60
+"#,
+                temp.join("data").display(),
+                temp.join("repos").display(),
+                temp.join("server.sqlite3").display(),
             ),
         )
         .expect("config should write");

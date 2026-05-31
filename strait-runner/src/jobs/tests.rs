@@ -64,7 +64,7 @@ async fn creates_job_metadata_for_valid_request() {
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -120,7 +120,7 @@ sensitive = true
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({ "token": "super-secret-value" }).to_string(),
@@ -164,7 +164,7 @@ async fn reuses_existing_job_for_same_idempotency_key() {
         .clone()
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("x-idempotency-key", "dispatch_replay_1")
                 .header("content-type", "application/json")
                 .body(Body::from(request_body.clone()))
@@ -175,7 +175,7 @@ async fn reuses_existing_job_for_same_idempotency_key() {
     let second = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("x-idempotency-key", "dispatch_replay_1")
                 .header("content-type", "application/json")
                 .body(Body::from(request_body))
@@ -204,7 +204,7 @@ async fn rejects_reusing_idempotency_key_for_different_request() {
         .clone()
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("x-idempotency-key", "dispatch_conflict_1")
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -221,7 +221,7 @@ async fn rejects_reusing_idempotency_key_for_different_request() {
     let second = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("x-idempotency-key", "dispatch_conflict_1")
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -251,7 +251,7 @@ async fn rejects_missing_idempotency_key() {
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -279,7 +279,7 @@ async fn rejects_missing_required_input() {
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                 .expect("request should build"),
@@ -301,7 +301,7 @@ async fn rejects_unknown_input() {
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -331,7 +331,7 @@ async fn accepts_job_request_with_body_within_limit() {
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -360,7 +360,7 @@ async fn rejects_job_request_body_over_limit() {
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -389,7 +389,7 @@ async fn rate_limits_job_creation_per_token() {
         .clone()
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -406,7 +406,7 @@ async fn rate_limits_job_creation_per_token() {
     let second = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -456,7 +456,7 @@ max_length = 6
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "abcdefg" }).to_string()))
                 .expect("request should build"),
@@ -492,7 +492,7 @@ pattern = "^[a-f0-9]+$"
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "not-a-sha" }).to_string()))
                 .expect("request should build"),
@@ -528,7 +528,7 @@ max_json_bytes = 16
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({ "payload": { "long": "value that exceeds the limit" } }).to_string(),
@@ -565,7 +565,7 @@ required = true
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -608,7 +608,7 @@ required = true
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "payload": null }).to_string()))
                 .expect("request should build"),
@@ -631,7 +631,7 @@ async fn resolves_artifact_inputs() {
     let response = app
         .oneshot(
             Request::post("/jobs/build-with-artifact/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -681,7 +681,7 @@ exit 0
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -740,7 +740,7 @@ async fn marks_failed_script_as_failed() {
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                 .expect("request should build"),
@@ -774,7 +774,7 @@ async fn times_out_long_running_script() {
     let response = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                 .expect("request should build"),
@@ -820,7 +820,7 @@ required = true
     let created = read_created_job(
         app.oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                 .expect("request should build"),
@@ -885,7 +885,7 @@ required = true
     let created = read_created_job(
         app.oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from("{}".to_string()))
                 .expect("request should build"),
@@ -947,7 +947,7 @@ required = true
     let created = read_created_job(
         app.oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                 .expect("request should build"),
@@ -979,7 +979,7 @@ async fn reads_job_status_over_http() {
         app.clone()
             .oneshot(
                 Request::post("/jobs/build-app/runs")
-                    .header("authorization", "Bearer runner-token")
+                    .header("x-strait-key-id", "runner")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                     .expect("request should build"),
@@ -994,7 +994,7 @@ async fn reads_job_status_over_http() {
     let response = app
         .oneshot(
             Request::get(format!("/runs/{}", created.job_id))
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -1030,7 +1030,7 @@ async fn reads_job_logs_over_http() {
         app.clone()
             .oneshot(
                 Request::post("/jobs/build-app/runs")
-                    .header("authorization", "Bearer runner-token")
+                    .header("x-strait-key-id", "runner")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                     .expect("request should build"),
@@ -1045,7 +1045,7 @@ async fn reads_job_logs_over_http() {
     let response = app
         .oneshot(
             Request::get(format!("/runs/{}/logs", created.job_id))
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -1073,7 +1073,7 @@ async fn rejects_invalid_job_id_in_status_route() {
     let response = app
         .oneshot(
             Request::get("/runs/not-a-job-id")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -1094,7 +1094,7 @@ async fn rejects_invalid_job_id_in_logs_route() {
     let response = app
         .oneshot(
             Request::get("/runs/not-a-job-id/logs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -1115,7 +1115,7 @@ async fn lists_job_definitions_over_http() {
     let response = app
         .oneshot(
             Request::get("/jobs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -1155,7 +1155,7 @@ async fn runner_http_contract_serializes_shared_dtos() {
         .clone()
         .oneshot(
             Request::get(RunnerRoute::Jobs.path())
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -1178,7 +1178,7 @@ async fn runner_http_contract_serializes_shared_dtos() {
                 }
                 .path(),
             )
-            .header("authorization", "Bearer runner-token")
+            .header("x-strait-key-id", "runner")
             .header("content-type", "application/json")
             .header(HEADER_IDEMPOTENCY_KEY, "contract_dispatch_1")
             .body(Body::from(
@@ -1205,7 +1205,7 @@ async fn runner_http_contract_serializes_shared_dtos() {
                 }
                 .path(),
             )
-            .header("authorization", "Bearer runner-token")
+            .header("x-strait-key-id", "runner")
             .body(Body::empty())
             .expect("request should build"),
         )
@@ -1227,7 +1227,7 @@ async fn runner_http_contract_serializes_shared_dtos() {
                 }
                 .path(),
             )
-            .header("authorization", "Bearer runner-token")
+            .header("x-strait-key-id", "runner")
             .body(Body::empty())
             .expect("request should build"),
         )
@@ -1266,7 +1266,7 @@ sensitive = true
     let response = app
         .oneshot(
             Request::get("/jobs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -1296,7 +1296,7 @@ async fn cancels_running_job_over_http() {
         app.clone()
             .oneshot(
                 Request::post("/jobs/build-app/runs")
-                    .header("authorization", "Bearer runner-token")
+                    .header("x-strait-key-id", "runner")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                     .expect("request should build"),
@@ -1309,7 +1309,7 @@ async fn cancels_running_job_over_http() {
     let cancel = app
         .oneshot(
             Request::delete(format!("/runs/{}", created.job_id))
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -1339,7 +1339,7 @@ async fn rejects_invalid_job_id_in_cancel_route() {
     let response = app
         .oneshot(
             Request::delete("/runs/not-a-job-id")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -1368,7 +1368,7 @@ async fn cancel_kills_child_process_tree() {
         app.clone()
             .oneshot(
                 Request::post("/jobs/build-app/runs")
-                    .header("authorization", "Bearer runner-token")
+                    .header("x-strait-key-id", "runner")
                     .header("content-type", "application/json")
                     .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                     .expect("request should build"),
@@ -1388,7 +1388,7 @@ async fn cancel_kills_child_process_tree() {
     let cancel = app
         .oneshot(
             Request::delete(format!("/runs/{}", created.job_id))
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .body(Body::empty())
                 .expect("request should build"),
         )
@@ -1422,7 +1422,7 @@ async fn fails_job_when_log_limit_is_exceeded() {
     let created = read_created_job(
         app.oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                 .expect("request should build"),
@@ -1459,7 +1459,7 @@ async fn job_process_sees_only_deliberate_environment() {
     let created = read_created_job(
         app.oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                 .expect("request should build"),
@@ -1495,7 +1495,7 @@ async fn reserved_system_input_is_available_without_manifest_declaration() {
     let created = read_created_job(
         app.oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -1550,7 +1550,7 @@ sensitive = true
     let created = read_created_job(
         app.oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({ "token": "super-secret-value" }).to_string(),
@@ -1583,7 +1583,7 @@ async fn begin_shutdown_cancels_active_jobs() {
     let created = read_created_job(
         app.oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "abc123" }).to_string()))
                 .expect("request should build"),
@@ -1830,7 +1830,7 @@ async fn parallel_jobs_can_run_together() {
         .clone()
         .oneshot(
             Request::post("/jobs/job-a/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "a" }).to_string()))
                 .expect("request should build"),
@@ -1840,7 +1840,7 @@ async fn parallel_jobs_can_run_together() {
     let second = app
         .oneshot(
             Request::post("/jobs/job-b/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "b" }).to_string()))
                 .expect("request should build"),
@@ -1874,7 +1874,7 @@ async fn job_exclusive_rejects_second_instance_while_running() {
         .clone()
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "a" }).to_string()))
                 .expect("request should build"),
@@ -1884,7 +1884,7 @@ async fn job_exclusive_rejects_second_instance_while_running() {
     let second = app
         .oneshot(
             Request::post("/jobs/build-app/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "b" }).to_string()))
                 .expect("request should build"),
@@ -1926,7 +1926,7 @@ async fn global_exclusive_rejects_when_other_job_is_running() {
         .clone()
         .oneshot(
             Request::post("/jobs/job-a/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "a" }).to_string()))
                 .expect("request should build"),
@@ -1936,7 +1936,7 @@ async fn global_exclusive_rejects_when_other_job_is_running() {
     let second = app
         .oneshot(
             Request::post("/jobs/job-b/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "b" }).to_string()))
                 .expect("request should build"),
@@ -1978,7 +1978,7 @@ async fn parallel_job_rejects_while_global_exclusive_is_running() {
         .clone()
         .oneshot(
             Request::post("/jobs/job-a/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "a" }).to_string()))
                 .expect("request should build"),
@@ -1988,7 +1988,7 @@ async fn parallel_job_rejects_while_global_exclusive_is_running() {
     let second = app
         .oneshot(
             Request::post("/jobs/job-b/runs")
-                .header("authorization", "Bearer runner-token")
+                .header("x-strait-key-id", "runner")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "commit": "b" }).to_string()))
                 .expect("request should build"),
@@ -2074,7 +2074,7 @@ required = true
             listen: "127.0.0.1:0".to_string(),
         },
         auth: AuthConfig {
-            mode: "bearer".to_string(),
+            mode: "signed".to_string(),
             servers: Vec::new(),
         },
         artifacts: ArtifactsConfig {
@@ -2164,7 +2164,7 @@ concurrency = "parallel"
             listen: "127.0.0.1:0".to_string(),
         },
         auth: AuthConfig {
-            mode: "bearer".to_string(),
+            mode: "signed".to_string(),
             servers: Vec::new(),
         },
         artifacts: ArtifactsConfig {
@@ -2229,7 +2229,7 @@ concurrency = "{}"
             listen: "127.0.0.1:0".to_string(),
         },
         auth: AuthConfig {
-            mode: "bearer".to_string(),
+            mode: "signed".to_string(),
             servers: Vec::new(),
         },
         artifacts: ArtifactsConfig {
@@ -2254,8 +2254,8 @@ concurrency = "{}"
 fn build_state(config: Config) -> AppState {
     AppState {
         config: Arc::new(config.clone()),
-        auth: Arc::new(AuthStore::test_with_bearer_tokens(&[(
-            "runner-token",
+        auth: Arc::new(AuthStore::test_with_signed_servers(&[(
+            "runner",
             "runner",
             &[
                 "jobs:run",

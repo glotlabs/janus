@@ -22,7 +22,7 @@ use strait_lib::{
     HEADER_SIGNATURE_NONCE, HEADER_SIGNATURE_TIMESTAMP, SIGNATURE_ALGORITHM_ED25519,
     canonical_signed_request, sha256_hex,
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::config::AuthConfig;
 
@@ -34,7 +34,7 @@ pub struct AuthStore {
     keys: BTreeMap<String, PublicKeyRecord>,
     seen_nonces: Mutex<BTreeMap<String, DateTime<Utc>>>,
     #[cfg(test)]
-    bearer_tokens: BTreeMap<String, AuthContext>,
+    test_servers: BTreeMap<String, AuthContext>,
 }
 
 impl AuthStore {
@@ -71,18 +71,19 @@ impl AuthStore {
             keys,
             seen_nonces: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
-            bearer_tokens: BTreeMap::new(),
+            test_servers: BTreeMap::new(),
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn test_with_bearer_tokens(records: &[(&str, &str, &[&str])]) -> Self {
-        let bearer_tokens = records
+    pub(crate) fn test_with_signed_servers(records: &[(&str, &str, &[&str])]) -> Self {
+        let test_servers = records
             .iter()
-            .map(|(token, name, permissions)| {
+            .map(|(key_id, name, permissions)| {
                 (
-                    (*token).to_string(),
+                    (*key_id).to_string(),
                     AuthContext {
+                        key_id: (*key_id).to_string(),
                         server_name: (*name).to_string(),
                         permissions: permissions
                             .iter()
@@ -96,7 +97,7 @@ impl AuthStore {
         Self {
             keys: BTreeMap::new(),
             seen_nonces: Mutex::new(BTreeMap::new()),
-            bearer_tokens,
+            test_servers,
         }
     }
 
@@ -131,6 +132,7 @@ impl AuthStore {
             .map_err(|_| AuthRejection::InvalidSignature)?;
 
         Ok(AuthContext {
+            key_id: key_id.to_string(),
             server_name: record.name.clone(),
             permissions: record.permissions.clone(),
         })
@@ -154,22 +156,19 @@ impl AuthStore {
     }
 
     #[cfg(test)]
-    fn test_bearer_context(
+    fn test_signed_context(
         &self,
         headers: &axum::http::HeaderMap,
     ) -> Result<Option<AuthContext>, AuthRejection> {
         let Some(value) = headers
-            .get(axum::http::header::AUTHORIZATION)
+            .get(HEADER_SIGNATURE_KEY_ID)
             .and_then(|value| value.to_str().ok())
         else {
             return Ok(None);
         };
-        let Some(token) = value.strip_prefix("Bearer ") else {
-            return Ok(None);
-        };
         let context = self
-            .bearer_tokens
-            .get(token)
+            .test_servers
+            .get(value)
             .cloned()
             .ok_or(AuthRejection::InvalidKeyId)?;
         Ok(Some(context))
@@ -204,6 +203,7 @@ impl std::error::Error for AuthError {}
 
 #[derive(Debug, Clone)]
 struct AuthContext {
+    key_id: String,
     server_name: String,
     permissions: BTreeSet<String>,
 }
@@ -227,18 +227,39 @@ pub async fn verify_signed_request(
         .map_err(|_| AuthRejection::RequestTooLarge)?;
 
     #[cfg(test)]
-    let context = if let Some(context) = state.auth.test_bearer_context(&headers)? {
+    let context = if let Some(context) = state.auth.test_signed_context(&headers)? {
         context
     } else {
-        state
+        match state
             .auth
-            .verify_request(&method, &path_and_query, &headers, &bytes)?
+            .verify_request(&method, &path_and_query, &headers, &bytes)
+        {
+            Ok(context) => context,
+            Err(error) => {
+                log_auth_failure(&headers, &error);
+                return Err(error);
+            }
+        }
     };
 
     #[cfg(not(test))]
-    let context = state
+    let context = match state
         .auth
-        .verify_request(&method, &path_and_query, &headers, &bytes)?;
+        .verify_request(&method, &path_and_query, &headers, &bytes)
+    {
+        Ok(context) => context,
+        Err(error) => {
+            log_auth_failure(&headers, &error);
+            return Err(error);
+        }
+    };
+    debug!(
+        key_id = %context.key_id,
+        server_name = %context.server_name,
+        method = %method,
+        path = %path_and_query,
+        "signed auth accepted"
+    );
     request.extensions_mut().insert(context);
     *request.body_mut() = Body::from(bytes);
 
@@ -295,7 +316,7 @@ where
             #[cfg(test)]
             {
                 let auth = Arc::<AuthStore>::from_ref(state);
-                if let Some(context) = auth.test_bearer_context(&parts.headers)? {
+                if let Some(context) = auth.test_signed_context(&parts.headers)? {
                     context
                 } else {
                     return Err(AuthRejection::MissingAuthorization);
@@ -325,6 +346,18 @@ impl FromRef<crate::AppState> for Arc<AuthStore> {
     fn from_ref(input: &crate::AppState) -> Self {
         Arc::clone(&input.auth)
     }
+}
+
+fn log_auth_failure(headers: &axum::http::HeaderMap, error: &AuthRejection) {
+    let key_id = headers
+        .get(HEADER_SIGNATURE_KEY_ID)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<missing>");
+    warn!(
+        key_id = %key_id,
+        code = %error.code(),
+        "signed auth request rejected"
+    );
 }
 
 #[derive(Debug)]
@@ -436,7 +469,16 @@ struct AuthErrorResponse {
 
 impl AuthErrorResponse {
     fn from_rejection(rejection: &AuthRejection) -> Self {
-        let code = match rejection {
+        Self {
+            code: rejection.code(),
+            message: rejection.to_string(),
+        }
+    }
+}
+
+impl AuthRejection {
+    fn code(&self) -> &'static str {
+        match self {
             AuthRejection::MissingAuthorization => "auth_missing_authorization",
             AuthRejection::InvalidAuthorizationHeader => "auth_invalid_authorization_header",
             AuthRejection::InvalidKeyId => "auth_invalid_key_id",
@@ -448,11 +490,6 @@ impl AuthErrorResponse {
             AuthRejection::RequestTooLarge => "auth_request_too_large",
             AuthRejection::InvalidBodyLimit => "auth_invalid_body_limit",
             AuthRejection::MissingPermission { .. } => "auth_missing_permission",
-        };
-
-        Self {
-            code,
-            message: rejection.to_string(),
         }
     }
 }

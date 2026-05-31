@@ -414,7 +414,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::get(RunnerRoute::Capabilities.path())
-                    .header("authorization", "Bearer jobs-read-token")
+                    .header("x-strait-key-id", "jobs-read")
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -529,14 +529,14 @@ mod tests {
         let cases = vec![
             (
                 Request::get("/jobs")
-                    .header("authorization", "Bearer jobs-run-token")
+                    .header("x-strait-key-id", "jobs-run")
                     .body(Body::empty())
                     .expect("request should build"),
                 StatusCode::FORBIDDEN,
             ),
             (
                 Request::post("/jobs/build-app/runs")
-                    .header("authorization", "Bearer jobs-read-token")
+                    .header("x-strait-key-id", "jobs-read")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         serde_json::json!({
@@ -550,42 +550,42 @@ mod tests {
             ),
             (
                 Request::get("/runs/job_missing")
-                    .header("authorization", "Bearer logs-read-token")
+                    .header("x-strait-key-id", "logs-read")
                     .body(Body::empty())
                     .expect("request should build"),
                 StatusCode::FORBIDDEN,
             ),
             (
                 Request::delete("/runs/job_missing")
-                    .header("authorization", "Bearer jobs-read-token")
+                    .header("x-strait-key-id", "jobs-read")
                     .body(Body::empty())
                     .expect("request should build"),
                 StatusCode::FORBIDDEN,
             ),
             (
                 Request::get("/runs/job_missing/logs")
-                    .header("authorization", "Bearer jobs-read-token")
+                    .header("x-strait-key-id", "jobs-read")
                     .body(Body::empty())
                     .expect("request should build"),
                 StatusCode::FORBIDDEN,
             ),
             (
                 Request::post("/artifacts")
-                    .header("authorization", "Bearer artifacts-read-token")
+                    .header("x-strait-key-id", "artifacts-read")
                     .body(Body::from("body"))
                     .expect("request should build"),
                 StatusCode::FORBIDDEN,
             ),
             (
                 Request::get(format!("/artifacts/{artifact_id}"))
-                    .header("authorization", "Bearer jobs-read-token")
+                    .header("x-strait-key-id", "jobs-read")
                     .body(Body::empty())
                     .expect("request should build"),
                 StatusCode::FORBIDDEN,
             ),
             (
                 Request::get("/jobs")
-                    .header("authorization", "Bearer wrong-token")
+                    .header("x-strait-key-id", "wrong-key")
                     .body(Body::empty())
                     .expect("request should build"),
                 StatusCode::UNAUTHORIZED,
@@ -637,7 +637,7 @@ required = true
                 listen: "127.0.0.1:0".to_string(),
             },
             auth: AuthConfig {
-                mode: "bearer".to_string(),
+                mode: "signed".to_string(),
                 servers: Vec::new(),
             },
             artifacts: ArtifactsConfig {
@@ -658,20 +658,12 @@ required = true
 
         AppState {
             config: Arc::new(config.clone()),
-            auth: Arc::new(AuthStore::test_with_bearer_tokens(&[
-                ("jobs-run-token", "jobs-run", &["jobs:run"]),
-                ("jobs-read-token", "jobs-read", &["jobs:read"]),
-                ("logs-read-token", "logs-read", &["logs:read"]),
-                (
-                    "artifacts-write-token",
-                    "artifacts-write",
-                    &["artifacts:write"],
-                ),
-                (
-                    "artifacts-read-token",
-                    "artifacts-read",
-                    &["artifacts:read"],
-                ),
+            auth: Arc::new(AuthStore::test_with_signed_servers(&[
+                ("jobs-run", "jobs-run", &["jobs:run"]),
+                ("jobs-read", "jobs-read", &["jobs:read"]),
+                ("logs-read", "logs-read", &["logs:read"]),
+                ("artifacts-write", "artifacts-write", &["artifacts:write"]),
+                ("artifacts-read", "artifacts-read", &["artifacts:read"]),
             ])),
             manifests: Arc::new(
                 ManifestStore::load_from_dir(&config.manifests_dir).expect("manifests should load"),

@@ -173,7 +173,10 @@ pub(crate) enum Command {
         password: String,
         role: String,
     },
-    AdminRunnerKeyShow,
+    AdminRunnerKeyShow {
+        format: crate::runner_auth::RunnerKeyShowFormat,
+    },
+    AdminRunnerKeyInit,
     AdminRunnerKeyRotate,
 }
 
@@ -271,6 +274,7 @@ impl Cli {
                 index += 2;
                 let action = args.get(index).map(String::as_str).unwrap_or("show");
                 index += 1;
+                let mut format = crate::runner_auth::RunnerKeyShowFormat::Text;
                 while index < args.len() {
                     match args[index].as_str() {
                         "--config" => {
@@ -278,12 +282,26 @@ impl Cli {
                             config_path =
                                 PathBuf::from(args.get(index).ok_or("missing config path")?);
                         }
+                        "--format" => {
+                            index += 1;
+                            format = match args.get(index).map(String::as_str) {
+                                Some("text") => crate::runner_auth::RunnerKeyShowFormat::Text,
+                                Some("toml") => crate::runner_auth::RunnerKeyShowFormat::Toml,
+                                Some(value) => {
+                                    return Err(
+                                        format!("unknown runner-key format: {value}").into()
+                                    );
+                                }
+                                None => return Err("missing runner-key format".into()),
+                            };
+                        }
                         _ => {}
                     }
                     index += 1;
                 }
                 match action {
-                    "show" => Command::AdminRunnerKeyShow,
+                    "init" => Command::AdminRunnerKeyInit,
+                    "show" => Command::AdminRunnerKeyShow { format },
                     "rotate" => Command::AdminRunnerKeyRotate,
                     _ => return Err(format!("unknown runner-key action: {action}").into()),
                 }
