@@ -1,9 +1,14 @@
+use std::time::Duration;
+
 use reqwest::{Client, Method, StatusCode};
 use serde_json::Value;
 pub use strait_lib::{
     ArtifactUploadResponse, HEADER_IDEMPOTENCY_KEY, HEADER_SHA256, JobCreatedResponse,
     JobLogsResponse, JobOutputMetadata, JobStatusResponse, RunnerCapabilitiesResponse, RunnerRoute,
 };
+
+const RUNNER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const RUNNER_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 use crate::{
     models::{Runner, RunnerJobDefinition},
@@ -18,10 +23,12 @@ pub struct RunnerClient {
 
 impl RunnerClient {
     pub(crate) fn new(signer: RunnerSigner) -> Self {
-        Self {
-            http: Client::new(),
-            signer,
-        }
+        let http = Client::builder()
+            .connect_timeout(RUNNER_CONNECT_TIMEOUT)
+            .timeout(RUNNER_REQUEST_TIMEOUT)
+            .build()
+            .expect("runner http client");
+        Self { http, signer }
     }
 
     pub async fn capabilities(
