@@ -61,6 +61,16 @@ pub(crate) fn runners_page(runners: Vec<(Runner, Vec<RunnerJobDefinition>)>, csr
                                 span { "Runner ID" }
                                 code { (runner.id) }
                             }
+                            form method="post" action=(format!("/runners/{}/update", runner.id)) class="stack-md" {
+                                (csrf_input(csrf))
+                                label {
+                                    span { "Runner name" }
+                                    input name="name" value=(runner.name);
+                                }
+                                div class="actions" {
+                                    button type="submit" class="secondary" { "Save name" }
+                                }
+                            }
                             div class="actions" {
                                 form method="post" action=(format!("/runners/{}/test", runner.id)) {
                                     (csrf_input(csrf))

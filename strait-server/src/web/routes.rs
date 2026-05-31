@@ -83,6 +83,7 @@ pub(crate) fn build_router(state: Arc<AppState>) -> Router {
         .route("/repos", get(repos_page).post(create_repo))
         .route("/repos/{repo_id}/trigger", post(trigger_repo))
         .route("/runners", get(runners_page).post(create_runner))
+        .route("/runners/{runner_id}/update", post(update_runner))
         .route("/runners/{runner_id}/toggle", post(toggle_runner))
         .route("/runners/{runner_id}/test", post(test_runner))
         .route("/workflows", get(workflows_page).post(create_workflow))
@@ -283,6 +284,11 @@ struct CreateRunnerForm {
     name: String,
     base_url: String,
     token: String,
+}
+#[derive(Deserialize)]
+struct UpdateRunnerForm {
+    csrf_token: String,
+    name: String,
 }
 #[derive(Deserialize)]
 struct WorkflowForm {
@@ -505,6 +511,27 @@ async fn toggle_runner(
     state
         .db
         .set_runner_enabled(&runner_id, !runner.enabled)
+        .map_err(internal_error)?;
+    Ok(Redirect::to("/runners"))
+}
+
+async fn update_runner(
+    _: AdminUser,
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+    AxumPath(runner_id): AxumPath<String>,
+    Form(form): Form<UpdateRunnerForm>,
+) -> Result<Redirect, Response> {
+    verify_csrf(&state, &user, &form.csrf_token)?;
+    validate_runner_name(&form.name)?;
+    state
+        .db
+        .get_runner(&runner_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("runner"))?;
+    state
+        .db
+        .update_runner_name(&runner_id, form.name.trim())
         .map_err(internal_error)?;
     Ok(Redirect::to("/runners"))
 }

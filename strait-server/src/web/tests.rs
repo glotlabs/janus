@@ -163,6 +163,67 @@ async fn workflows_page_renders_runner_job_builder() {
 }
 
 #[tokio::test]
+async fn runners_page_renders_name_edit_form() {
+    let fixture = test_fixture().await;
+    let admin = admin_user(&fixture.state);
+    let cookie = session_cookie_value(&fixture.state, &admin.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/runners")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let html = String::from_utf8(body.to_vec()).expect("html");
+    assert!(html.contains(&format!("/runners/{}/update", fixture.runner_id)));
+    assert!(html.contains("Runner name"));
+    assert!(html.contains("Save name"));
+}
+
+#[tokio::test]
+async fn runner_name_can_be_updated_from_frontend() {
+    let fixture = test_fixture().await;
+    let admin = admin_user(&fixture.state);
+    let token = csrf_token(&fixture.state, &admin);
+    let cookie = session_cookie_value(&fixture.state, &admin.id);
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf_token", &token)
+        .append_pair("name", "renamed-runner")
+        .finish();
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post(format!("/runners/{}/update", fixture.runner_id))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", cookie)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+    let runner = fixture
+        .state
+        .db
+        .get_runner(&fixture.runner_id)
+        .expect("runner")
+        .expect("runner");
+    assert_eq!(runner.name, "renamed-runner");
+}
+
+#[tokio::test]
 async fn workflows_page_marks_stale_workflow_schemas() {
     let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
     let repo = create_repo_direct(&fixture.state, &fixture.user, "stale-workflow-page");
@@ -1838,6 +1899,15 @@ fn workflow_job_schemas(
 
 fn runner_job_definition(schema: &str) -> RunnerJobDefinition {
     serde_json::from_str(schema).expect("runner job schema")
+}
+
+fn admin_user(state: &Arc<crate::app::AppState>) -> User {
+    state
+        .db
+        .get_user_credentials("admin")
+        .expect("admin credentials")
+        .expect("admin user")
+        .0
 }
 
 fn write_test_config(dir: &Path) -> PathBuf {

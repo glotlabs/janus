@@ -410,6 +410,19 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_runner_name(
+        &self,
+        runner_id: &str,
+        name: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "UPDATE runners SET name = ?2 WHERE id = ?1",
+            params![runner_id, name],
+        )?;
+        Ok(())
+    }
+
     pub fn update_runner_health(
         &self,
         runner_id: &str,
