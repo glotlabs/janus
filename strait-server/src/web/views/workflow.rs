@@ -75,6 +75,13 @@ pub(crate) fn workflows_page(
                                 div class="meta-pair" { span { "Trigger" } strong { (card.trigger.kind) } }
                                 div class="meta-pair" { span { "Jobs" } strong { (card.job_count) } }
                             }
+                            @if card.trigger.kind == "manual" {
+                                (manual_run_form(
+                                    &format!("/workflows/{}/run", card.workflow.id),
+                                    csrf,
+                                    manual_default_branch(&card.trigger, &card.repo),
+                                ))
+                            }
                         }
                     }
                 }
@@ -90,6 +97,12 @@ pub(crate) fn workflow_detail_page(
     form: WorkflowFormView,
     csrf: &str,
 ) -> Markup {
+    let is_manual = form.trigger_kind == "manual";
+    let default_branch = if form.branch_name.trim().is_empty() {
+        repo.default_branch.clone()
+    } else {
+        form.branch_name.clone()
+    };
     layout(
         "Workflow",
         html! {
@@ -111,6 +124,21 @@ pub(crate) fn workflow_detail_page(
                 form method="post" action=(format!("/workflows/{}/update", workflow.id)) class="stack-lg" {
                     (csrf_input(csrf))
                     (workflow_form_fields(form))
+                }
+            }
+            @if is_manual {
+                section class="card" {
+                    div class="section-head" {
+                        div {
+                            div class="eyebrow" { "Manual run" }
+                            h2 { "Run workflow" }
+                        }
+                    }
+                    (manual_run_form(
+                        &format!("/workflows/{}/run", workflow.id),
+                        csrf,
+                        default_branch,
+                    ))
                 }
             }
         },
@@ -287,6 +315,35 @@ fn workflow_form_fields(form: WorkflowFormView) -> Markup {
         div class="actions" {
             button type="submit" {
                 @if form.is_edit { "Save workflow" } @else { "Create workflow" }
+            }
+        }
+    }
+}
+
+fn manual_default_branch(trigger: &WorkflowTrigger, repo: &Repo) -> String {
+    trigger
+        .branches
+        .first()
+        .cloned()
+        .unwrap_or_else(|| repo.default_branch.clone())
+}
+
+fn manual_run_form(action: &str, csrf: &str, default_branch: String) -> Markup {
+    html! {
+        form method="post" action=(action) class="stack-md inset-panel" {
+            (csrf_input(csrf))
+            div class="inline-fields" {
+                label {
+                    span { "Branch ref" }
+                    input name="branch" value=(default_branch);
+                }
+                label {
+                    span { "Commit" }
+                    input name="commit" value="HEAD";
+                }
+            }
+            div class="actions" {
+                button type="submit" { "Run workflow" }
             }
         }
     }

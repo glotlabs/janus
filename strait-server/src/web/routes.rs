@@ -86,6 +86,7 @@ pub(crate) fn build_router(state: Arc<AppState>) -> Router {
         .route("/runners/{runner_id}/test", post(test_runner))
         .route("/workflows", get(workflows_page).post(create_workflow))
         .route("/workflows/{workflow_id}", get(workflow_detail_page))
+        .route("/workflows/{workflow_id}/run", post(run_workflow))
         .route("/workflows/{workflow_id}/update", post(update_workflow))
         .route("/pipelines", get(pipelines_page))
         .route("/pipelines/{pipeline_id}", get(pipeline_detail))
@@ -534,9 +535,11 @@ async fn workflows_page(
     let workflow_cards = workflows
         .into_iter()
         .filter_map(|workflow| {
-            let repo = repos.iter().find(|repo| repo.id == workflow.repo_id)?.clone();
-            let schema_status =
-                workflow_schema_status(&state, &workflow).map_err(internal_error);
+            let repo = repos
+                .iter()
+                .find(|repo| repo.id == workflow.repo_id)?
+                .clone();
+            let schema_status = workflow_schema_status(&state, &workflow).map_err(internal_error);
             Some((workflow, repo, schema_status))
         })
         .map(|(workflow, repo, schema_status)| {
@@ -631,6 +634,49 @@ async fn update_workflow(
         )
         .map_err(internal_error)?;
     Ok(Redirect::to(&format!("/workflows/{}", workflow.id)))
+}
+
+async fn run_workflow(
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+    AxumPath(workflow_id): AxumPath<String>,
+    Form(form): Form<ManualTriggerForm>,
+) -> Result<Redirect, Response> {
+    verify_csrf(&state, &user, &form.csrf_token)?;
+    let workflow = authorized_workflow(&state, &user, &workflow_id)?;
+    let trigger: WorkflowTrigger =
+        serde_json::from_str(&workflow.trigger_json).map_err(internal_error_text)?;
+    if trigger.kind != "manual" {
+        return Err(bad_request("workflow trigger is not manual"));
+    }
+    let repo = state
+        .db
+        .get_repo(&workflow.repo_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("repo"))?;
+    let branch = form
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| trigger.branches.first().cloned())
+        .unwrap_or(repo.default_branch);
+    let commit = form
+        .commit
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("HEAD");
+    let pipeline_id = scheduler::enqueue_workflow_run(
+        Arc::clone(&state),
+        &workflow,
+        "manual",
+        Some(&branch),
+        Some(commit),
+    )
+    .map_err(internal_error)?;
+    Ok(Redirect::to(&format!("/pipelines/{pipeline_id}")))
 }
 
 async fn pipelines_page(

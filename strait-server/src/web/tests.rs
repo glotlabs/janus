@@ -199,6 +199,73 @@ async fn workflows_page_marks_stale_workflow_schemas() {
 }
 
 #[tokio::test]
+async fn manual_workflow_can_be_run_from_frontend() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "manual-workflow");
+    create_manual_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    let workflow = fixture
+        .state
+        .db
+        .workflows_for_repo(&repo.id)
+        .expect("workflows")
+        .into_iter()
+        .find(|workflow| workflow.name == "wf")
+        .expect("workflow");
+
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/workflows")
+                .header("cookie", cookie.clone())
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let html = String::from_utf8(body.to_vec()).expect("html");
+    assert!(html.contains(&format!("/workflows/{}/run", workflow.id)));
+    assert!(html.contains("Run workflow"));
+
+    let token = csrf_token(&fixture.state, &fixture.user);
+    let body = form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf_token", &token)
+        .append_pair("branch", "release")
+        .append_pair("commit", "abc123")
+        .finish();
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post(format!("/workflows/{}/run", workflow.id))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("cookie", cookie)
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+
+    let pipeline = fixture
+        .state
+        .db
+        .list_pipeline_runs()
+        .expect("pipelines")
+        .into_iter()
+        .find(|pipeline| pipeline.workflow_id == workflow.id)
+        .expect("pipeline");
+    assert_eq!(pipeline.trigger_type, "manual");
+    assert_eq!(pipeline.trigger_ref.as_deref(), Some("release"));
+    assert_eq!(pipeline.commit_sha.as_deref(), Some("abc123"));
+}
+
+#[tokio::test]
 async fn api_workflow_includes_schema_status() {
     let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
     let repo = create_repo_direct(&fixture.state, &fixture.user, "stale-workflow-api");
@@ -1531,6 +1598,34 @@ fn create_repo_direct(state: &Arc<crate::app::AppState>, user: &User, name: &str
 fn create_workflow_direct(state: &Arc<crate::app::AppState>, repo_id: &str, runner_id: &str) {
     let trigger = serde_json::to_string(&WorkflowTrigger {
         kind: "push".to_string(),
+        branches: vec!["main".to_string()],
+    })
+    .expect("trigger");
+    let jobs = vec![WorkflowJobDefinition {
+        runner_id: runner_id.to_string(),
+        runner_job_name: "build-app".to_string(),
+        inputs: BTreeMap::from([
+            ("commit".to_string(), WorkflowInputBinding::Commit),
+            ("branch".to_string(), WorkflowInputBinding::Branch),
+        ]),
+        outcome_policy: WorkflowJobOutcomePolicy::Required,
+    }];
+    let definition =
+        serde_json::to_string(&WorkflowDefinition { jobs: jobs.clone() }).expect("definition");
+    let job_schemas = workflow_job_schemas(state, &jobs);
+    state
+        .db
+        .create_workflow(repo_id, "wf", true, &trigger, &definition, &job_schemas)
+        .expect("workflow");
+}
+
+fn create_manual_workflow_direct(
+    state: &Arc<crate::app::AppState>,
+    repo_id: &str,
+    runner_id: &str,
+) {
+    let trigger = serde_json::to_string(&WorkflowTrigger {
+        kind: "manual".to_string(),
         branches: vec!["main".to_string()],
     })
     .expect("trigger");
