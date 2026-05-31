@@ -7,7 +7,14 @@ use std::{
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-const RESERVED_INPUT_NAMES: &[&str] = &["id", "name", "workdir", "output_dir", "metadata_path"];
+pub(crate) const RESERVED_INPUT_NAMES: &[&str] = &[
+    "id",
+    "name",
+    "workdir",
+    "output_dir",
+    "metadata_path",
+    "strait_job_run_id",
+];
 
 #[derive(Debug, Clone)]
 pub struct ManifestStore {
@@ -324,7 +331,7 @@ fn validate_job_name(name: &str, path: &Path) -> Result<(), ManifestError> {
 }
 
 fn validate_input_name(name: &str, path: &Path) -> Result<(), ManifestError> {
-    if !is_safe_name(name) || RESERVED_INPUT_NAMES.contains(&name) {
+    if !is_safe_name(name) || is_reserved_input_name(name) {
         return Err(ManifestError::InvalidInputName {
             name: name.to_string(),
             path: path.display().to_string(),
@@ -332,6 +339,10 @@ fn validate_input_name(name: &str, path: &Path) -> Result<(), ManifestError> {
     }
 
     Ok(())
+}
+
+pub(crate) fn is_reserved_input_name(name: &str) -> bool {
+    RESERVED_INPUT_NAMES.contains(&name)
 }
 
 fn validate_output_name(name: &str, path: &Path) -> Result<(), ManifestError> {
@@ -486,7 +497,10 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use super::{Concurrency, InputType, JobManifest, ManifestError, ManifestStore, OutputType};
+    use super::{
+        Concurrency, InputType, JobManifest, ManifestError, ManifestStore, OutputType,
+        RESERVED_INPUT_NAMES,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -634,22 +648,18 @@ required = true
 
     #[test]
     fn rejects_reserved_input_name() {
-        let temp = temp_dir("reserved_input_name");
-        let script = write_executable_script(&temp, "build.sh");
-        let manifest_path = temp.join("bad.toml");
+        for input_name in RESERVED_INPUT_NAMES {
+            let temp = temp_dir(&format!("reserved_input_name_{input_name}"));
+            let script = write_executable_script(&temp, "build.sh");
+            let manifest_path = temp.join("bad.toml");
 
-        write_manifest(
-            &manifest_path,
-            "build-app",
-            &script,
-            "parallel",
-            "output_dir",
-        );
+            write_manifest(&manifest_path, "build-app", &script, "parallel", input_name);
 
-        let error =
-            JobManifest::load_from_path(&manifest_path).expect_err("reserved input must fail");
+            let error =
+                JobManifest::load_from_path(&manifest_path).expect_err("reserved input must fail");
 
-        assert!(matches!(error, ManifestError::InvalidInputName { .. }));
+            assert!(matches!(error, ManifestError::InvalidInputName { .. }));
+        }
     }
 
     #[test]

@@ -17,7 +17,7 @@ use tracing::{Instrument, error, info, info_span, warn};
 
 use crate::{
     artifacts::ArtifactStore,
-    manifest::{Concurrency, InputType, JobManifest, ManifestStore},
+    manifest::{Concurrency, InputType, JobManifest, ManifestStore, is_reserved_input_name},
     storage::atomic_write,
 };
 
@@ -560,7 +560,7 @@ fn validate_inputs(
     }
 
     for name in inputs.keys() {
-        if !manifest.inputs.contains_key(name) {
+        if !manifest.inputs.contains_key(name) && !is_reserved_input_name(name) {
             return Err(JobError::UnknownInput(name.clone()));
         }
     }
@@ -568,6 +568,9 @@ fn validate_inputs(
     let mut resolved = BTreeMap::new();
 
     for (name, value) in inputs {
+        if is_reserved_input_name(name) {
+            continue;
+        }
         let spec = &manifest.inputs[name];
 
         match spec.kind {
@@ -665,7 +668,12 @@ fn redact_sensitive_inputs(
     inputs
         .iter()
         .map(|(name, value)| {
-            let value = if manifest.inputs[name].sensitive {
+            let value = if manifest
+                .inputs
+                .get(name)
+                .map(|input| input.sensitive)
+                .unwrap_or(false)
+            {
                 Value::String(REDACTED_INPUT_VALUE.to_string())
             } else {
                 value.clone()

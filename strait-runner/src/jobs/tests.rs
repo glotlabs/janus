@@ -1374,6 +1374,52 @@ async fn job_process_sees_only_deliberate_environment() {
 }
 
 #[tokio::test]
+async fn reserved_system_input_is_available_without_manifest_declaration() {
+    let temp = temp_dir("job_system_input");
+    let state = test_state_with_script(
+        &temp,
+        "build-app",
+        "#!/bin/sh\nprintf '%s\\n%s\\n%s' \"$INPUT_STRAIT_JOB_RUN_ID\" \"$INPUT_OUTPUT_DIR\" \"$INPUT_METADATA_PATH\"\n",
+        600,
+    );
+    let app = Router::new()
+        .route("/jobs/{name}/runs", post(create_job))
+        .with_state(state);
+
+    let created = read_created_job(
+        app.oneshot(
+            Request::post("/jobs/build-app/runs")
+                .header("authorization", "Bearer runner-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "commit": "abc123",
+                        "strait_job_run_id": "server-job-1",
+                        "output_dir": "server-output-dir",
+                        "metadata_path": "server-metadata-path"
+                    })
+                    .to_string(),
+                ))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should succeed"),
+    )
+    .await;
+    let metadata = wait_for_terminal_metadata(&temp, &created.job_id).await;
+
+    assert_eq!(metadata.status, JobStatus::Success);
+    assert_eq!(metadata.inputs["strait_job_run_id"], "server-job-1");
+    assert_eq!(metadata.inputs["output_dir"], "server-output-dir");
+    assert_eq!(metadata.inputs["metadata_path"], "server-metadata-path");
+    assert_eq!(
+        fs::read_to_string(temp.join("jobs").join(&created.job_id).join("stdout.log"))
+            .expect("stdout should read"),
+        "server-job-1\nserver-output-dir\nserver-metadata-path"
+    );
+}
+
+#[tokio::test]
 async fn sensitive_input_is_available_to_job_env_but_redacted_on_disk() {
     let temp = temp_dir("job_sensitive_env");
     let state = test_state_from_manifest(
