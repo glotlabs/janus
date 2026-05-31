@@ -623,6 +623,65 @@ async fn api_internal_errors_do_not_expose_details() {
 }
 
 #[tokio::test]
+async fn admin_mutations_record_audit_events() {
+    let fixture = test_fixture().await;
+    let token = csrf_token(&fixture.state, &fixture.user);
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/api/repos")
+                .header("content-type", "application/json")
+                .header("cookie", cookie)
+                .body(Body::from(
+                    json!({
+                        "csrf_token": token,
+                        "name": "audit-repo",
+                        "default_branch": "main"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let events = fixture.state.db.list_audit_events().expect("audit events");
+    let event = events
+        .iter()
+        .find(|event| event.action == "repo.create")
+        .expect("repo create audit event");
+    assert_eq!(
+        event.actor_user_id.as_deref(),
+        Some(fixture.user.id.as_str())
+    );
+    assert_eq!(
+        event.actor_username.as_deref(),
+        Some(fixture.user.username.as_str())
+    );
+    assert_eq!(event.target_type, "repo");
+    assert_eq!(event.target_name.as_deref(), Some("audit-repo"));
+    let metadata: JsonValue = serde_json::from_str(&event.metadata_json).expect("metadata");
+    assert_eq!(metadata["default_branch"], json!("main"));
+}
+
+#[tokio::test]
+async fn scheduler_tasks_stop_on_shutdown_signal() {
+    let fixture = test_fixture().await;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let handles = scheduler::spawn(Arc::clone(&fixture.state), shutdown_rx);
+    shutdown_tx.send(true).expect("shutdown signal");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        scheduler::shutdown(handles),
+    )
+    .await
+    .expect("scheduler shutdown");
+}
+
+#[tokio::test]
 async fn api_create_workflow_rejects_empty_branch_entry() {
     let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
     let repo = create_repo_direct(&fixture.state, &fixture.user, "api-empty-workflow-branch");

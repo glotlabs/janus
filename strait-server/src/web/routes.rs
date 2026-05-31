@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use sha2::Sha256;
 use strait_lib::SUPPORTED_RUNNER_PROTOCOL_VERSIONS;
 use tokio::time;
-use tracing::error;
+use tracing::{error, info};
 use url::Url;
 use uuid::Uuid;
 
@@ -401,6 +401,15 @@ async fn create_user(
         .db
         .create_user(form.username.trim(), &hash, role)
         .map_err(internal_error)?;
+    record_audit_event(
+        &state,
+        &user,
+        "user.create",
+        "user",
+        None,
+        Some(form.username.trim()),
+        json!({ "role": role.as_str() }),
+    )?;
     Ok(Redirect::to("/users"))
 }
 
@@ -466,6 +475,15 @@ async fn create_repo(
         &repo.id,
     )
     .map_err(api_internal_error)?;
+    record_audit_event(
+        &state,
+        &user,
+        "repo.create",
+        "repo",
+        Some(&repo.id),
+        Some(&repo.name),
+        json!({ "default_branch": repo.default_branch, "normalized_name": repo.normalized_name }),
+    )?;
     Ok(Redirect::to("/repos"))
 }
 
@@ -537,6 +555,15 @@ async fn create_runner(
         .db
         .create_runner(form.name.trim(), form.base_url.trim())
         .map_err(internal_error)?;
+    record_audit_event(
+        &state,
+        &user,
+        "runner.create",
+        "runner",
+        Some(&runner_id),
+        Some(form.name.trim()),
+        json!({ "base_url": form.base_url.trim() }),
+    )?;
     refresh_single_runner(&state, &runner_id)
         .await
         .map_err(internal_error_text)?;
@@ -560,6 +587,15 @@ async fn toggle_runner(
         .db
         .set_runner_enabled(&runner_id, !runner.enabled)
         .map_err(internal_error)?;
+    record_audit_event(
+        &state,
+        &user,
+        "runner.update",
+        "runner",
+        Some(&runner.id),
+        Some(&runner.name),
+        json!({ "field": "enabled", "old": runner.enabled, "new": !runner.enabled }),
+    )?;
     Ok(Redirect::to("/runners"))
 }
 
@@ -581,6 +617,15 @@ async fn update_runner(
         .db
         .update_runner_name(&runner_id, form.name.trim())
         .map_err(internal_error)?;
+    record_audit_event(
+        &state,
+        &user,
+        "runner.update",
+        "runner",
+        Some(&runner_id),
+        Some(form.name.trim()),
+        json!({ "field": "name" }),
+    )?;
     Ok(Redirect::to("/runners"))
 }
 
@@ -646,7 +691,7 @@ async fn create_workflow(
     let repo = authorized_repo(&state, &user, &form.repo_id)?;
     let parsed = parse_workflow_form(&state, &form)
         .map_err(|error| render_create_workflow_form_error(&state, &user, &form, error))?;
-    state
+    let workflow_id = state
         .db
         .create_workflow(
             &repo.id,
@@ -657,6 +702,15 @@ async fn create_workflow(
             &parsed.job_schemas,
         )
         .map_err(internal_error)?;
+    record_audit_event(
+        &state,
+        &user,
+        "workflow.create",
+        "workflow",
+        Some(&workflow_id),
+        Some(form.name.trim()),
+        json!({ "repo_id": repo.id, "enabled": true }),
+    )?;
     Ok(Redirect::to("/workflows"))
 }
 
@@ -674,7 +728,7 @@ async fn update_workflow(
     let parsed = parse_workflow_form(&state, &form).map_err(|error| {
         render_update_workflow_form_error(&state, &user, &workflow, &form, error)
     })?;
-    state
+    let version_id = state
         .db
         .update_workflow(
             &workflow.id,
@@ -685,6 +739,15 @@ async fn update_workflow(
             &parsed.job_schemas,
         )
         .map_err(internal_error)?;
+    record_audit_event(
+        &state,
+        &user,
+        "workflow.update",
+        "workflow",
+        Some(&workflow.id),
+        Some(form.name.trim()),
+        json!({ "repo_id": workflow.repo_id, "version_id": version_id, "enabled": true }),
+    )?;
     Ok(Redirect::to(&format!("/workflows/{}", workflow.id)))
 }
 
@@ -939,6 +1002,15 @@ async fn api_create_repo(
         &repo.id,
     )
     .map_err(api_internal_error)?;
+    record_audit_event(
+        &state,
+        &user,
+        "repo.create",
+        "repo",
+        Some(&repo.id),
+        Some(&repo.name),
+        json!({ "default_branch": repo.default_branch, "normalized_name": repo.normalized_name }),
+    )?;
     Ok(Json(repo))
 }
 async fn api_list_runners(
@@ -962,6 +1034,15 @@ async fn api_create_runner(
         .db
         .create_runner(request.name.trim(), request.base_url.trim())
         .map_err(api_internal_error)?;
+    record_audit_event(
+        &state,
+        &user,
+        "runner.create",
+        "runner",
+        Some(&runner_id),
+        Some(request.name.trim()),
+        json!({ "base_url": request.base_url.trim() }),
+    )?;
     refresh_single_runner(&state, &runner_id)
         .await
         .map_err(api_internal_error)?;
@@ -1005,7 +1086,7 @@ async fn api_create_workflow(
         .map_err(|_| api_forbidden("csrf validation failed"))?;
     let repo = authorized_repo(&state, &user, &request.repo_id)?;
     let parsed = parse_api_workflow_request(&state, &request).map_err(api_bad_request)?;
-    state
+    let workflow_id = state
         .db
         .create_workflow(
             &repo.id,
@@ -1018,11 +1099,18 @@ async fn api_create_workflow(
         .map_err(api_internal_error)?;
     let workflow = state
         .db
-        .workflows_for_repo(&repo.id)
+        .get_workflow(&workflow_id)
         .map_err(api_internal_error)?
-        .into_iter()
-        .find(|workflow| workflow.name == request.name.trim())
         .ok_or_else(|| api_internal_error("workflow missing after create"))?;
+    record_audit_event(
+        &state,
+        &user,
+        "workflow.create",
+        "workflow",
+        Some(&workflow.id),
+        Some(&workflow.name),
+        json!({ "repo_id": repo.id, "enabled": request.enabled }),
+    )?;
     let schema_report = workflow_schema_report(&state, &workflow).map_err(api_internal_error)?;
     Ok(Json(WorkflowApiView {
         schema_status: schema_report.status,
@@ -1056,7 +1144,7 @@ async fn api_update_workflow(
         return Err(api_bad_request("workflow repo cannot be changed"));
     }
     let parsed = parse_api_workflow_request(&state, &request).map_err(api_bad_request)?;
-    state
+    let version_id = state
         .db
         .update_workflow(
             &workflow.id,
@@ -1072,6 +1160,15 @@ async fn api_update_workflow(
         .get_workflow(&workflow.id)
         .map_err(api_internal_error)?
         .ok_or_else(|| not_found("workflow"))?;
+    record_audit_event(
+        &state,
+        &user,
+        "workflow.update",
+        "workflow",
+        Some(&workflow.id),
+        Some(&workflow.name),
+        json!({ "repo_id": workflow.repo_id, "version_id": version_id, "enabled": request.enabled }),
+    )?;
     let schema_report = workflow_schema_report(&state, &workflow).map_err(api_internal_error)?;
     Ok(Json(WorkflowApiView {
         schema_status: schema_report.status,
@@ -1107,6 +1204,40 @@ async fn api_get_pipeline(
             .map_err(api_internal_error)?
             .ok_or_else(|| not_found("pipeline"))?,
     ))
+}
+
+fn record_audit_event(
+    state: &Arc<AppState>,
+    actor: &User,
+    action: &'static str,
+    target_type: &'static str,
+    target_id: Option<&str>,
+    target_name: Option<&str>,
+    metadata: Value,
+) -> Result<(), Response> {
+    let audit_id = state
+        .db
+        .create_audit_event(
+            Some(actor),
+            action,
+            target_type,
+            target_id,
+            target_name,
+            metadata.clone(),
+        )
+        .map_err(internal_error)?;
+    info!(
+        audit_id = %audit_id,
+        actor_user_id = %actor.id,
+        actor_username = %actor.username,
+        action,
+        target_type,
+        target_id = target_id.unwrap_or(""),
+        target_name = target_name.unwrap_or(""),
+        metadata = %metadata,
+        "audit event recorded"
+    );
+    Ok(())
 }
 
 async fn refresh_single_runner(state: &Arc<AppState>, runner_id: &str) -> Result<(), String> {

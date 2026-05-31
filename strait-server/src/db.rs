@@ -8,6 +8,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params, types::Type};
 use serde_json::Value;
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::models::AuditEvent;
 use crate::models::{
     JobRun, JobRunDetail, JobRunOutput, PipelineRun, PipelineSnapshot, PreviousJobSummary,
     PushEvent, PushEventRef, Repo, Runner, RunnerJobDefinition, RunnerJobInputDefinition,
@@ -46,20 +48,69 @@ impl Database {
         username: &str,
         password_hash: &str,
         role: UserRole,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let id = Uuid::now_v7().to_string();
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
             "INSERT INTO users (id, username, password_hash, role, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, username, password_hash, role.as_str(), now()],
+        )?;
+        Ok(id)
+    }
+
+    pub fn create_audit_event(
+        &self,
+        actor: Option<&User>,
+        action: &str,
+        target_type: &str,
+        target_id: Option<&str>,
+        target_name: Option<&str>,
+        metadata: Value,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let id = Uuid::now_v7().to_string();
+        let metadata_json = serde_json::to_string(&metadata)?;
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "INSERT INTO audit_events (id, actor_user_id, actor_username, action, target_type, target_id, target_name, metadata_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                Uuid::now_v7().to_string(),
-                username,
-                password_hash,
-                role.as_str(),
+                id,
+                actor.map(|user| user.id.as_str()),
+                actor.map(|user| user.username.as_str()),
+                action,
+                target_type,
+                target_id,
+                target_name,
+                metadata_json,
                 now()
             ],
         )?;
-        Ok(())
+        Ok(id)
+    }
+
+    #[cfg(test)]
+    pub fn list_audit_events(&self) -> Result<Vec<AuditEvent>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT id, actor_user_id, actor_username, action, target_type, target_id, target_name, metadata_json, created_at
+             FROM audit_events
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(AuditEvent {
+                id: row.get(0)?,
+                actor_user_id: row.get(1)?,
+                actor_username: row.get(2)?,
+                action: row.get(3)?,
+                target_type: row.get(4)?,
+                target_id: row.get(5)?,
+                target_name: row.get(6)?,
+                metadata_json: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn list_users(&self) -> Result<Vec<User>, Box<dyn std::error::Error>> {
@@ -463,7 +514,7 @@ impl Database {
         trigger_json: &str,
         definition_json: &str,
         job_schemas: &[RunnerJobDefinition],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let workflow_id = Uuid::now_v7().to_string();
         let version_id = Uuid::now_v7().to_string();
         let now = now();
@@ -486,7 +537,7 @@ impl Database {
         )?;
         insert_workflow_version_job_schemas(&tx, &version_id, job_schemas)?;
         tx.commit()?;
-        Ok(())
+        Ok(workflow_id)
     }
 
     pub fn list_workflows(&self) -> Result<Vec<Workflow>, Box<dyn std::error::Error>> {
@@ -606,7 +657,7 @@ impl Database {
         trigger_json: &str,
         definition_json: &str,
         job_schemas: &[RunnerJobDefinition],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let mut conn = self.conn.lock().expect("db mutex poisoned");
         let tx = conn.transaction()?;
         let next_version: i64 = tx.query_row(
@@ -633,7 +684,7 @@ impl Database {
         )?;
         insert_workflow_version_job_schemas(&tx, &version_id, job_schemas)?;
         tx.commit()?;
-        Ok(())
+        Ok(version_id)
     }
 
     pub fn create_pipeline_run(

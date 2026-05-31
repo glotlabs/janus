@@ -6,7 +6,11 @@ use serde_json::{Map, Value, json};
 use strait_lib::{
     FailureCategory, JobOutput, JobStatus as RunnerJobStatus, SUPPORTED_RUNNER_PROTOCOL_VERSIONS,
 };
-use tokio::time::{self, Duration, MissedTickBehavior};
+use tokio::{
+    sync::watch,
+    task::JoinHandle,
+    time::{self, Duration, MissedTickBehavior},
+};
 use tracing::{error, info, warn};
 
 use crate::{
@@ -21,23 +25,43 @@ use crate::{
     state_machine::{self, JobStatus, PipelineStatus},
 };
 
-pub fn spawn(state: Arc<AppState>) {
+pub struct SchedulerHandles {
+    reconcile: JoinHandle<()>,
+    health: JoinHandle<()>,
+}
+
+pub fn spawn(state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> SchedulerHandles {
     let scheduler_state = Arc::clone(&state);
-    tokio::spawn(async move {
+    let mut reconcile_shutdown = shutdown.clone();
+    let reconcile = tokio::spawn(async move {
         let mut interval = time::interval(Duration::from_millis(
             scheduler_state.config.scheduler.poll_interval_ms.max(200),
         ));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
-            if let Err(error) = reconcile(Arc::clone(&scheduler_state)).await {
-                warn!(%error, "scheduler loop failed");
+            tokio::select! {
+                changed = reconcile_shutdown.changed() => {
+                    if changed.is_ok() && *reconcile_shutdown.borrow() {
+                        info!("scheduler reconcile loop shutting down");
+                        break;
+                    }
+                    if changed.is_err() {
+                        warn!("scheduler reconcile shutdown channel closed");
+                        break;
+                    }
+                }
+                _ = interval.tick() => {
+                    if let Err(error) = reconcile(Arc::clone(&scheduler_state)).await {
+                        warn!(%error, "scheduler loop failed");
+                    }
+                }
             }
         }
     });
 
     let health_state = Arc::clone(&state);
-    tokio::spawn(async move {
+    let mut health_shutdown = shutdown;
+    let health = tokio::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(
             health_state
                 .config
@@ -47,12 +71,37 @@ pub fn spawn(state: Arc<AppState>) {
         ));
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
-            if let Err(error) = refresh_runner_health(Arc::clone(&health_state)).await {
-                warn!(%error, "runner health refresh failed");
+            tokio::select! {
+                changed = health_shutdown.changed() => {
+                    if changed.is_ok() && *health_shutdown.borrow() {
+                        info!("runner health loop shutting down");
+                        break;
+                    }
+                    if changed.is_err() {
+                        warn!("runner health shutdown channel closed");
+                        break;
+                    }
+                }
+                _ = interval.tick() => {
+                    if let Err(error) = refresh_runner_health(Arc::clone(&health_state)).await {
+                        warn!(%error, "runner health refresh failed");
+                    }
+                }
             }
         }
     });
+
+    SchedulerHandles { reconcile, health }
+}
+
+pub async fn shutdown(handles: SchedulerHandles) {
+    let results = tokio::join!(handles.reconcile, handles.health);
+    if let Err(error) = results.0 {
+        warn!(%error, "scheduler reconcile task failed during shutdown");
+    }
+    if let Err(error) = results.1 {
+        warn!(%error, "runner health task failed during shutdown");
+    }
 }
 
 pub(crate) async fn reconcile_once(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {

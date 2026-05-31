@@ -14,6 +14,25 @@ CREATE TABLE IF NOT EXISTS sessions (
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS audit_events (
+    id TEXT PRIMARY KEY,
+    actor_user_id TEXT,
+    actor_username TEXT,
+    action TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT,
+    target_name TEXT,
+    metadata_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(actor_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_created_at
+    ON audit_events(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_target
+    ON audit_events(target_type, target_id);
+
 CREATE TABLE IF NOT EXISTS repos (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

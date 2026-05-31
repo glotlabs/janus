@@ -15,6 +15,20 @@ pub struct User {
     pub created_at: String,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEvent {
+    pub id: String,
+    pub actor_user_id: Option<String>,
+    pub actor_username: Option<String>,
+    pub action: String,
+    pub target_type: String,
+    pub target_id: Option<String>,
+    pub target_name: Option<String>,
+    pub metadata_json: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserRole {

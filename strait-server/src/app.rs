@@ -8,6 +8,7 @@ use std::{
     time::{Duration as StdDuration, Instant},
 };
 
+use serde_json::json;
 use tracing::info;
 
 use crate::{
@@ -69,13 +70,30 @@ fn prepare_storage(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
 pub(crate) async fn serve(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
     let address: SocketAddr = state.config.server.listen.parse()?;
-    scheduler::spawn(Arc::clone(&state));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let scheduler_handles = scheduler::spawn(Arc::clone(&state), shutdown_rx);
     let app = web::build_router(state);
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(listen = %address, "strait-server listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let shutdown_tx_for_signal = shutdown_tx.clone();
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            info!("shutdown signal received");
+            let _ = shutdown_tx_for_signal.send(true);
+        })
+        .await;
+    let _ = shutdown_tx.send(true);
+    match tokio::time::timeout(
+        StdDuration::from_secs(30),
+        scheduler::shutdown(scheduler_handles),
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(_) => tracing::warn!("timed out waiting for scheduler shutdown"),
+    }
+    result?;
     Ok(())
 }
 
@@ -127,8 +145,24 @@ pub(crate) fn bootstrap_admin(
     }
     validate_bootstrap_admin(username, password)?;
     let password_hash = hash_password(password)?;
-    db.create_user(username.trim(), &password_hash, UserRole::Admin)?;
-    println!("bootstrapped admin user {}", username.trim());
+    let username = username.trim();
+    let user_id = db.create_user(username, &password_hash, UserRole::Admin)?;
+    db.create_audit_event(
+        None,
+        "user.bootstrap_admin",
+        "user",
+        Some(&user_id),
+        Some(username),
+        json!({ "role": UserRole::Admin.as_str() }),
+    )?;
+    info!(
+        action = "user.bootstrap_admin",
+        target_type = "user",
+        target_id = %user_id,
+        target_name = username,
+        "audit event recorded"
+    );
+    println!("bootstrapped admin user {}", username);
     Ok(())
 }
 
