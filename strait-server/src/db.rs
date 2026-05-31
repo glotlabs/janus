@@ -457,6 +457,7 @@ impl Database {
         enabled: bool,
         trigger_json: &str,
         definition_json: &str,
+        job_schemas_json: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let workflow_id = Uuid::now_v7().to_string();
         let version_id = Uuid::now_v7().to_string();
@@ -468,9 +469,16 @@ impl Database {
             params![workflow_id, repo_id, name, enabled as i64, now,],
         )?;
         tx.execute(
-            "INSERT INTO workflow_versions (id, workflow_id, version, trigger_json, definition_json, created_at)
-             VALUES (?1, ?2, 1, ?3, ?4, ?5)",
-            params![version_id, workflow_id, trigger_json, definition_json, now],
+            "INSERT INTO workflow_versions (id, workflow_id, version, trigger_json, definition_json, job_schemas_json, created_at)
+             VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6)",
+            params![
+                version_id,
+                workflow_id,
+                trigger_json,
+                definition_json,
+                job_schemas_json,
+                now
+            ],
         )?;
         tx.commit()?;
         Ok(())
@@ -592,6 +600,7 @@ impl Database {
         enabled: bool,
         trigger_json: &str,
         definition_json: &str,
+        job_schemas_json: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut conn = self.conn.lock().expect("db mutex poisoned");
         let tx = conn.transaction()?;
@@ -605,14 +614,15 @@ impl Database {
             params![workflow_id, name, enabled as i64],
         )?;
         tx.execute(
-            "INSERT INTO workflow_versions (id, workflow_id, version, trigger_json, definition_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO workflow_versions (id, workflow_id, version, trigger_json, definition_json, job_schemas_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 Uuid::now_v7().to_string(),
                 workflow_id,
                 next_version,
                 trigger_json,
                 definition_json,
+                job_schemas_json,
                 now()
             ],
         )?;
@@ -1291,6 +1301,18 @@ impl Database {
         )?)
     }
 
+    pub fn workflow_job_schemas_json(
+        &self,
+        workflow_version_id: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        Ok(conn.query_row(
+            "SELECT job_schemas_json FROM workflow_versions WHERE id = ?1",
+            [workflow_version_id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn finalize_pipeline_status(
         &self,
         pipeline_id: &str,
@@ -1607,6 +1629,7 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             version INTEGER NOT NULL,
             trigger_json TEXT NOT NULL,
             definition_json TEXT NOT NULL,
+            job_schemas_json TEXT NOT NULL,
             created_at TEXT NOT NULL,
             UNIQUE(workflow_id, version),
             FOREIGN KEY(workflow_id) REFERENCES workflows(id) ON DELETE CASCADE

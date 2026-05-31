@@ -4,8 +4,8 @@ use crate::{
     auth::{hash_password, session_cookie},
     git,
     models::{
-        Repo, User, WorkflowDefinition, WorkflowInputBinding, WorkflowJobDefinition,
-        WorkflowTrigger,
+        Repo, RunnerJobSchema, User, WorkflowDefinition, WorkflowInputBinding,
+        WorkflowJobDefinition, WorkflowTrigger,
     },
     scheduler,
 };
@@ -1344,21 +1344,21 @@ fn create_workflow_direct(state: &Arc<crate::app::AppState>, repo_id: &str, runn
         branches: vec!["main".to_string()],
     })
     .expect("trigger");
-    let definition = serde_json::to_string(&WorkflowDefinition {
-        jobs: vec![WorkflowJobDefinition {
-            runner_id: runner_id.to_string(),
-            runner_job_name: "build-app".to_string(),
-            inputs: BTreeMap::from([
-                ("commit".to_string(), WorkflowInputBinding::Commit),
-                ("branch".to_string(), WorkflowInputBinding::Branch),
-            ]),
-            allow_failure: false,
-        }],
-    })
-    .expect("definition");
+    let jobs = vec![WorkflowJobDefinition {
+        runner_id: runner_id.to_string(),
+        runner_job_name: "build-app".to_string(),
+        inputs: BTreeMap::from([
+            ("commit".to_string(), WorkflowInputBinding::Commit),
+            ("branch".to_string(), WorkflowInputBinding::Branch),
+        ]),
+        allow_failure: false,
+    }];
+    let definition =
+        serde_json::to_string(&WorkflowDefinition { jobs: jobs.clone() }).expect("definition");
+    let job_schemas_json = workflow_job_schemas_json(state, &jobs);
     state
         .db
-        .create_workflow(repo_id, "wf", true, &trigger, &definition)
+        .create_workflow(repo_id, "wf", true, &trigger, &definition, &job_schemas_json)
         .expect("workflow");
 }
 
@@ -1372,15 +1372,47 @@ fn create_workflow_with_jobs_direct(
         branches: vec!["main".to_string()],
     })
     .expect("trigger");
-    let definition = serde_json::to_string(&WorkflowDefinition { jobs }).expect("definition");
+    let definition = serde_json::to_string(&WorkflowDefinition { jobs: jobs.clone() })
+        .expect("definition");
+    let job_schemas_json = workflow_job_schemas_json(state, &jobs);
     state
         .db
-        .create_workflow(repo_id, "wf", true, &trigger, &definition)
+        .create_workflow(
+            repo_id,
+            "wf",
+            true,
+            &trigger,
+            &definition,
+            &job_schemas_json,
+        )
         .expect("workflow");
 }
 
 fn binding(value: JsonValue) -> WorkflowInputBinding {
     serde_json::from_value(value).expect("workflow input binding")
+}
+
+fn workflow_job_schemas_json(
+    state: &Arc<crate::app::AppState>,
+    jobs: &[WorkflowJobDefinition],
+) -> String {
+    let schemas = jobs
+        .iter()
+        .map(|job| {
+            state
+                .db
+                .list_runner_jobs(&job.runner_id)
+                .expect("runner jobs")
+                .into_iter()
+                .find(|(name, _)| name == &job.runner_job_name)
+                .map(|(_, definition_json)| {
+                    serde_json::from_str::<RunnerJobSchema>(&definition_json)
+                        .expect("runner job schema")
+                })
+                .expect("runner job schema for workflow job")
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&schemas).expect("workflow job schemas")
 }
 
 fn write_test_config(dir: &Path) -> PathBuf {

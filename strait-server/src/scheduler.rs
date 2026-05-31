@@ -210,17 +210,22 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
             .db
             .workflow_definition_json(&pipeline.workflow_version_id)?;
         let definition: WorkflowDefinition = serde_json::from_str(&definition_json)?;
+        let job_schemas_json = state
+            .db
+            .workflow_job_schemas_json(&pipeline.workflow_version_id)?;
+        let job_schemas: Vec<RunnerJobSchema> = serde_json::from_str(&job_schemas_json)?;
         let Some(job_definition) = definition.jobs.get(job.job_index as usize) else {
             continue;
         };
-        let runner_job_definition =
-            load_runner_job_definition(Arc::clone(&state), &job.runner_id, &job.runner_job_name)?;
+        let Some(runner_job_definition) = job_schemas.get(job.job_index as usize) else {
+            continue;
+        };
         let payload = resolve_job_inputs(
             Arc::clone(&state),
             &pipeline,
             &job.id,
             job_definition,
-            &runner_job_definition,
+            runner_job_definition,
         )
         .await?;
         state
@@ -543,23 +548,6 @@ fn find_job_run_id(
         .find(|item| item.run.job_index == job_index as i64)
         .map(|item| item.run.id)
         .ok_or_else(|| format!("missing upstream job-{}", job_index + 1).into())
-}
-
-fn load_runner_job_definition(
-    state: Arc<AppState>,
-    runner_id: &str,
-    runner_job_name: &str,
-) -> Result<RunnerJobSchema, Box<dyn std::error::Error>> {
-    let definition_json = state
-        .db
-        .list_runner_jobs(runner_id)?
-        .into_iter()
-        .find(|(name, _)| name == runner_job_name)
-        .map(|(_, definition_json)| definition_json)
-        .ok_or_else(|| {
-            format!("missing runner job definition for {runner_id}/{runner_job_name}")
-        })?;
-    Ok(serde_json::from_str(&definition_json)?)
 }
 
 async fn ensure_source_artifact(

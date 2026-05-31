@@ -583,6 +583,7 @@ async fn create_workflow(
             true,
             &parsed.trigger_json,
             &parsed.definition_json,
+            &parsed.job_schemas_json,
         )
         .map_err(internal_error)?;
     Ok(Redirect::to("/workflows"))
@@ -608,6 +609,7 @@ async fn update_workflow(
             true,
             &parsed.trigger_json,
             &parsed.definition_json,
+            &parsed.job_schemas_json,
         )
         .map_err(internal_error)?;
     Ok(Redirect::to(&format!("/workflows/{}", workflow.id)))
@@ -959,6 +961,7 @@ async fn api_create_workflow(
             request.enabled,
             &parsed.trigger_json,
             &parsed.definition_json,
+            &parsed.job_schemas_json,
         )
         .map_err(internal_error)?;
     let workflow = state
@@ -997,6 +1000,7 @@ async fn api_update_workflow(
             request.enabled,
             &parsed.trigger_json,
             &parsed.definition_json,
+            &parsed.job_schemas_json,
         )
         .map_err(internal_error)?;
     Ok(Json(
@@ -1072,6 +1076,7 @@ async fn refresh_single_runner(state: &Arc<AppState>, runner_id: &str) -> Result
 struct ParsedWorkflow {
     trigger_json: String,
     definition_json: String,
+    job_schemas_json: String,
 }
 
 fn display_status(status: &str) -> String {
@@ -1113,10 +1118,11 @@ fn parse_workflow_form(
     let jobs = parse_workflow_form_jobs(&form.jobs_json)?;
     let definition = WorkflowDefinition { jobs };
     definition.validate().map_err(bad_request)?;
-    validate_workflow_runners(state, &definition)?;
+    let job_schemas = validate_workflow_runners(state, &definition)?;
     Ok(ParsedWorkflow {
         trigger_json: serde_json::to_string(&trigger).map_err(internal_error_text)?,
         definition_json: serde_json::to_string(&definition).map_err(internal_error_text)?,
+        job_schemas_json: serde_json::to_string(&job_schemas).map_err(internal_error_text)?,
     })
 }
 
@@ -1146,10 +1152,11 @@ fn parse_api_workflow_request(
         .collect::<Vec<_>>();
     let definition = WorkflowDefinition { jobs };
     definition.validate().map_err(bad_request)?;
-    validate_workflow_runners(state, &definition)?;
+    let job_schemas = validate_workflow_runners(state, &definition)?;
     Ok(ParsedWorkflow {
         trigger_json: serde_json::to_string(&trigger).map_err(internal_error_text)?,
         definition_json: serde_json::to_string(&definition).map_err(internal_error_text)?,
+        job_schemas_json: serde_json::to_string(&job_schemas).map_err(internal_error_text)?,
     })
 }
 
@@ -1183,7 +1190,7 @@ fn parse_workflow_form_jobs(input: &str) -> Result<Vec<WorkflowJobDefinition>, R
 fn validate_workflow_runners(
     state: &Arc<AppState>,
     definition: &WorkflowDefinition,
-) -> Result<(), Response> {
+) -> Result<Vec<RunnerJobSchema>, Response> {
     let mut runner_job_defs = BTreeMap::new();
     for (job_index, job) in definition.jobs.iter().enumerate() {
         let runner = state
@@ -1299,7 +1306,12 @@ fn validate_workflow_runners(
             }
         }
     }
-    Ok(())
+    Ok(definition
+        .jobs
+        .iter()
+        .enumerate()
+        .filter_map(|(job_index, _)| runner_job_defs.get(&job_index).cloned())
+        .collect())
 }
 
 fn value_matches_input_kind(value: &Value, expected_kind: &str) -> bool {
