@@ -4,14 +4,14 @@ use std::{
 };
 
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, params, types::Type};
+use rusqlite::{Connection, OptionalExtension, Row, params, types::Type};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::models::{
     JobRun, JobRunDetail, JobRunOutput, PipelineRun, PipelineSnapshot, PreviousJobSummary,
     PushEvent, PushEventRef, Repo, Runner, RunnerJobDefinition, RunnerJobInputDefinition,
-    RunnerJobOutputDefinition, ServerArtifact, User, Workflow, WorkflowJobOutcomePolicy,
+    RunnerJobOutputDefinition, ServerArtifact, User, UserRole, Workflow, WorkflowJobOutcomePolicy,
 };
 use crate::state_machine::{self, JobStatus};
 use strait_lib::{Concurrency, InputType, JobOutputMetadata, OutputType};
@@ -45,7 +45,7 @@ impl Database {
         &self,
         username: &str,
         password_hash: &str,
-        role: &str,
+        role: UserRole,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let now = now();
         let conn = self.conn.lock().expect("db mutex poisoned");
@@ -57,7 +57,7 @@ impl Database {
                 Uuid::now_v7().to_string(),
                 username,
                 password_hash,
-                role,
+                role.as_str(),
                 now
             ],
         )?;
@@ -68,7 +68,7 @@ impl Database {
         &self,
         username: &str,
         password_hash: &str,
-        role: &str,
+        role: UserRole,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
@@ -78,7 +78,7 @@ impl Database {
                 Uuid::now_v7().to_string(),
                 username,
                 password_hash,
-                role,
+                role.as_str(),
                 now()
             ],
         )?;
@@ -93,29 +93,11 @@ impl Database {
             Ok(User {
                 id: row.get(0)?,
                 username: row.get(1)?,
-                role: row.get(2)?,
+                role: user_role_from_row(row, 2)?,
                 created_at: row.get(3)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
-    pub fn get_user(&self, user_id: &str) -> Result<Option<User>, Box<dyn std::error::Error>> {
-        let conn = self.conn.lock().expect("db mutex poisoned");
-        Ok(conn
-            .query_row(
-                "SELECT id, username, role, created_at FROM users WHERE id = ?1",
-                [user_id],
-                |row| {
-                    Ok(User {
-                        id: row.get(0)?,
-                        username: row.get(1)?,
-                        role: row.get(2)?,
-                        created_at: row.get(3)?,
-                    })
-                },
-            )
-            .optional()?)
     }
 
     pub fn get_user_credentials(
@@ -132,7 +114,7 @@ impl Database {
                         User {
                             id: row.get(0)?,
                             username: row.get(1)?,
-                            role: row.get(2)?,
+                            role: user_role_from_row(row, 2)?,
                             created_at: row.get(3)?,
                         },
                         row.get(4)?,
@@ -193,7 +175,7 @@ impl Database {
                     Ok(User {
                         id: row.get(0)?,
                         username: row.get(1)?,
-                        role: row.get(2)?,
+                        role: user_role_from_row(row, 2)?,
                         created_at: row.get(3)?,
                     })
                 },
@@ -203,7 +185,6 @@ impl Database {
 
     pub fn create_repo(
         &self,
-        owner_id: &str,
         name: &str,
         normalized_name: &str,
         bare_path: &str,
@@ -212,9 +193,9 @@ impl Database {
         let id = Uuid::now_v7().to_string();
         let conn = self.conn.lock().expect("db mutex poisoned");
         conn.execute(
-            "INSERT INTO repos (id, owner_id, name, normalized_name, bare_path, default_branch, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, owner_id, name, normalized_name, bare_path, default_branch, now()],
+            "INSERT INTO repos (id, name, normalized_name, bare_path, default_branch, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, name, normalized_name, bare_path, default_branch, now()],
         )?;
         Ok(id)
     }
@@ -222,21 +203,18 @@ impl Database {
     pub fn list_repos(&self) -> Result<Vec<Repo>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(
-            "SELECT r.id, r.owner_id, u.username, r.name, r.normalized_name, r.bare_path, r.default_branch, r.created_at
-             FROM repos r
-             JOIN users u ON u.id = r.owner_id
-             ORDER BY u.username, r.normalized_name",
+            "SELECT id, name, normalized_name, bare_path, default_branch, created_at
+             FROM repos
+             ORDER BY normalized_name",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(Repo {
                 id: row.get(0)?,
-                owner_id: row.get(1)?,
-                owner_username: row.get(2)?,
-                name: row.get(3)?,
-                normalized_name: row.get(4)?,
-                bare_path: row.get(5)?,
-                default_branch: row.get(6)?,
-                created_at: row.get(7)?,
+                name: row.get(1)?,
+                normalized_name: row.get(2)?,
+                bare_path: row.get(3)?,
+                default_branch: row.get(4)?,
+                created_at: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -244,23 +222,23 @@ impl Database {
 
     pub fn get_repo(&self, repo_id: &str) -> Result<Option<Repo>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
-        Ok(conn.query_row(
-            "SELECT r.id, r.owner_id, u.username, r.name, r.normalized_name, r.bare_path, r.default_branch, r.created_at
-             FROM repos r JOIN users u ON u.id = r.owner_id WHERE r.id = ?1",
-            [repo_id],
-            |row| {
-                Ok(Repo {
-                    id: row.get(0)?,
-                    owner_id: row.get(1)?,
-                    owner_username: row.get(2)?,
-                    name: row.get(3)?,
-                    normalized_name: row.get(4)?,
-                    bare_path: row.get(5)?,
-                    default_branch: row.get(6)?,
-                    created_at: row.get(7)?,
-                })
-            },
-        ).optional()?)
+        Ok(conn
+            .query_row(
+                "SELECT id, name, normalized_name, bare_path, default_branch, created_at
+             FROM repos WHERE id = ?1",
+                [repo_id],
+                |row| {
+                    Ok(Repo {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        normalized_name: row.get(2)?,
+                        bare_path: row.get(3)?,
+                        default_branch: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn create_push_event(
@@ -1855,6 +1833,20 @@ fn load_workflow_version_job_schema(
         timeout_seconds: timeout_seconds as u64,
         inputs,
         outputs,
+    })
+}
+
+fn user_role_from_row(row: &Row<'_>, index: usize) -> rusqlite::Result<UserRole> {
+    let raw = row.get::<_, String>(index)?;
+    UserRole::parse(&raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown user role: {raw}"),
+            )),
+        )
     })
 }
 

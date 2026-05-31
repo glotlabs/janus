@@ -1,6 +1,6 @@
 use maud::{Markup, html};
 
-use crate::models::{Repo, User};
+use crate::models::Repo;
 
 use super::components::{badge, csrf_input, form_error, layout, page_intro};
 
@@ -11,13 +11,10 @@ pub(crate) struct RepoCard {
 
 pub(crate) struct RepoFormView {
     pub name: String,
-    pub owner_id: String,
     pub default_branch: String,
 }
 
 pub(crate) fn repos_page(
-    current_user: &User,
-    users: Vec<User>,
     repos: Vec<RepoCard>,
     csrf: &str,
     error: Option<&str>,
@@ -40,26 +37,8 @@ pub(crate) fn repos_page(
                 form method="post" action="/repos" class="stack-lg" {
                     (csrf_input(csrf))
                     (form_error(error))
-                    div class="form-grid form-grid-3" {
+                    div class="form-grid form-grid-2" {
                         label { span { "Name" } input name="name" value=(form.name) maxlength="80" required data-validate data-trim-required="true"; }
-                        @if current_user.role == "admin" {
-                            label {
-                                span { "Owner" }
-                                select name="owner_id" required {
-                                    @for candidate in &users {
-                                        option value=(candidate.id) selected[candidate.id == form.owner_id] {
-                                            (candidate.username)
-                                        }
-                                    }
-                                }
-                            }
-                        } @else {
-                            input type="hidden" name="owner_id" value=(current_user.id);
-                            label {
-                                span { "Owner" }
-                                input value=(current_user.username) disabled;
-                            }
-                        }
                         label {
                             span { "Default branch" }
                             input name="default_branch" value=(form.default_branch) maxlength="255" required data-validate data-trim-required="true" data-no-whitespace="true";
@@ -82,7 +61,7 @@ pub(crate) fn repos_page(
                         article class="entity-card" {
                             div class="entity-head" {
                                 div {
-                                    h3 { (card.repo.owner_username) "/" (card.repo.name) }
+                                    h3 { (card.repo.name) }
                                     p class="muted" {
                                         "Default branch: " code { (card.repo.default_branch) }
                                     }

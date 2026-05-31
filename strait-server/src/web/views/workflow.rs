@@ -117,7 +117,7 @@ pub(crate) fn workflow_detail_page(
                     div {
                         div class="eyebrow" { "Editing" }
                         h2 { (workflow.name) }
-                        p class="muted" { "Repository: " (repo.owner_username) "/" (repo.name) }
+                        p class="muted" { "Repository: " (repo.name) }
                     }
                     div class="badge-row" {
                         (badge(schema_report.status.as_str(), schema_report.status.tone()))
@@ -192,7 +192,7 @@ pub(crate) fn repo_selector(repos: &[Repo]) -> Markup {
     html! {
         select name="repo_id" required {
             @for repo in repos {
-                option value=(repo.id) { (repo.owner_username) "/" (repo.name) }
+                option value=(repo.id) { (repo.name) }
             }
         }
     }
@@ -201,7 +201,7 @@ pub(crate) fn repo_selector(repos: &[Repo]) -> Markup {
 pub(crate) fn fixed_repo_field(workflow: &Workflow, repo: &Repo) -> Markup {
     html! {
         input type="hidden" name="repo_id" value=(workflow.repo_id);
-        input value=(format!("{}/{}", repo.owner_username, repo.name)) disabled;
+        input value=(repo.name) disabled;
     }
 }
 

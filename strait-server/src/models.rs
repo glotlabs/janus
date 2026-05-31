@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,15 +11,44 @@ use strait_lib::JobOutputMetadata;
 pub struct User {
     pub id: String,
     pub username: String,
-    pub role: String,
+    pub role: UserRole,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserRole {
+    Admin,
+}
+
+impl UserRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+
+    pub fn is_admin(self) -> bool {
+        matches!(self, Self::Admin)
+    }
+}
+
+impl fmt::Display for UserRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repo {
     pub id: String,
-    pub owner_id: String,
-    pub owner_username: String,
     pub name: String,
     pub normalized_name: String,
     pub bare_path: String,

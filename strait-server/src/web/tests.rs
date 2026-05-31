@@ -4,7 +4,7 @@ use crate::{
     auth::{hash_password, session_cookie},
     git,
     models::{
-        Repo, RunnerJobDefinition, User, WorkflowDefinition, WorkflowInputBinding,
+        Repo, RunnerJobDefinition, User, UserRole, WorkflowDefinition, WorkflowInputBinding,
         WorkflowJobDefinition, WorkflowJobOutcomePolicy, WorkflowTrigger,
     },
     scheduler,
@@ -48,8 +48,8 @@ async fn repo_creation_installs_hook() {
                 .header("content-type", "application/x-www-form-urlencoded")
                 .header("cookie", cookie)
                 .body(Body::from(format!(
-                    "csrf_token={}&owner_id={}&name=demo&default_branch=main",
-                    token, user.id
+                    "csrf_token={}&name=demo&default_branch=main",
+                    token
                 )))
                 .expect("request"),
         )
@@ -564,7 +564,6 @@ async fn repo_form_validation_rerenders_form_with_submitted_values() {
     let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
     let body = form_urlencoded::Serializer::new(String::new())
         .append_pair("csrf_token", &token)
-        .append_pair("owner_id", &fixture.user.id)
         .append_pair("name", "demo-invalid")
         .append_pair("default_branch", "bad branch")
         .finish();
@@ -589,6 +588,26 @@ async fn repo_form_validation_rerenders_form_with_submitted_values() {
     assert!(html.contains("default branch is invalid"));
     assert!(html.contains("value=\"demo-invalid\""));
     assert!(html.contains("Create repository"));
+}
+
+#[tokio::test]
+async fn pipeline_events_requires_authorized_pipeline() {
+    let fixture = test_fixture().await;
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get("/pipelines/missing/events")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -996,9 +1015,9 @@ fn hook_ingestion_is_idempotent() {
     let hash = hash_password("password123").expect("hash");
     state
         .db
-        .create_user("alice", &hash, "developer")
+        .create_user("alice", &hash, UserRole::Admin)
         .expect("user");
-    let user = state
+    let _user = state
         .db
         .get_user_credentials("alice")
         .expect("user")
@@ -1007,7 +1026,6 @@ fn hook_ingestion_is_idempotent() {
     let repo_id = state
         .db
         .create_repo(
-            &user.id,
             "demo",
             "demo",
             &dir.join("repos/demo.git").display().to_string(),
@@ -2067,7 +2085,7 @@ async fn test_fixture_with_runner(base_url: &str) -> TestFixture {
     let username = format!("alice-{}", Uuid::now_v7());
     state
         .db
-        .create_user(&username, &hash, "developer")
+        .create_user(&username, &hash, UserRole::Admin)
         .expect("user");
     let user = state
         .db
@@ -2113,11 +2131,11 @@ async fn test_fixture_with_runner(base_url: &str) -> TestFixture {
     }
 }
 
-fn create_repo_direct(state: &Arc<crate::app::AppState>, user: &User, name: &str) -> Repo {
+fn create_repo_direct(state: &Arc<crate::app::AppState>, _user: &User, name: &str) -> Repo {
     let path = PathBuf::from(&state.config.repos_dir).join(format!("{name}.git"));
     let repo_id = state
         .db
-        .create_repo(&user.id, name, name, &path.display().to_string(), "main")
+        .create_repo(name, name, &path.display().to_string(), "main")
         .expect("repo");
     state.db.get_repo(&repo_id).expect("repo").unwrap()
 }

@@ -13,7 +13,10 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use crate::{app::AppState, models::User};
+use crate::{
+    app::AppState,
+    models::{User, UserRole},
+};
 
 const SESSION_COOKIE: &str = "strait_session";
 type HmacSha256 = Hmac<Sha256>;
@@ -78,6 +81,9 @@ where
             .user_for_session(&session)
             .map_err(|_| AuthRedirect)?
             .ok_or(AuthRedirect)?;
+        if user.role != UserRole::Admin {
+            return Err(AuthRedirect);
+        }
         Ok(Self(user))
     }
 }
@@ -93,7 +99,7 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let user = CurrentUser::from_request_parts(parts, state).await?.0;
-        if user.role != "admin" {
+        if !user.role.is_admin() {
             return Err(AuthRedirect);
         }
         Ok(Self)

@@ -11,7 +11,7 @@ use tracing::info;
 
 use crate::{
     artifacts::ArtifactStore, auth::hash_password, config::Config, db::Database, git,
-    runner::RunnerClient, runner_auth::RunnerSigner, scheduler, web,
+    models::UserRole, runner::RunnerClient, runner_auth::RunnerSigner, scheduler, web,
 };
 
 #[derive(Clone)]
@@ -46,7 +46,11 @@ pub(crate) fn build_state(
     let db = Database::open(&config.database.path)?;
     db.cleanup_expired_sessions()?;
     let admin_hash = hash_password(&config.auth.bootstrap_admin.password)?;
-    db.ensure_user(&config.auth.bootstrap_admin.username, &admin_hash, "admin")?;
+    db.ensure_user(
+        &config.auth.bootstrap_admin.username,
+        &admin_hash,
+        UserRole::Admin,
+    )?;
     let runner_signer = RunnerSigner::load_or_generate(&config.runner_auth)?;
 
     Ok(Arc::new(AppState {
@@ -102,6 +106,7 @@ pub(crate) fn seed_user(
     role: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let password_hash = hash_password(password)?;
+    let role = UserRole::parse(role).ok_or_else(|| format!("unknown user role: {role}"))?;
     state.db.create_user(username, &password_hash, role)?;
     Ok(())
 }
@@ -240,7 +245,7 @@ impl Cli {
                 index += 2;
                 let mut username = None;
                 let mut password = None;
-                let mut role = Some("developer".to_string());
+                let mut role = Some("admin".to_string());
                 while index < args.len() {
                     match args[index].as_str() {
                         "--username" => {
@@ -267,7 +272,7 @@ impl Cli {
                 Command::AdminSeedUser {
                     username: username.ok_or("missing --username")?,
                     password: password.ok_or("missing --password")?,
-                    role: role.unwrap_or_else(|| "developer".to_string()),
+                    role: role.unwrap_or_else(|| "admin".to_string()),
                 }
             }
             Some("admin") if args.get(index + 1).map(String::as_str) == Some("runner-key") => {

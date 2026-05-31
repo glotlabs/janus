@@ -7,7 +7,6 @@ use super::components::{badge, csrf_input, form_error, layout, layout_public, pa
 #[derive(Default)]
 pub(crate) struct CreateUserFormView {
     pub username: String,
-    pub role: String,
 }
 
 pub(crate) fn login_page(error: Option<&str>, username: &str) -> Markup {
@@ -64,8 +63,7 @@ pub(crate) fn users_page(
                         label {
                             span { "Role" }
                             select name="role" required {
-                                option value="developer" selected[form.role != "admin"] { "developer" }
-                                option value="admin" selected[form.role == "admin"] { "admin" }
+                                option value="admin" selected { "admin" }
                             }
                         }
                     }
@@ -90,7 +88,7 @@ pub(crate) fn users_page(
                             @for item in users {
                                 tr {
                                     td { strong { (item.username) } }
-                                    td { (badge(&item.role, "neutral")) }
+                                    td { (badge(item.role.as_str(), "neutral")) }
                                 }
                             }
                         }

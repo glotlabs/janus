@@ -32,9 +32,9 @@ use crate::{
     },
     git,
     models::{
-        self, PipelineRun, Repo, RunnerJobDefinition, RunnerJobInputDefinition, User, Workflow,
-        WorkflowDefinition, WorkflowInputBinding, WorkflowJobDefinition, WorkflowJobOutcomePolicy,
-        WorkflowTrigger, parse_job_output_binding,
+        self, PipelineRun, Repo, RunnerJobDefinition, RunnerJobInputDefinition, User, UserRole,
+        Workflow, WorkflowDefinition, WorkflowInputBinding, WorkflowJobDefinition,
+        WorkflowJobOutcomePolicy, WorkflowTrigger, parse_job_output_binding,
     },
     scheduler,
     schema_diff::{WorkflowSchemaDiff, workflow_schema_report},
@@ -288,7 +288,6 @@ struct CreateUserForm {
 #[derive(Deserialize)]
 struct CreateRepoForm {
     csrf_token: String,
-    owner_id: String,
     name: String,
     default_branch: String,
 }
@@ -353,12 +352,12 @@ async fn create_user(
         .map_err(|error| render_users_form_error(&state, &user, &form, error))?;
     validate_password(&form.password)
         .map_err(|error| render_users_form_error(&state, &user, &form, error))?;
-    validate_role(&form.role)
+    let role = validate_role(&form.role)
         .map_err(|error| render_users_form_error(&state, &user, &form, error))?;
     let hash = hash_password(&form.password).map_err(internal_error_text)?;
     state
         .db
-        .create_user(form.username.trim(), &hash, form.role.trim())
+        .create_user(form.username.trim(), &hash, role)
         .map_err(internal_error)?;
     Ok(Redirect::to("/users"))
 }
@@ -368,23 +367,19 @@ async fn repos_page(
     State(state): State<Arc<AppState>>,
 ) -> Result<Markup, Response> {
     let repos = state.db.list_repos().map_err(internal_error)?;
-    let users = state.db.list_users().map_err(internal_error)?;
     let csrf = csrf_token(&state, &user);
     let repo_cards = repos
         .into_iter()
-        .filter(|repo| can_view_repo(&user, repo))
         .map(|repo| repo_view::RepoCard {
             clone_url: repo_clone_url(&state, &repo),
             repo,
         })
         .collect::<Vec<_>>();
     Ok(repo_view::repos_page(
-        &user,
-        users,
         repo_cards,
         &csrf,
         None,
-        repo_form_view(None, &user),
+        repo_form_view(None),
     ))
 }
 
@@ -394,23 +389,6 @@ async fn create_repo(
     Form(form): Form<CreateRepoForm>,
 ) -> Result<Redirect, Response> {
     verify_csrf(&state, &user, &form.csrf_token)?;
-    let owner_id = form.owner_id.trim();
-    if owner_id.is_empty() {
-        return Err(render_repos_form_error(
-            &state,
-            &user,
-            &form,
-            "owner is required",
-        ));
-    }
-    if user.role != "admin" && owner_id != user.id {
-        return Err(forbidden("developers can only create their own repos"));
-    }
-    let owner = state
-        .db
-        .get_user(owner_id)
-        .map_err(internal_error)?
-        .ok_or_else(|| bad_request("owner not found"))?;
     if form.name.trim().chars().count() > 80 {
         return Err(render_repos_form_error(
             &state,
@@ -427,7 +405,6 @@ async fn create_repo(
     let repo_id = state
         .db
         .create_repo(
-            &owner.id,
             form.name.trim(),
             &normalized,
             &bare_path.display().to_string(),
@@ -713,7 +690,7 @@ async fn run_workflow(
 }
 
 async fn pipelines_page(
-    CurrentUser(user): CurrentUser,
+    CurrentUser(_user): CurrentUser,
     State(state): State<Arc<AppState>>,
 ) -> Result<Markup, Response> {
     let pipelines = state.db.list_pipeline_runs().map_err(internal_error)?;
@@ -726,7 +703,7 @@ async fn pipelines_page(
         .into_iter()
         .filter_map(|pipeline| {
             let repo = repo_by_id.get(&pipeline.repo_id)?;
-            can_view_repo(&user, repo).then_some((pipeline, repo.clone()))
+            Some((pipeline, repo.clone()))
         })
         .collect::<Vec<_>>();
     Ok(pipeline_view::pipelines_page(visible_pipelines))
@@ -750,12 +727,17 @@ async fn pipeline_detail(
 }
 
 async fn pipeline_events(
-    _: CurrentUser,
+    CurrentUser(user): CurrentUser,
     State(state): State<Arc<AppState>>,
     AxumPath(pipeline_id): AxumPath<String>,
-) -> Sse<
-    impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+) -> Result<
+    Sse<
+        impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    Response,
 > {
+    let pipeline = authorized_pipeline(&state, &user, &pipeline_id)?;
+    let pipeline_id = pipeline.id;
     let stream = async_stream::stream! {
         loop {
             let payload = match state.db.pipeline_snapshot(&pipeline_id) {
@@ -767,7 +749,7 @@ async fn pipeline_events(
             time::sleep(std::time::Duration::from_secs(2)).await;
         }
     };
-    Sse::new(stream)
+    Ok(Sse::new(stream))
 }
 
 async fn rerun_pipeline(
@@ -833,7 +815,6 @@ struct ApiErrorBody {
 }
 #[derive(Deserialize)]
 struct ApiRepoCreateRequest {
-    owner_id: Option<String>,
     name: String,
     default_branch: String,
     csrf_token: String,
@@ -886,21 +867,6 @@ async fn api_create_repo(
 ) -> Result<Json<Repo>, Response> {
     verify_csrf(&state, &user, &request.csrf_token)
         .map_err(|_| api_forbidden("csrf validation failed"))?;
-    let owner_id = request
-        .owner_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| user.id.clone());
-    if user.role != "admin" && owner_id != user.id {
-        return Err(api_forbidden("developers can only create their own repos"));
-    }
-    let owner = state
-        .db
-        .get_user(&owner_id)
-        .map_err(api_internal_error)?
-        .ok_or_else(|| api_bad_request("owner not found"))?;
     if request.name.trim().chars().count() > 80 {
         return Err(api_bad_request(
             "repository name must be 80 characters or fewer",
@@ -912,7 +878,6 @@ async fn api_create_repo(
     let repo_id = state
         .db
         .create_repo(
-            &owner.id,
             request.name.trim(),
             &normalized,
             &bare_path.display().to_string(),
@@ -1645,12 +1610,9 @@ fn workflow_form_view_from_submission(
     }
 }
 
-fn repo_form_view(form: Option<&CreateRepoForm>, user: &User) -> repo_view::RepoFormView {
+fn repo_form_view(form: Option<&CreateRepoForm>) -> repo_view::RepoFormView {
     repo_view::RepoFormView {
         name: form.map(|form| form.name.clone()).unwrap_or_default(),
-        owner_id: form
-            .map(|form| form.owner_id.clone())
-            .unwrap_or_else(|| user.id.clone()),
         default_branch: form
             .map(|form| form.default_branch.clone())
             .unwrap_or_else(|| "main".to_string()),
@@ -1684,7 +1646,6 @@ fn render_users_form_error(
             Some(&error),
             user_view::CreateUserFormView {
                 username: form.username.clone(),
-                role: form.role.clone(),
             },
         )),
         Err(error) => internal_error(error),
@@ -1699,22 +1660,18 @@ fn render_repos_form_error(
 ) -> Response {
     let result = (|| {
         let repos = state.db.list_repos().map_err(internal_error)?;
-        let users = state.db.list_users().map_err(internal_error)?;
         let repo_cards = repos
             .into_iter()
-            .filter(|repo| can_view_repo(user, repo))
             .map(|repo| repo_view::RepoCard {
                 clone_url: repo_clone_url(state, &repo),
                 repo,
             })
             .collect::<Vec<_>>();
         Ok::<_, Response>(repo_view::repos_page(
-            user,
-            users,
             repo_cards,
             &csrf_token(state, user),
             Some(&error.to_string()),
-            repo_form_view(Some(form), user),
+            repo_form_view(Some(form)),
         ))
     })();
     match result {
@@ -1857,26 +1814,23 @@ fn runners_with_jobs(
 }
 
 fn visible_repos_for_user(state: &Arc<AppState>, user: &User) -> Result<Vec<Repo>, Response> {
-    Ok(state
-        .db
-        .list_repos()
-        .map_err(internal_error)?
-        .into_iter()
-        .filter(|repo| can_view_repo(user, repo))
-        .collect())
+    require_admin(user)?;
+    state.db.list_repos().map_err(internal_error)
 }
-fn can_view_repo(user: &User, repo: &Repo) -> bool {
-    user.role == "admin" || repo.owner_id == user.id
+fn require_admin(user: &User) -> Result<(), Response> {
+    if user.role.is_admin() {
+        Ok(())
+    } else {
+        Err(forbidden("admin role required"))
+    }
 }
 fn authorized_repo(state: &Arc<AppState>, user: &User, repo_id: &str) -> Result<Repo, Response> {
+    require_admin(user)?;
     let repo = state
         .db
         .get_repo(repo_id)
         .map_err(internal_error)?
         .ok_or_else(|| not_found("repo"))?;
-    if !can_view_repo(user, &repo) {
-        return Err(forbidden("repo access denied"));
-    }
     Ok(repo)
 }
 fn authorized_workflow(
@@ -1913,9 +1867,8 @@ fn authorized_pipeline(
 }
 fn repo_clone_url(state: &Arc<AppState>, repo: &Repo) -> String {
     format!(
-        "ssh://git@{}/{}/{}",
+        "ssh://git@{}/{}",
         state.config.server.public_base_url.trim_end_matches('/'),
-        repo.owner_username,
         repo.name
     )
 }
@@ -1942,12 +1895,8 @@ fn validate_password(password: &str) -> Result<(), String> {
         Ok(())
     }
 }
-fn validate_role(role: &str) -> Result<(), String> {
-    if matches!(role, "admin" | "developer") {
-        Ok(())
-    } else {
-        Err("role must be admin or developer".to_string())
-    }
+fn validate_role(role: &str) -> Result<UserRole, String> {
+    UserRole::parse(role).ok_or_else(|| "role must be admin".to_string())
 }
 fn validate_branch_name(branch: &str) -> Result<(), String> {
     if branch.trim().is_empty() || branch.contains(' ') {
@@ -2048,9 +1997,6 @@ fn api_bad_request(error: impl std::fmt::Display) -> Response {
 }
 fn api_forbidden(error: impl std::fmt::Display) -> Response {
     api_error(StatusCode::FORBIDDEN, "forbidden", error)
-}
-fn api_internal_error(error: impl std::fmt::Display) -> Response {
-    api_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", error)
 }
 fn forbidden(error: impl std::fmt::Display) -> Response {
     (StatusCode::FORBIDDEN, error.to_string()).into_response()

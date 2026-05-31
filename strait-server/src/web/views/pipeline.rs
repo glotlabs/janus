@@ -28,7 +28,7 @@ pub(crate) fn pipelines_page(pipelines: Vec<(PipelineRun, Repo)>) -> Markup {
                                 h3 {
                                     a href=(format!("/pipelines/{}", pipeline.id)) { (pipeline.id) }
                                 }
-                                p class="muted" { (repo.owner_username) "/" (repo.name) }
+                                p class="muted" { (repo.name) }
                             }
                             div class="list-row-meta" {
                                 (badge(&display_status(&pipeline.status), status_tone(&pipeline.status)))

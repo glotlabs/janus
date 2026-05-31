@@ -16,14 +16,12 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS repos (
     id TEXT PRIMARY KEY,
-    owner_id TEXT NOT NULL,
     name TEXT NOT NULL,
     normalized_name TEXT NOT NULL,
     bare_path TEXT NOT NULL,
     default_branch TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    UNIQUE(owner_id, normalized_name),
-    FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE
+    UNIQUE(normalized_name)
 );
 
 CREATE TABLE IF NOT EXISTS runners (
