@@ -668,6 +668,92 @@ async fn admin_mutations_record_audit_events() {
 }
 
 #[tokio::test]
+async fn artifact_download_uses_attachment_headers_and_safe_filename() {
+    let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "artifact-download");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    let workflow = fixture
+        .state
+        .db
+        .workflows_for_repo(&repo.id)
+        .expect("workflows")
+        .into_iter()
+        .next()
+        .expect("workflow");
+    let pipeline_id = fixture
+        .state
+        .db
+        .create_pipeline_run(
+            &repo.id,
+            &workflow.id,
+            &workflow.version_id,
+            "manual",
+            Some("main"),
+            Some("HEAD"),
+        )
+        .expect("pipeline");
+    let pending = fixture
+        .state
+        .artifacts
+        .store_bytes(
+            "pipeline_source",
+            &pipeline_id,
+            "evil\r\n../<script>.html",
+            b"<script>alert(1)</script>",
+        )
+        .expect("artifact");
+    let artifact_id = fixture
+        .state
+        .db
+        .insert_server_artifact(&pending)
+        .expect("artifact record");
+    let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::get(format!("/artifacts/{artifact_id}"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/octet-stream"
+    );
+    assert_eq!(
+        response.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        response.headers().get("cache-control").unwrap(),
+        "private, no-store"
+    );
+    let disposition = response
+        .headers()
+        .get("content-disposition")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(disposition.starts_with("attachment;"));
+    assert!(disposition.contains("filename=\""));
+    assert!(!disposition.contains('\n'));
+    assert!(!disposition.contains('\r'));
+    assert!(!disposition.contains("../"));
+    assert!(!disposition.contains('<'));
+    assert!(!disposition.contains('>'));
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    assert_eq!(&body[..], b"<script>alert(1)</script>");
+}
+
+#[tokio::test]
 async fn scheduler_tasks_stop_on_shutdown_signal() {
     let fixture = test_fixture().await;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

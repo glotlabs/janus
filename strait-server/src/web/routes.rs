@@ -12,8 +12,9 @@ use axum::{
     http::{
         HeaderMap, Request, StatusCode,
         header::{
-            CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HeaderName, HeaderValue,
-            REFERRER_POLICY, SET_COOKIE, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
+            CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_SECURITY_POLICY,
+            CONTENT_TYPE, HeaderName, HeaderValue, REFERRER_POLICY, SET_COOKIE,
+            X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
         },
     },
     middleware::{Next, from_fn},
@@ -123,6 +124,7 @@ pub(crate) fn build_router(state: Arc<AppState>) -> Router {
             "/pipelines/{pipeline_id}/cancel",
             post(cancel_pipeline_route),
         )
+        .route("/artifacts/{artifact_id}", get(download_artifact))
         .route("/api/me", get(api_me))
         .route("/api/repos", get(api_list_repos).post(api_create_repo))
         .route(
@@ -1204,6 +1206,81 @@ async fn api_get_pipeline(
             .map_err(api_internal_error)?
             .ok_or_else(|| not_found("pipeline"))?,
     ))
+}
+
+async fn download_artifact(
+    CurrentUser(user): CurrentUser,
+    State(state): State<Arc<AppState>>,
+    AxumPath(artifact_id): AxumPath<String>,
+) -> Result<Response, Response> {
+    let artifact = state
+        .db
+        .get_server_artifact_by_id(&artifact_id)
+        .map_err(internal_error)?
+        .ok_or_else(|| not_found("artifact"))?;
+    authorize_artifact(&state, &user, &artifact)?;
+    let bytes = state
+        .artifacts
+        .read_bytes(&artifact)
+        .map_err(internal_error)?;
+    let filename = safe_download_filename(&artifact.artifact_name);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .header(
+            CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .header(X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(CACHE_CONTROL, "private, no-store")
+        .header(CONTENT_LENGTH, bytes.len().to_string())
+        .body(Body::from(bytes))
+        .map_err(internal_error)
+}
+
+fn authorize_artifact(
+    state: &Arc<AppState>,
+    user: &User,
+    artifact: &models::ServerArtifact,
+) -> Result<(), Response> {
+    match artifact.scope_type.as_str() {
+        "pipeline_source" => {
+            authorized_pipeline(state, user, &artifact.scope_id)?;
+        }
+        "job_output" => {
+            let pipeline = state
+                .db
+                .pipeline_for_job_run(&artifact.scope_id)
+                .map_err(internal_error)?
+                .ok_or_else(|| not_found("pipeline"))?;
+            authorized_pipeline(state, user, &pipeline.id)?;
+        }
+        _ => return Err(not_found("artifact")),
+    }
+    Ok(())
+}
+
+fn safe_download_filename(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|ch| match ch {
+            '"' | '\\' | '/' | '<' | '>' | ':' | '|' | '?' | '*' | '\r' | '\n' | '\t' => '_',
+            ch if ch.is_control() => '_',
+            ch if ch.is_ascii() => ch,
+            _ => '_',
+        })
+        .collect::<String>()
+        .trim_matches(['.', ' '])
+        .to_string();
+    let mut sanitized = sanitized;
+    while sanitized.contains("..") {
+        sanitized = sanitized.replace("..", "_");
+    }
+    if sanitized.is_empty() {
+        "artifact.bin".to_string()
+    } else {
+        sanitized
+    }
 }
 
 fn record_audit_event(

@@ -21,6 +21,7 @@ impl ArtifactStore {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let root = PathBuf::from(data_dir).join("server-artifacts");
         fs::create_dir_all(&root)?;
+        let root = root.canonicalize()?;
         Ok(Self {
             root,
             max_artifact_bytes,
@@ -70,7 +71,11 @@ impl ArtifactStore {
         &self,
         artifact: &ServerArtifact,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        Ok(fs::read(&artifact.storage_path)?)
+        let path = PathBuf::from(&artifact.storage_path).canonicalize()?;
+        if !path.starts_with(&self.root) {
+            return Err("artifact storage path escapes artifact root".into());
+        }
+        Ok(fs::read(path)?)
     }
 }
 
@@ -83,4 +88,42 @@ pub struct PendingArtifact {
     pub sha256: String,
     pub size_bytes: i64,
     pub storage_path: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn read_rejects_paths_outside_artifact_root() {
+        let temp = std::env::temp_dir().join(format!("strait-artifacts-{}", Uuid::now_v7()));
+        let data_dir = temp.join("data");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let outside = temp.join("outside.bin");
+        fs::write(&outside, b"secret").expect("outside file");
+        let store = ArtifactStore::new(data_dir.to_str().expect("data dir"), 1024).expect("store");
+
+        let artifact = ServerArtifact {
+            id: "srvart_test".to_string(),
+            scope_type: "test".to_string(),
+            scope_id: "scope".to_string(),
+            artifact_name: "artifact".to_string(),
+            sha256: String::new(),
+            size_bytes: 6,
+            storage_path: outside.display().to_string(),
+            created_at: String::new(),
+        };
+
+        let error = store.read_bytes(&artifact).expect_err("escape rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("artifact storage path escapes artifact root")
+        );
+        let _ = fs::remove_dir_all(PathBuf::from(temp));
+    }
 }
