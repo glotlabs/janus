@@ -50,7 +50,7 @@ impl RunnerClient {
             .send()
             .await?;
         if response.status() != StatusCode::CREATED {
-            return Err(format!("runner artifact upload failed with {}", response.status()).into());
+            return Err(runner_http_error("runner artifact upload failed", response).await);
         }
         Ok(response.json().await?)
     }
@@ -75,7 +75,7 @@ impl RunnerClient {
             .send()
             .await?;
         if !matches!(response.status(), StatusCode::CREATED | StatusCode::OK) {
-            return Err(format!("runner create job failed with {}", response.status()).into());
+            return Err(runner_http_error("runner create job failed", response).await);
         }
         Ok(response.json().await?)
     }
@@ -159,11 +159,42 @@ impl RunnerClient {
             .send()
             .await?;
         if response.status() != StatusCode::OK {
-            return Err(
-                format!("runner artifact download failed with {}", response.status()).into(),
-            );
+            return Err(runner_http_error("runner artifact download failed", response).await);
         }
         Ok(response.bytes().await?.to_vec())
+    }
+}
+
+async fn runner_http_error(
+    context: &'static str,
+    response: reqwest::Response,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let body = response.text().await.unwrap_or_default();
+    let detail = serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|value| {
+            let code = value.get("code").and_then(Value::as_str);
+            let message = value.get("message").and_then(Value::as_str);
+            match (code, message) {
+                (Some(code), Some(message)) => Some(format!("{code}: {message}")),
+                (Some(code), None) => Some(code.to_string()),
+                (None, Some(message)) => Some(message.to_string()),
+                (None, None) => None,
+            }
+        })
+        .or_else(|| (!body.trim().is_empty()).then(|| body.trim().to_string()));
+    let retry_after = retry_after
+        .map(|value| format!(" retry_after={value}s"))
+        .unwrap_or_default();
+    match detail {
+        Some(detail) => format!("{context} with {status}: {detail}{retry_after}").into(),
+        None => format!("{context} with {status}{retry_after}").into(),
     }
 }
 

@@ -25,7 +25,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use tokio::time::sleep;
@@ -1106,6 +1106,55 @@ async fn scheduler_reuses_dispatch_key_after_ambiguous_runner_create_failure() {
 }
 
 #[tokio::test]
+async fn scheduler_marks_runner_create_bad_request_failed() {
+    let mock = spawn_mock_runner_with_create_bad_request().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    let workflow = fixture
+        .state
+        .db
+        .workflows_for_repo(&repo.id)
+        .expect("workflows")
+        .remove(0);
+    let pipeline_id = scheduler::enqueue_workflow_run(
+        Arc::clone(&fixture.state),
+        &workflow,
+        "push",
+        Some("refs/heads/main"),
+        Some(&"1".repeat(40)),
+    )
+    .expect("enqueue");
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("dispatch should be handled");
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline_id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "failed");
+    assert_eq!(snapshot.jobs[0].run.status, "failed");
+    assert_eq!(
+        snapshot.jobs[0].run.terminal_reason.as_deref(),
+        Some("spawn_error")
+    );
+    assert_eq!(
+        snapshot.jobs[0].run.failure_category.as_deref(),
+        Some("job")
+    );
+    assert!(snapshot.jobs[0].stderr.contains("runner_input_invalid"));
+    assert_eq!(mock.dispatch_count(), 1);
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("extra reconcile");
+    assert_eq!(mock.dispatch_count(), 1);
+}
+
+#[tokio::test]
 async fn enqueue_workflow_run_allows_stale_schema() {
     let fixture = test_fixture_with_runner("http://127.0.0.1:1").await;
     let repo = create_repo_direct(&fixture.state, &fixture.user, "stale-enqueue");
@@ -1392,6 +1441,63 @@ async fn scheduler_fails_job_after_infra_retry_budget_exhausted() {
         Some("spawn_error")
     );
     assert_eq!(mock.dispatch_count(), 3);
+}
+
+#[tokio::test]
+async fn scheduler_stops_retrying_when_output_artifact_persist_fails() {
+    let mock = spawn_mock_runner_with_output_artifact_download_failure().await;
+    let fixture = test_fixture_with_runner(&mock.base_url).await;
+    let repo = create_repo_direct(&fixture.state, &fixture.user, "demo");
+    create_workflow_direct(&fixture.state, &repo.id, &fixture.runner_id);
+    fixture
+        .state
+        .db
+        .create_push_event(
+            &repo.id,
+            "event-output-artifact-fail",
+            &[crate::models::PushEventRef {
+                old_rev: "0".repeat(40),
+                new_rev: "1".repeat(40),
+                ref_name: "refs/heads/main".to_string(),
+            }],
+        )
+        .expect("push event");
+
+    for _ in 0..10 {
+        scheduler::reconcile_once(Arc::clone(&fixture.state))
+            .await
+            .expect("reconcile");
+    }
+
+    let pipeline = fixture
+        .state
+        .db
+        .list_pipeline_runs()
+        .expect("pipelines")
+        .remove(0);
+    let snapshot = fixture
+        .state
+        .db
+        .pipeline_snapshot(&pipeline.id)
+        .expect("snapshot")
+        .unwrap();
+    assert_eq!(snapshot.pipeline.status, "failed");
+    assert_eq!(snapshot.jobs[0].run.status, "failed");
+    assert_eq!(snapshot.jobs[0].run.infra_retry_count, 2);
+    assert_eq!(
+        snapshot.jobs[0].run.terminal_reason.as_deref(),
+        Some("output_registration_failed")
+    );
+    assert_eq!(
+        snapshot.jobs[0].run.failure_category.as_deref(),
+        Some("infra")
+    );
+    assert_eq!(mock.artifact_download_count(), 3);
+
+    scheduler::reconcile_once(Arc::clone(&fixture.state))
+        .await
+        .expect("extra reconcile");
+    assert_eq!(mock.artifact_download_count(), 3);
 }
 
 #[tokio::test]
@@ -1761,6 +1867,7 @@ struct MockRunnerState {
     dispatches: Mutex<BTreeMap<String, String>>,
     requests: Mutex<Vec<MockRequest>>,
     cancel_requests: Mutex<BTreeMap<String, usize>>,
+    artifact_downloads: AtomicUsize,
     fail_first_dispatch: AtomicBool,
     stall_cancellation: AtomicBool,
     terminal_outcome: MockTerminalOutcome,
@@ -1786,6 +1893,8 @@ enum MockTerminalOutcome {
     JobFailed,
     InfraFailed,
     InfraFailOnceThenSuccess,
+    OutputArtifactDownloadFailed,
+    CreateBadRequest,
 }
 
 struct MockRunner {
@@ -1801,12 +1910,25 @@ async fn spawn_mock_runner_with_fail_first_dispatch() -> MockRunner {
     spawn_mock_runner_with_options(true, false, MockTerminalOutcome::Success).await
 }
 
+async fn spawn_mock_runner_with_create_bad_request() -> MockRunner {
+    spawn_mock_runner_with_options(false, false, MockTerminalOutcome::CreateBadRequest).await
+}
+
 async fn spawn_mock_runner_with_stuck_cancellation() -> MockRunner {
     spawn_mock_runner_with_options(false, true, MockTerminalOutcome::Success).await
 }
 
 async fn spawn_mock_runner_with_timeout() -> MockRunner {
     spawn_mock_runner_with_options(false, false, MockTerminalOutcome::Timeout).await
+}
+
+async fn spawn_mock_runner_with_output_artifact_download_failure() -> MockRunner {
+    spawn_mock_runner_with_options(
+        false,
+        false,
+        MockTerminalOutcome::OutputArtifactDownloadFailed,
+    )
+    .await
 }
 
 async fn spawn_mock_runner_with_job_failure() -> MockRunner {
@@ -1832,6 +1954,7 @@ async fn spawn_mock_runner_with_options(
         dispatches: Mutex::new(BTreeMap::new()),
         requests: Mutex::new(Vec::new()),
         cancel_requests: Mutex::new(BTreeMap::new()),
+        artifact_downloads: AtomicUsize::new(0),
         fail_first_dispatch: AtomicBool::new(fail_first_dispatch),
         stall_cancellation: AtomicBool::new(stall_cancellation),
         terminal_outcome,
@@ -1882,6 +2005,10 @@ impl MockRunner {
             .map(|request| request.body.clone())
             .collect()
     }
+
+    fn artifact_download_count(&self) -> usize {
+        self.state.artifact_downloads.load(Ordering::SeqCst)
+    }
 }
 
 async fn mock_list_jobs() -> Json<JsonValue> {
@@ -1922,6 +2049,18 @@ async fn mock_create_run(
         job_name: name,
         body: request_body,
     });
+    if matches!(
+        state.terminal_outcome,
+        MockTerminalOutcome::CreateBadRequest
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "code": "runner_input_invalid",
+                "message": "input source expected artifact id"
+            })),
+        );
+    }
     if state.fail_first_dispatch.swap(false, Ordering::SeqCst) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2009,6 +2148,10 @@ async fn mock_get_run(
                     ("failed", None, Some("spawn_error"), Some("infra"), 0)
                 }
             }
+            MockTerminalOutcome::OutputArtifactDownloadFailed => {
+                ("success", Some(0), Some("success"), None, 3)
+            }
+            MockTerminalOutcome::CreateBadRequest => ("success", Some(0), Some("success"), None, 3),
         };
         let outputs = match run.job_name.as_str() {
             "produce-typed" => json!({
@@ -2020,6 +2163,20 @@ async fn mock_get_run(
             "produce-int" => json!({
                 "build_number": { "type": "integer", "value": 42 }
             }),
+            _ if matches!(
+                state.terminal_outcome,
+                MockTerminalOutcome::OutputArtifactDownloadFailed
+            ) =>
+            {
+                json!({
+                    "app": {
+                        "type": "artifact",
+                        "artifact_id": "artifact-1",
+                        "sha256": format!("{:x}", Sha256::digest(b"artifact")),
+                        "size": 8
+                    }
+                })
+            }
             _ => json!({}),
         };
         Json(json!({
@@ -2091,6 +2248,18 @@ async fn mock_artifact_upload(body: Body) -> (StatusCode, Json<JsonValue>) {
     )
 }
 
-async fn mock_artifact_download() -> Body {
-    Body::from("artifact")
+async fn mock_artifact_download(State(state): State<Arc<MockRunnerState>>) -> (StatusCode, Body) {
+    state.artifact_downloads.fetch_add(1, Ordering::SeqCst);
+    if matches!(
+        state.terminal_outcome,
+        MockTerminalOutcome::OutputArtifactDownloadFailed
+    ) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Body::from(
+                r#"{"code":"artifact_rate_limit_exceeded","message":"token exceeded artifact rate limit"}"#,
+            ),
+        );
+    }
+    (StatusCode::OK, Body::from("artifact"))
 }

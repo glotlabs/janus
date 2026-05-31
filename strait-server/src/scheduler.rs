@@ -10,8 +10,10 @@ use crate::{
     app::AppState,
     git,
     models::{
-        RunnerJobSchema, Workflow, WorkflowDefinition, WorkflowInputBinding, WorkflowTrigger,
+        JobRun, RunnerJobSchema, Workflow, WorkflowDefinition, WorkflowInputBinding,
+        WorkflowTrigger,
     },
+    runner::JobOutputMetadata,
     state_machine::{self, JobStatus, PipelineStatus},
 };
 
@@ -264,18 +266,36 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
         let Some(runner_job_definition) = job_schemas.get(job.job_index as usize) else {
             continue;
         };
-        let payload = resolve_job_inputs(
+        let payload = match resolve_job_inputs(
             Arc::clone(&state),
             &pipeline,
             &job.id,
             job_definition,
             runner_job_definition,
         )
-        .await?;
+        .await
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                let message = error.to_string();
+                if !is_scheduler_artifact_transfer_error(&message) {
+                    return Err(error);
+                }
+                retry_or_fail_infra_error(
+                    Arc::clone(&state),
+                    &job,
+                    "spawn_error",
+                    &format!("failed to prepare job inputs: {message}"),
+                    &JobOutputMetadata::default(),
+                    "",
+                )?;
+                continue;
+            }
+        };
         state
             .db
             .set_job_run_input_payload(&job.id, &Value::Object(payload.clone()))?;
-        let created = state
+        let created = match state
             .runner_client
             .create_job_run(
                 &runner,
@@ -284,7 +304,21 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
                 Value::Object(payload),
             )
             .await
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        {
+            Ok(created) => created,
+            Err(error) => {
+                let message = error.to_string();
+                if is_runner_create_terminal_rejection(&message) {
+                    fail_job_after_runner_create_rejection(
+                        Arc::clone(&state),
+                        &job,
+                        &format!("failed to create runner job: {message}"),
+                    )?;
+                    continue;
+                }
+                return Err(std::io::Error::other(message).into());
+            }
+        };
         state
             .db
             .set_job_run_started(&job.id, &created.job_id, &created.started_at)?;
@@ -373,7 +407,22 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
                         _ => JobStatus::Failed,
                     };
                     let outputs =
-                        persist_job_outputs(Arc::clone(&state), &runner, &job.id, outputs).await?;
+                        match persist_job_outputs(Arc::clone(&state), &runner, &job.id, outputs)
+                            .await
+                        {
+                            Ok(outputs) => outputs,
+                            Err(error) => {
+                                retry_or_fail_infra_error(
+                                    Arc::clone(&state),
+                                    &job,
+                                    "output_registration_failed",
+                                    &format!("failed to persist job outputs: {error}"),
+                                    &status.output_metadata,
+                                    &logs.stdout,
+                                )?;
+                                continue;
+                            }
+                        };
                     state.db.finish_job_run(
                         &job.id,
                         terminal.as_str(),
@@ -400,6 +449,91 @@ async fn poll_running_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::erro
             }
         }
     }
+    Ok(())
+}
+
+fn is_scheduler_artifact_transfer_error(message: &str) -> bool {
+    message.contains("runner artifact upload failed")
+        || message.contains("runner artifact download failed")
+        || message.contains("pipeline missing commit sha")
+        || message.contains("git archive failed")
+}
+
+fn is_runner_create_terminal_rejection(message: &str) -> bool {
+    [
+        "400 Bad Request",
+        "401 Unauthorized",
+        "403 Forbidden",
+        "404 Not Found",
+        "422 Unprocessable Entity",
+    ]
+    .iter()
+    .any(|status| message.contains(status))
+}
+
+fn fail_job_after_runner_create_rejection(
+    state: Arc<AppState>,
+    job: &JobRun,
+    stderr: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    warn!(
+        job_run_id = %job.id,
+        %stderr,
+        "runner rejected job create request; marking job failed"
+    );
+    state.db.finish_job_run(
+        &job.id,
+        JobStatus::Failed.as_str(),
+        None,
+        None,
+        Some("spawn_error"),
+        Some("job"),
+        &JobOutputMetadata::default(),
+        "",
+        stderr,
+        &[],
+    )?;
+    state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
+    Ok(())
+}
+
+fn retry_or_fail_infra_error(
+    state: Arc<AppState>,
+    job: &JobRun,
+    terminal_reason: &str,
+    stderr: &str,
+    output_metadata: &JobOutputMetadata,
+    stdout: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if job.infra_retry_count < i64::from(state.config.scheduler.max_infra_retries) {
+        let retry_count = state.db.requeue_job_run_for_infra_retry(&job.id)?;
+        warn!(
+            job_run_id = %job.id,
+            retry_count,
+            %stderr,
+            "requeued job after scheduler-side infra error"
+        );
+    } else {
+        warn!(
+            job_run_id = %job.id,
+            infra_retry_count = job.infra_retry_count,
+            %stderr,
+            "scheduler-side infra retry budget exhausted; marking job failed"
+        );
+        state.db.finish_job_run(
+            &job.id,
+            JobStatus::Failed.as_str(),
+            None,
+            None,
+            Some(terminal_reason),
+            Some("infra"),
+            output_metadata,
+            stdout,
+            stderr,
+            &[],
+        )?;
+    }
+    state.db.finalize_pipeline_status(&job.pipeline_run_id)?;
     Ok(())
 }
 
