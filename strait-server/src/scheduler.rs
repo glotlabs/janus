@@ -235,6 +235,9 @@ async fn dispatch_pending_jobs(state: Arc<AppState>) -> Result<(), Box<dyn std::
             &runner_job_definition,
         )
         .await?;
+        state
+            .db
+            .set_job_run_input_payload(&job.id, &Value::Object(payload.clone()))?;
         let created = state
             .runner_client
             .create_job_run(

@@ -6,8 +6,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::models::{
-    JobRun, JobRunDetail, JobRunOutput, PipelineRun, PipelineSnapshot, PushEvent, PushEventRef,
-    Repo, Runner, ServerArtifact, User, Workflow,
+    JobRun, JobRunDetail, JobRunOutput, PipelineRun, PipelineSnapshot, PreviousJobSummary,
+    PushEvent, PushEventRef, Repo, Runner, ServerArtifact, User, Workflow,
 };
 use crate::runner::JobOutputMetadata;
 use crate::state_machine::{self, JobStatus};
@@ -811,12 +811,35 @@ impl Database {
                 [run.id.clone()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
+            let resolved_inputs = conn
+                .query_row(
+                    "SELECT input_payload_json FROM job_runs WHERE id = ?1",
+                    [run.id.clone()],
+                    |row| row.get::<_, Option<String>>(0),
+                )?
+                .and_then(|json| serde_json::from_str::<Value>(&json).ok())
+                .and_then(|value| match value {
+                    Value::Object(map) => Some(map.into_iter().collect()),
+                    _ => None,
+                })
+                .unwrap_or_default();
             let mut dep_stmt = conn.prepare(
-                "SELECT previous_job_run_id FROM job_run_previous WHERE job_run_id = ?1",
+                "SELECT jr.id, jr.job_index, jr.runner_job_name, jr.status
+                 FROM job_run_previous p
+                 JOIN job_runs jr ON jr.id = p.previous_job_run_id
+                 WHERE p.job_run_id = ?1
+                 ORDER BY jr.job_index",
             )?;
             let previous_jobs = dep_stmt
-                .query_map([run.id.clone()], |row| row.get(0))?
-                .collect::<Result<Vec<String>, _>>()?;
+                .query_map([run.id.clone()], |row| {
+                    Ok(PreviousJobSummary {
+                        job_run_id: row.get(0)?,
+                        job_index: row.get(1)?,
+                        runner_job_name: row.get(2)?,
+                        status: row.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
             let mut artifact_stmt = conn.prepare(
                 "SELECT artifact_name, output_type, runner_artifact_id, server_artifact_id, value_json, sha256, size_bytes FROM job_run_artifacts WHERE job_run_id = ?1 ORDER BY artifact_name",
             )?;
@@ -829,6 +852,7 @@ impl Database {
                 stderr,
                 outputs,
                 previous_jobs,
+                resolved_inputs,
             });
         }
         Ok(Some(PipelineSnapshot { pipeline, jobs }))
@@ -945,6 +969,19 @@ impl Database {
                  last_cancel_retry_at = NULL
              WHERE id = ?1",
             params![job_run_id, runner_run_id, started_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_job_run_input_payload(
+        &self,
+        job_run_id: &str,
+        payload: &Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute(
+            "UPDATE job_runs SET input_payload_json = ?2 WHERE id = ?1",
+            params![job_run_id, serde_json::to_string(payload)?],
         )?;
         Ok(())
     }
@@ -1632,6 +1669,7 @@ fn apply_migrations(conn: &Connection) -> Result<(), Box<dyn std::error::Error>>
             last_infra_retry_at TEXT,
             finished_at TEXT,
             output_metadata_json TEXT,
+            input_payload_json TEXT,
             FOREIGN KEY(pipeline_run_id) REFERENCES pipeline_runs(id) ON DELETE CASCADE,
             FOREIGN KEY(runner_id) REFERENCES runners(id) ON DELETE CASCADE
         );

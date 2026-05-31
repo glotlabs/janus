@@ -204,7 +204,16 @@ pub struct JobRunDetail {
     pub stdout: String,
     pub stderr: String,
     pub outputs: Vec<JobRunOutput>,
-    pub previous_jobs: Vec<String>,
+    pub previous_jobs: Vec<PreviousJobSummary>,
+    pub resolved_inputs: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviousJobSummary {
+    pub job_run_id: String,
+    pub job_index: i64,
+    pub runner_job_name: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

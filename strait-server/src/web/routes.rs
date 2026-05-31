@@ -682,11 +682,30 @@ async fn pipeline_detail(
     ));
     body.push_str(r#"<section class="card"><div class="section-head"><div><div class="eyebrow">Jobs</div><h2>Job runs</h2></div></div><div class="stack-lg">"#);
     for job in snapshot.jobs {
+        let previous_jobs = if job.previous_jobs.is_empty() {
+            "<span class=\"muted\">None</span>".to_string()
+        } else {
+            job.previous_jobs
+                .iter()
+                .map(|previous| {
+                    format!(
+                        r#"<span class="chip">job-{} / {} ({})</span>"#,
+                        previous.job_index + 1,
+                        html_escape(&previous.runner_job_name),
+                        html_escape(&display_status(&previous.status))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        };
+        let resolved_inputs_json =
+            serde_json::to_string_pretty(&job.resolved_inputs).unwrap_or_else(|_| "{}".to_string());
         body.push_str(&format!(
-            r#"<article class="job-card"><div class="entity-head"><div><h3>{}</h3><p class="muted">Runner job: <code>{}</code></p></div><div class="badge-row">{}</div></div><div class="meta-grid"><div class="meta-pair"><span>Failure category</span><strong>{}</strong></div><div class="meta-pair"><span>Terminal reason</span><strong>{}</strong></div><div class="meta-pair"><span>Exit code</span><strong>{}</strong></div><div class="meta-pair"><span>Duration ms</span><strong>{}</strong></div><div class="meta-pair"><span>Cancel reason</span><strong>{}</strong></div><div class="meta-pair"><span>Cancel requested</span><strong>{}</strong></div><div class="meta-pair"><span>Cancel started</span><strong>{}</strong></div><div class="meta-pair"><span>Cancel retries</span><strong>{}</strong></div><div class="meta-pair"><span>Last cancel retry</span><strong>{}</strong></div><div class="meta-pair"><span>Infra retries</span><strong>{}</strong></div><div class="meta-pair"><span>Last infra retry</span><strong>{}</strong></div><div class="meta-pair"><span>Stdout</span><strong>{}B · truncated={}</strong></div><div class="meta-pair"><span>Stderr</span><strong>{}B · truncated={}</strong></div><div class="meta-pair"><span>Artifacts</span><strong>{} files · {}B</strong></div></div><div class="log-grid"><div class="log-panel"><span class="subsection-title">Stdout</span><pre>{}</pre></div><div class="log-panel"><span class="subsection-title">Stderr</span><pre>{}</pre></div></div></article>"#,
+            r#"<article class="job-card"><div class="entity-head"><div><h3>{}</h3><p class="muted">Runner job: <code>{}</code></p></div><div class="badge-row">{}</div></div><div class="meta-grid"><div class="meta-pair"><span>Previous jobs</span><strong>{}</strong></div><div class="meta-pair"><span>Failure category</span><strong>{}</strong></div><div class="meta-pair"><span>Terminal reason</span><strong>{}</strong></div><div class="meta-pair"><span>Exit code</span><strong>{}</strong></div><div class="meta-pair"><span>Duration ms</span><strong>{}</strong></div><div class="meta-pair"><span>Cancel reason</span><strong>{}</strong></div><div class="meta-pair"><span>Cancel requested</span><strong>{}</strong></div><div class="meta-pair"><span>Cancel started</span><strong>{}</strong></div><div class="meta-pair"><span>Cancel retries</span><strong>{}</strong></div><div class="meta-pair"><span>Last cancel retry</span><strong>{}</strong></div><div class="meta-pair"><span>Infra retries</span><strong>{}</strong></div><div class="meta-pair"><span>Last infra retry</span><strong>{}</strong></div><div class="meta-pair"><span>Stdout</span><strong>{}B · truncated={}</strong></div><div class="meta-pair"><span>Stderr</span><strong>{}B · truncated={}</strong></div><div class="meta-pair"><span>Artifacts</span><strong>{} files · {}B</strong></div></div><div class="log-grid"><div class="log-panel"><span class="subsection-title">Resolved inputs</span><pre>{}</pre></div><div class="log-panel"><span class="subsection-title">Stdout</span><pre>{}</pre></div><div class="log-panel"><span class="subsection-title">Stderr</span><pre>{}</pre></div></div></article>"#,
             html_escape(&job.run.display_name()),
             html_escape(&job.run.runner_job_name),
             badge(&display_status(&job.run.status), status_tone(&job.run.status)),
+            previous_jobs,
             html_escape(&render_optional(job.run.failure_category.as_deref())),
             html_escape(&render_optional(job.run.terminal_reason.as_deref())),
             html_escape(&render_optional(job.run.exit_code.map(|value| value.to_string()).as_deref())),
@@ -704,6 +723,7 @@ async fn pipeline_detail(
             job.run.output_metadata.stderr.truncated,
             job.run.output_metadata.artifacts.count,
             job.run.output_metadata.artifacts.bytes,
+            html_escape(&resolved_inputs_json),
             html_escape(&job.stdout),
             html_escape(&job.stderr)
         ));
