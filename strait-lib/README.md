@@ -7,6 +7,18 @@ The purpose of this crate is to keep protocol-level contracts in sync. If a
 runner response, runner job schema, or serialized enum changes, both sides
 should compile against the same Rust type instead of drifting independently.
 
+## Module Layout
+
+- `protocol`: shared HTTP header names and runner route templates/path builders.
+- `capabilities`: runner protocol version constants and compatibility response.
+- `artifact`: artifact DTOs that cross the server/runner boundary.
+- `job`: job run DTOs, outputs, statuses, terminal reasons, and output metadata.
+- `schema`: runner job definition DTOs and schema enums.
+
+The crate root re-exports the public protocol surface so callers can use
+`strait_lib::TypeName`. Keep implementation details inside the owning module and
+add compatibility tests near the type or helper they protect.
+
 ## What Belongs Here
 
 - Runner API DTOs shared across the server/runner HTTP boundary.
