@@ -28,6 +28,13 @@ use crate::config::AuthConfig;
 
 const SIGNATURE_TOLERANCE_SECONDS: i64 = 300;
 const NONCE_RETENTION_SECONDS: i64 = SIGNATURE_TOLERANCE_SECONDS * 2;
+const KNOWN_PERMISSIONS: &[&str] = &[
+    "artifacts:write",
+    "artifacts:read",
+    "jobs:run",
+    "jobs:read",
+    "logs:read",
+];
 
 #[derive(Debug)]
 pub struct AuthStore {
@@ -48,6 +55,21 @@ impl AuthStore {
 
         let mut keys = BTreeMap::new();
         for server in &config.servers {
+            if keys.contains_key(&server.key_id) {
+                return Err(AuthError::DuplicateKeyId(server.key_id.clone()));
+            }
+            if server.permissions.is_empty() {
+                return Err(AuthError::EmptyPermissions(server.key_id.clone()));
+            }
+            for permission in &server.permissions {
+                if !KNOWN_PERMISSIONS.contains(&permission.as_str()) {
+                    return Err(AuthError::UnknownPermission {
+                        key_id: server.key_id.clone(),
+                        permission: permission.clone(),
+                    });
+                }
+            }
+
             let decoded = STANDARD
                 .decode(server.public_key.trim())
                 .map_err(|_| AuthError::InvalidPublicKey(server.key_id.clone()))?;
@@ -186,6 +208,9 @@ struct PublicKeyRecord {
 pub enum AuthError {
     UnsupportedMode(String),
     NoTrustedServers,
+    DuplicateKeyId(String),
+    EmptyPermissions(String),
+    UnknownPermission { key_id: String, permission: String },
     InvalidPublicKey(String),
 }
 
@@ -194,6 +219,16 @@ impl fmt::Display for AuthError {
         match self {
             Self::UnsupportedMode(mode) => write!(f, "unsupported auth mode: {mode}"),
             Self::NoTrustedServers => write!(f, "at least one trusted server key is required"),
+            Self::DuplicateKeyId(key_id) => {
+                write!(f, "duplicate trusted server key_id {key_id}")
+            }
+            Self::EmptyPermissions(key_id) => {
+                write!(f, "trusted server key_id {key_id} must have permissions")
+            }
+            Self::UnknownPermission { key_id, permission } => write!(
+                f,
+                "trusted server key_id {key_id} has unknown permission {permission}"
+            ),
             Self::InvalidPublicKey(key_id) => write!(f, "invalid public key for {key_id}"),
         }
     }
@@ -632,17 +667,82 @@ mod tests {
         assert!(matches!(error, AuthRejection::ContentShaMismatch));
     }
 
+    #[test]
+    fn rejects_duplicate_key_ids() {
+        let signing_key = SigningKey::from_bytes(&[1_u8; 32]);
+        let public_key = STANDARD.encode(signing_key.verifying_key().to_bytes());
+        let error = AuthStore::load_from_config(&crate::config::AuthConfig {
+            mode: "signed".to_string(),
+            servers: vec![
+                trusted_server("test-key", &public_key, &["jobs:run"]),
+                trusted_server("test-key", &public_key, &["jobs:read"]),
+            ],
+        })
+        .expect_err("duplicate key id should fail");
+
+        assert!(matches!(error, AuthError::DuplicateKeyId(ref key_id) if key_id == "test-key"));
+        assert!(error.to_string().contains("test-key"));
+    }
+
+    #[test]
+    fn rejects_empty_permissions() {
+        let signing_key = SigningKey::from_bytes(&[2_u8; 32]);
+        let public_key = STANDARD.encode(signing_key.verifying_key().to_bytes());
+        let error = AuthStore::load_from_config(&crate::config::AuthConfig {
+            mode: "signed".to_string(),
+            servers: vec![trusted_server("test-key", &public_key, &[])],
+        })
+        .expect_err("empty permissions should fail");
+
+        assert!(matches!(error, AuthError::EmptyPermissions(ref key_id) if key_id == "test-key"));
+        assert!(error.to_string().contains("test-key"));
+    }
+
+    #[test]
+    fn rejects_unknown_permissions() {
+        let signing_key = SigningKey::from_bytes(&[3_u8; 32]);
+        let public_key = STANDARD.encode(signing_key.verifying_key().to_bytes());
+        let error = AuthStore::load_from_config(&crate::config::AuthConfig {
+            mode: "signed".to_string(),
+            servers: vec![trusted_server("test-key", &public_key, &["jobs:admin"])],
+        })
+        .expect_err("unknown permission should fail");
+
+        assert!(matches!(
+            error,
+                AuthError::UnknownPermission { ref key_id, ref permission }
+                    if key_id == "test-key" && permission == "jobs:admin"
+        ));
+        assert!(error.to_string().contains("test-key"));
+        assert!(error.to_string().contains("jobs:admin"));
+    }
+
     fn auth_store_for_key(signing_key: &SigningKey) -> AuthStore {
         AuthStore::load_from_config(&crate::config::AuthConfig {
             mode: "signed".to_string(),
-            servers: vec![crate::config::AuthServerConfig {
-                name: "test-server".to_string(),
-                key_id: "test-key".to_string(),
-                public_key: STANDARD.encode(signing_key.verifying_key().to_bytes()),
-                permissions: vec!["jobs:run".to_string()],
-            }],
+            servers: vec![trusted_server(
+                "test-key",
+                &STANDARD.encode(signing_key.verifying_key().to_bytes()),
+                &["jobs:run"],
+            )],
         })
         .expect("auth should load")
+    }
+
+    fn trusted_server(
+        key_id: &str,
+        public_key: &str,
+        permissions: &[&str],
+    ) -> crate::config::AuthServerConfig {
+        crate::config::AuthServerConfig {
+            name: "test-server".to_string(),
+            key_id: key_id.to_string(),
+            public_key: public_key.to_string(),
+            permissions: permissions
+                .iter()
+                .map(|permission| (*permission).to_string())
+                .collect(),
+        }
     }
 
     fn signed_headers(
