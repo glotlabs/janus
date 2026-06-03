@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Read},
+    io::{self, ErrorKind, Read},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -31,11 +31,18 @@ pub fn init_bare_repo(path: &Path) -> Result<(), String> {
         .args(["init", "--bare", "--initial-branch=main"])
         .arg(path)
         .status()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| git_spawn_error(error))?;
     if !status.success() {
         return Err(format!("git init --bare failed for {}", path.display()));
     }
     Ok(())
+}
+
+fn git_spawn_error(error: io::Error) -> String {
+    if error.kind() == ErrorKind::NotFound {
+        return "failed to execute git: not found in PATH".to_string();
+    }
+    format!("failed to execute git: {error}")
 }
 
 pub fn install_post_receive_hook(
@@ -109,7 +116,7 @@ pub fn create_source_archive(
         .arg(target_path)
         .arg(commit_sha)
         .status()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| git_spawn_error(error))?;
     if !status.success() {
         return Err(format!(
             "git archive failed for commit {commit_sha} in {}",

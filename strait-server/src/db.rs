@@ -233,6 +233,12 @@ impl Database {
         Ok(id)
     }
 
+    pub fn delete_repo(&self, repo_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        conn.execute("DELETE FROM repos WHERE id = ?1", [repo_id])?;
+        Ok(())
+    }
+
     pub fn list_repos(&self) -> Result<Vec<Repo>, Box<dyn std::error::Error>> {
         let conn = self.conn.lock().expect("db mutex poisoned");
         let mut stmt = conn.prepare(

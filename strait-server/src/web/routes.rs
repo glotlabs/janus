@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    fs,
     net::{Ipv4Addr, Ipv6Addr},
     path::{Path, PathBuf},
     sync::Arc,
@@ -29,7 +30,7 @@ use serde_json::{Value, json};
 use sha2::Sha256;
 use strait_lib::SUPPORTED_RUNNER_PROTOCOL_VERSIONS;
 use tokio::time;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use url::Url;
 use uuid::Uuid;
 
@@ -454,29 +455,12 @@ async fn create_repo(
         .map_err(|error| render_repos_form_error(&state, &user, &form, error.to_string()))?;
     validate_branch_name(&form.default_branch)
         .map_err(|error| render_repos_form_error(&state, &user, &form, error))?;
-    let bare_path = PathBuf::from(&state.config.repos_dir).join(format!("{}.git", Uuid::now_v7()));
-    let repo_id = state
-        .db
-        .create_repo(
-            form.name.trim(),
-            &normalized,
-            &bare_path.display().to_string(),
-            form.default_branch.trim(),
-        )
-        .map_err(api_internal_error)?;
-    let repo = state
-        .db
-        .get_repo(&repo_id)
-        .map_err(api_internal_error)?
-        .ok_or_else(|| api_internal_error("missing repo after create"))?;
-    git::init_bare_repo(Path::new(&repo.bare_path)).map_err(api_internal_error)?;
-    git::install_post_receive_hook(
-        Path::new(&repo.bare_path),
-        state.server_bin.as_path(),
-        state.config_path.as_path(),
-        &repo.id,
-    )
-    .map_err(api_internal_error)?;
+    let repo = provision_repo(
+        &state,
+        form.name.trim(),
+        &normalized,
+        form.default_branch.trim(),
+    )?;
     record_audit_event(
         &state,
         &user,
@@ -487,6 +471,72 @@ async fn create_repo(
         json!({ "default_branch": repo.default_branch, "normalized_name": repo.normalized_name }),
     )?;
     Ok(Redirect::to("/repos"))
+}
+
+fn provision_repo(
+    state: &Arc<AppState>,
+    name: &str,
+    normalized: &str,
+    default_branch: &str,
+) -> Result<Repo, Response> {
+    let bare_path = PathBuf::from(&state.config.repos_dir).join(format!("{}.git", Uuid::now_v7()));
+    git::init_bare_repo(&bare_path).map_err(api_internal_error)?;
+
+    let repo_id = match state.db.create_repo(
+        name,
+        normalized,
+        &bare_path.display().to_string(),
+        default_branch,
+    ) {
+        Ok(repo_id) => repo_id,
+        Err(error) => {
+            cleanup_bare_repo(&bare_path);
+            return Err(api_internal_error(error));
+        }
+    };
+
+    let repo = match state.db.get_repo(&repo_id) {
+        Ok(Some(repo)) => repo,
+        Ok(None) => {
+            rollback_repo_provisioning(state, &repo_id, &bare_path);
+            return Err(api_internal_error("missing repo after create"));
+        }
+        Err(error) => {
+            rollback_repo_provisioning(state, &repo_id, &bare_path);
+            return Err(api_internal_error(error));
+        }
+    };
+
+    if let Err(error) = git::install_post_receive_hook(
+        Path::new(&repo.bare_path),
+        state.server_bin.as_path(),
+        state.config_path.as_path(),
+        &repo.id,
+    ) {
+        rollback_repo_provisioning(state, &repo.id, Path::new(&repo.bare_path));
+        return Err(api_internal_error(error));
+    }
+
+    Ok(repo)
+}
+
+fn rollback_repo_provisioning(state: &Arc<AppState>, repo_id: &str, bare_path: &Path) {
+    if let Err(error) = state.db.delete_repo(repo_id) {
+        warn!(repo_id, error = %error, "failed to roll back repository database row");
+    }
+    cleanup_bare_repo(bare_path);
+}
+
+fn cleanup_bare_repo(bare_path: &Path) {
+    if bare_path.exists() {
+        if let Err(error) = fs::remove_dir_all(bare_path) {
+            warn!(
+                bare_path = %bare_path.display(),
+                error = %error,
+                "failed to clean up repository directory after provisioning failure"
+            );
+        }
+    }
 }
 
 async fn trigger_repo(
@@ -981,29 +1031,12 @@ async fn api_create_repo(
     }
     let normalized = git::validate_repo_name(&request.name).map_err(api_bad_request)?;
     validate_branch_name(&request.default_branch).map_err(api_bad_request)?;
-    let bare_path = PathBuf::from(&state.config.repos_dir).join(format!("{}.git", Uuid::now_v7()));
-    let repo_id = state
-        .db
-        .create_repo(
-            request.name.trim(),
-            &normalized,
-            &bare_path.display().to_string(),
-            request.default_branch.trim(),
-        )
-        .map_err(api_internal_error)?;
-    let repo = state
-        .db
-        .get_repo(&repo_id)
-        .map_err(api_internal_error)?
-        .ok_or_else(|| api_internal_error("missing repo after create"))?;
-    git::init_bare_repo(Path::new(&repo.bare_path)).map_err(api_internal_error)?;
-    git::install_post_receive_hook(
-        Path::new(&repo.bare_path),
-        state.server_bin.as_path(),
-        state.config_path.as_path(),
-        &repo.id,
-    )
-    .map_err(api_internal_error)?;
+    let repo = provision_repo(
+        &state,
+        request.name.trim(),
+        &normalized,
+        request.default_branch.trim(),
+    )?;
     record_audit_event(
         &state,
         &user,

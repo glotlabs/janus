@@ -591,6 +591,9 @@ async fn responses_include_security_headers() {
 async fn api_internal_errors_do_not_expose_details() {
     let fixture = test_fixture().await;
     let repo = create_repo_direct(&fixture.state, &fixture.user, "duplicate-api-repo");
+    let repo_dir_count_before = fs::read_dir(&fixture.state.config.repos_dir)
+        .expect("repo dir")
+        .count();
     let token = csrf_token(&fixture.state, &fixture.user);
     let cookie = session_cookie_value(&fixture.state, &fixture.user.id);
     let response = fixture
@@ -620,6 +623,10 @@ async fn api_internal_errors_do_not_expose_details() {
     assert_eq!(payload["error"]["code"], json!("internal_error"));
     assert_eq!(payload["error"]["message"], json!("internal server error"));
     assert!(!String::from_utf8_lossy(&body).contains("UNIQUE"));
+    let repo_dir_count_after = fs::read_dir(&fixture.state.config.repos_dir)
+        .expect("repo dir")
+        .count();
+    assert_eq!(repo_dir_count_after, repo_dir_count_before);
 }
 
 #[tokio::test]
