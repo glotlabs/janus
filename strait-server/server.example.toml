@@ -8,6 +8,10 @@ path = "/var/lib/strait-server/db/server.sqlite3"
 listen = "127.0.0.1:8090"
 public_base_url = "ci.example.internal"
 
+[control]
+socket_path = "/var/run/strait_server/control.sock"
+socket_mode = 0o660
+
 [auth]
 session_secret = "replace-me-with-a-long-random-secret"
 session_ttl_days = 7

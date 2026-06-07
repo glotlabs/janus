@@ -2,6 +2,7 @@ mod app;
 mod artifacts;
 mod auth;
 mod config;
+mod control;
 mod db;
 mod git;
 mod models;
@@ -12,7 +13,7 @@ mod schema_diff;
 mod state_machine;
 mod web;
 
-use std::env;
+use std::{env, io::Read};
 
 use app::{
     Cli, Command, bootstrap_admin, build_state, hook_post_receive, init_tracing,
@@ -40,6 +41,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let password = password_from_source(password_source)?;
             return bootstrap_admin(&cli.config_path, username, password);
         }
+        Command::GitResolveRepo { repo, socket_path } => {
+            let bare_path = control::resolve_repo_path(socket_path, repo).await?;
+            println!("{bare_path}");
+            return Ok(());
+        }
+        Command::GitPostReceive {
+            repo_id,
+            socket_path,
+        } => {
+            let mut refs_raw = String::new();
+            std::io::stdin().read_to_string(&mut refs_raw)?;
+            control::send_post_receive(socket_path, repo_id, refs_raw).await?;
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -47,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Command::Serve => serve(state).await,
+        Command::GitResolveRepo { .. } | Command::GitPostReceive { .. } => unreachable!(),
         Command::HookPostReceive { repo_id } => hook_post_receive(state, &repo_id),
         Command::AdminReconcileHooks => reconcile_hooks(state),
         Command::AdminSeedUser {

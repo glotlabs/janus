@@ -280,6 +280,30 @@ impl Database {
             .optional()?)
     }
 
+    pub fn get_repo_by_normalized_name(
+        &self,
+        normalized_name: &str,
+    ) -> Result<Option<Repo>, Box<dyn std::error::Error>> {
+        let conn = self.conn.lock().expect("db mutex poisoned");
+        Ok(conn
+            .query_row(
+                "SELECT id, name, normalized_name, bare_path, default_branch, created_at
+             FROM repos WHERE normalized_name = ?1",
+                [normalized_name],
+                |row| {
+                    Ok(Repo {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        normalized_name: row.get(2)?,
+                        bare_path: row.get(3)?,
+                        default_branch: row.get(4)?,
+                        created_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     pub fn create_push_event(
         &self,
         repo_id: &str,

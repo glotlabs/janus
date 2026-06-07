@@ -173,6 +173,9 @@ async fn wait_for_pipeline_success(
 
 fn write_config(temp: &Path, port: u16, runner_base_url: &str) -> PathBuf {
     let config = temp.join("server.toml");
+    let control_socket_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".test-sockets");
+    fs::create_dir_all(&control_socket_dir).expect("control socket dir");
+    let control_socket = control_socket_dir.join(format!("strait-{port}.sock"));
     fs::create_dir_all(temp.join("data")).expect("data dir");
     fs::create_dir_all(temp.join("repos")).expect("repos dir");
     fs::write(
@@ -187,6 +190,9 @@ path = "{}"
 [server]
 listen = "127.0.0.1:{}"
 public_base_url = "ci.test"
+
+[control]
+socket_path = "{}"
 
 [auth]
 session_secret = "test-secret"
@@ -234,6 +240,7 @@ server_artifact_bytes = 268435456
             temp.join("repos").display(),
             temp.join("data/server.sqlite3").display(),
             port,
+            control_socket.display(),
             temp.join("data").display(),
             temp.join("data").display(),
         ),

@@ -8,6 +8,8 @@ pub struct Config {
     pub repos_dir: String,
     pub database: DatabaseConfig,
     pub server: ServerConfig,
+    #[serde(default)]
+    pub control: ControlConfig,
     pub auth: AuthConfig,
     pub runner_auth: RunnerAuthConfig,
     pub scheduler: SchedulerConfig,
@@ -58,6 +60,31 @@ pub struct DatabaseConfig {
 pub struct ServerConfig {
     pub listen: String,
     pub public_base_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ControlConfig {
+    #[serde(default = "default_control_socket_path")]
+    pub socket_path: String,
+    #[serde(default = "default_control_socket_mode")]
+    pub socket_mode: u32,
+}
+
+impl Default for ControlConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: default_control_socket_path(),
+            socket_mode: default_control_socket_mode(),
+        }
+    }
+}
+
+fn default_control_socket_path() -> String {
+    crate::control::DEFAULT_SOCKET_PATH.to_string()
+}
+
+fn default_control_socket_mode() -> u32 {
+    0o660
 }
 
 #[derive(Debug, Clone, Deserialize)]

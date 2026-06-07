@@ -28,7 +28,7 @@ pub fn init_bare_repo(path: &Path) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let status = Command::new("git")
-        .args(["init", "--bare", "--initial-branch=main"])
+        .args(["init", "--bare", "--shared=group", "--initial-branch=main"])
         .arg(path)
         .status()
         .map_err(|error| git_spawn_error(error))?;
@@ -48,16 +48,16 @@ fn git_spawn_error(error: io::Error) -> String {
 pub fn install_post_receive_hook(
     bare_path: &Path,
     server_bin: &Path,
-    config_path: &Path,
+    socket_path: &Path,
     repo_id: &str,
 ) -> Result<(), String> {
     let hooks_dir = bare_path.join("hooks");
     fs::create_dir_all(&hooks_dir).map_err(|error| error.to_string())?;
     let hook_path = hooks_dir.join("post-receive");
     let script = format!(
-        "#!/bin/sh\nset -eu\nexec \"{}\" hook post-receive --config \"{}\" --repo-id \"{}\"\n",
+        "#!/bin/sh\nset -eu\nexec \"{}\" git post-receive --socket-path \"{}\" --repo-id \"{}\"\n",
         server_bin.display(),
-        config_path.display(),
+        socket_path.display(),
         repo_id
     );
     fs::write(&hook_path, script).map_err(|error| error.to_string())?;

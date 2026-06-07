@@ -3,16 +3,17 @@ use std::{
     fs,
     io::{self, Read, Write},
     net::SocketAddr,
+    os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration as StdDuration, Instant},
 };
 
 use serde_json::json;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
-    artifacts::ArtifactStore, auth::hash_password, config::Config, db::Database, git,
+    artifacts::ArtifactStore, auth::hash_password, config::Config, control, db::Database, git,
     models::UserRole, runner::RunnerClient, runner_auth::RunnerSigner, scheduler, web,
 };
 
@@ -23,7 +24,6 @@ pub struct AppState {
     pub(crate) artifacts: ArtifactStore,
     pub(crate) runner_client: RunnerClient,
     pub(crate) runner_signer: RunnerSigner,
-    pub(crate) config_path: Arc<PathBuf>,
     pub(crate) server_bin: Arc<PathBuf>,
     pub(crate) login_attempts: Arc<Mutex<BTreeMap<String, LoginWindow>>>,
 }
@@ -53,7 +53,6 @@ pub(crate) fn build_state(
         db,
         runner_client: RunnerClient::new(runner_signer.clone(), limits, runners),
         runner_signer,
-        config_path: Arc::new(config_path),
         server_bin: Arc::new(server_bin),
         login_attempts: Arc::new(Mutex::new(BTreeMap::new())),
     }))
@@ -72,6 +71,7 @@ pub(crate) async fn serve(state: Arc<AppState>) -> Result<(), Box<dyn std::error
     let address: SocketAddr = state.config.server.listen.parse()?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let scheduler_handles = scheduler::spawn(Arc::clone(&state), shutdown_rx);
+    let control_handle = spawn_control_server(Arc::clone(&state), shutdown_tx.subscribe()).await?;
     let app = web::build_router(state);
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(listen = %address, "strait-server listening");
@@ -93,7 +93,88 @@ pub(crate) async fn serve(state: Arc<AppState>) -> Result<(), Box<dyn std::error
         Ok(()) => {}
         Err(_) => tracing::warn!("timed out waiting for scheduler shutdown"),
     }
+    match tokio::time::timeout(StdDuration::from_secs(5), control_handle).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => return Err(error),
+        Ok(Err(error)) => return Err(Box::new(error)),
+        Err(_) => tracing::warn!("timed out waiting for control socket shutdown"),
+    }
     result?;
+    Ok(())
+}
+
+async fn spawn_control_server(
+    state: Arc<AppState>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<
+    tokio::task::JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+    Box<dyn std::error::Error>,
+> {
+    let socket_path = PathBuf::from(&state.config.control.socket_path);
+    prepare_control_socket_path(&socket_path)?;
+    let listener = bind_control_socket(&socket_path, state.config.control.socket_mode)?;
+    if let Err(error) = set_control_socket_mode(&socket_path, state.config.control.socket_mode) {
+        warn!(
+            socket = %socket_path.display(),
+            %error,
+            "failed to chmod control socket after bind"
+        );
+    }
+    let app = control::build_router(state);
+    info!(socket = %socket_path.display(), "strait-server control socket listening");
+    Ok(tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                while shutdown_rx.changed().await.is_ok() {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+            })
+            .await?;
+        let _ = fs::remove_file(socket_path);
+        Ok(())
+    }))
+}
+
+fn bind_control_socket(
+    socket_path: &Path,
+    mode: u32,
+) -> Result<tokio::net::UnixListener, Box<dyn std::error::Error>> {
+    let old_umask = unsafe { libc::umask((!mode & 0o777) as libc::mode_t) };
+    let result = tokio::net::UnixListener::bind(socket_path);
+    unsafe {
+        libc::umask(old_umask);
+    }
+    Ok(result?)
+}
+
+fn prepare_control_socket_path(socket_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = socket_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::symlink_metadata(socket_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_socket() {
+                fs::remove_file(socket_path)?;
+                return Ok(());
+            }
+            Err(format!(
+                "control socket path exists and is not a socket: {}",
+                socket_path.display()
+            )
+            .into())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn set_control_socket_mode(
+    socket_path: &Path,
+    mode: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(mode))?;
     Ok(())
 }
 
@@ -112,7 +193,7 @@ pub(crate) fn reconcile_hooks(state: Arc<AppState>) -> Result<(), Box<dyn std::e
         git::install_post_receive_hook(
             Path::new(&repo.bare_path),
             state.server_bin.as_path(),
-            state.config_path.as_path(),
+            Path::new(&state.config.control.socket_path),
             &repo.id,
         )?;
     }
@@ -317,6 +398,14 @@ pub(crate) struct Cli {
 
 pub(crate) enum Command {
     Serve,
+    GitResolveRepo {
+        repo: String,
+        socket_path: PathBuf,
+    },
+    GitPostReceive {
+        repo_id: String,
+        socket_path: PathBuf,
+    },
     HookPostReceive {
         repo_id: String,
     },
@@ -386,6 +475,54 @@ impl Cli {
                 }
                 Command::HookPostReceive {
                     repo_id: repo_id.ok_or("missing --repo-id")?,
+                }
+            }
+            Some("git") if args.get(index + 1).map(String::as_str) == Some("resolve-repo") => {
+                index += 2;
+                let mut repo = None;
+                let mut socket_path = PathBuf::from(control::DEFAULT_SOCKET_PATH);
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--repo" => {
+                            index += 1;
+                            repo = args.get(index).cloned();
+                        }
+                        "--socket-path" => {
+                            index += 1;
+                            socket_path =
+                                PathBuf::from(args.get(index).ok_or("missing socket path")?);
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                Command::GitResolveRepo {
+                    repo: repo.ok_or("missing --repo")?,
+                    socket_path,
+                }
+            }
+            Some("git") if args.get(index + 1).map(String::as_str) == Some("post-receive") => {
+                index += 2;
+                let mut repo_id = None;
+                let mut socket_path = PathBuf::from(control::DEFAULT_SOCKET_PATH);
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--repo-id" => {
+                            index += 1;
+                            repo_id = args.get(index).cloned();
+                        }
+                        "--socket-path" => {
+                            index += 1;
+                            socket_path =
+                                PathBuf::from(args.get(index).ok_or("missing socket path")?);
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                Command::GitPostReceive {
+                    repo_id: repo_id.ok_or("missing --repo-id")?,
+                    socket_path,
                 }
             }
             Some("admin") if args.get(index + 1).map(String::as_str) == Some("reconcile-hooks") => {

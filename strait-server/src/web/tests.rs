@@ -60,7 +60,8 @@ async fn repo_creation_installs_hook() {
     let repo = repos.iter().find(|repo| repo.name == "demo").expect("repo");
     let hook = fs::read_to_string(PathBuf::from(&repo.bare_path).join("hooks/post-receive"))
         .expect("hook");
-    assert!(hook.contains("hook post-receive"));
+    assert!(hook.contains("git post-receive"));
+    assert!(hook.contains("--socket-path"));
     assert!(hook.contains(&repo.id));
 }
 

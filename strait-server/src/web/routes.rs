@@ -510,7 +510,7 @@ fn provision_repo(
     if let Err(error) = git::install_post_receive_hook(
         Path::new(&repo.bare_path),
         state.server_bin.as_path(),
-        state.config_path.as_path(),
+        Path::new(&state.config.control.socket_path),
         &repo.id,
     ) {
         rollback_repo_provisioning(state, &repo.id, Path::new(&repo.bare_path));
