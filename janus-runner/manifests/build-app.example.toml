@@ -1,0 +1,13 @@
+name = "build-app"
+script = "/usr/local/libexec/janus-runner/jobs/build-app.sh"
+timeout_seconds = 600
+concurrency = "job_exclusive"
+
+[inputs.source]
+type = "artifact"
+required = true
+
+[outputs.app]
+type = "artifact"
+path = "app.tar.gz"
+required = true

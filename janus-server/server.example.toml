@@ -1,0 +1,50 @@
+data_dir = "/var/lib/janus-server"
+repos_dir = "/var/lib/janus-server/repos"
+
+[database]
+path = "/var/lib/janus-server/db/server.sqlite3"
+
+[server]
+listen = "127.0.0.1:8090"
+public_base_url = "ci.example.internal"
+
+[control]
+socket_path = "/var/run/janus_server/control.sock"
+socket_mode = 0o660
+
+[auth]
+session_secret = "replace-me-with-a-long-random-secret"
+session_ttl_days = 7
+session_cookie_secure = true
+login_rate_limit_per_minute = 10
+
+[scheduler]
+poll_interval_ms = 2000
+cancel_stuck_timeout_seconds = 30
+max_cancel_retries = 3
+max_infra_retries = 2
+
+[runners]
+healthcheck_interval_seconds = 30
+connect_timeout_seconds = 5
+request_timeout_seconds = 120
+
+[runner_url_policy]
+require_https = false
+allow_credentials = true
+allow_query = true
+allow_fragment = true
+allow_path = true
+allow_localhost = true
+allow_private_ips = true
+allow_link_local_ips = true
+allow_documentation_ips = true
+allow_multicast_ips = true
+
+[limits]
+request_body_bytes = 1048576
+runner_json_bytes = 4194304
+runner_logs_bytes = 8388608
+runner_artifact_bytes = 268435456
+runner_error_bytes = 16384
+server_artifact_bytes = 268435456

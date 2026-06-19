@@ -1,6 +1,6 @@
 # FreeBSD Deployment
 
-This guide deploys `strait-server` in a FreeBSD jail after you have already built
+This guide deploys `janus-server` in a FreeBSD jail after you have already built
 the production binary.
 
 ## Build
@@ -8,13 +8,13 @@ the production binary.
 From the repository root on the build host:
 
 ```sh
-cargo build --release --locked -p strait-server
+cargo build --release --locked -p janus-server
 ```
 
 The production binary is:
 
 ```sh
-target/release/strait-server
+target/release/janus-server
 ```
 
 Copy that binary into the target jail.
@@ -28,52 +28,52 @@ pkg update
 pkg install -y git ca_root_nss openssl
 ```
 
-`git` is required because `strait-server` creates bare repositories and archives
+`git` is required because `janus-server` creates bare repositories and archives
 source trees from them.
 
 ## Create User And Directories
 
 ```sh
-pw groupadd strait
+pw groupadd janus
 pw groupadd git
-pw useradd strait -g strait -d /var/db/strait-server -s /usr/sbin/nologin
+pw useradd janus -g janus -d /var/db/janus-server -s /usr/sbin/nologin
 pw useradd git -g git -d /home/git -s /bin/sh
 
-install -d -o strait -g git -m 0750 /var/db/strait-server
-install -d -o strait -g git -m 2770 /var/db/strait-server/repos
-install -d -o strait -g strait -m 0750 /var/db/strait-server/db
+install -d -o janus -g git -m 0750 /var/db/janus-server
+install -d -o janus -g git -m 2770 /var/db/janus-server/repos
+install -d -o janus -g janus -m 0750 /var/db/janus-server/db
 install -d -o git -g git -m 0750 /home/git
 install -d -o root -g wheel -m 0755 /usr/local/bin
 install -d -o root -g wheel -m 0755 /usr/local/libexec
-install -d -o root -g wheel -m 0755 /usr/local/etc/strait-server
+install -d -o root -g wheel -m 0755 /usr/local/etc/janus-server
 ```
 
 Install the binary:
 
 ```sh
-install -m 0755 /path/to/strait-server /usr/local/bin/strait-server
+install -m 0755 /path/to/janus-server /usr/local/bin/janus-server
 ```
 
 ## Create Server Config
 
-Create `/usr/local/etc/strait-server/server.toml`:
+Create `/usr/local/etc/janus-server/server.toml`:
 
 ```sh
 SESSION_SECRET="$(openssl rand -base64 48)"
 
-cat > /usr/local/etc/strait-server/server.toml <<EOF
-data_dir = "/var/db/strait-server"
-repos_dir = "/var/db/strait-server/repos"
+cat > /usr/local/etc/janus-server/server.toml <<EOF
+data_dir = "/var/db/janus-server"
+repos_dir = "/var/db/janus-server/repos"
 
 [database]
-path = "/var/db/strait-server/db/server.sqlite3"
+path = "/var/db/janus-server/db/server.sqlite3"
 
 [server]
 listen = "127.0.0.1:8090"
 public_base_url = "your-ci-hostname.example.com"
 
 [control]
-socket_path = "/var/run/strait_server/control.sock"
+socket_path = "/var/run/janus_server/control.sock"
 socket_mode = 0o660
 
 [auth]
@@ -114,20 +114,20 @@ runner_error_bytes = 16384
 server_artifact_bytes = 268435456
 EOF
 
-chown root:strait /usr/local/etc/strait-server/server.toml
-chmod 0640 /usr/local/etc/strait-server/server.toml
+chown root:janus /usr/local/etc/janus-server/server.toml
+chmod 0640 /usr/local/etc/janus-server/server.toml
 ```
 
 `admin runner-key init` adds the required `[runner_auth]` section to this file.
 
 ```sh
-/usr/local/bin/strait-server admin runner-key init --config /usr/local/etc/strait-server/server.toml
-chown strait:git /var/db/strait-server
-chown -R strait:strait /var/db/strait-server/db
-chown -R strait:git /var/db/strait-server/repos
-chmod 0750 /var/db/strait-server
-chmod 0750 /var/db/strait-server/db
-chmod 2770 /var/db/strait-server/repos
+/usr/local/bin/janus-server admin runner-key init --config /usr/local/etc/janus-server/server.toml
+chown janus:git /var/db/janus-server
+chown -R janus:janus /var/db/janus-server/db
+chown -R janus:git /var/db/janus-server/repos
+chmod 0750 /var/db/janus-server
+chmod 0750 /var/db/janus-server/db
+chmod 2770 /var/db/janus-server/repos
 ```
 
 ## Bootstrap Admin User
@@ -135,77 +135,77 @@ chmod 2770 /var/db/strait-server/repos
 Run this before any users exist:
 
 ```sh
-/usr/local/bin/strait-server admin bootstrap-admin \
+/usr/local/bin/janus-server admin bootstrap-admin \
   --username admin \
-  --config /usr/local/etc/strait-server/server.toml
+  --config /usr/local/etc/janus-server/server.toml
 ```
 
 For non-interactive setup:
 
 ```sh
-printf '%s\n' "$ADMIN_PASSWORD" | /usr/local/bin/strait-server admin bootstrap-admin \
+printf '%s\n' "$ADMIN_PASSWORD" | /usr/local/bin/janus-server admin bootstrap-admin \
   --username admin \
   --password-stdin \
-  --config /usr/local/etc/strait-server/server.toml
+  --config /usr/local/etc/janus-server/server.toml
 ```
 
 ## Create rc Service
 
-Create `/usr/local/etc/rc.d/strait_server`:
+Create `/usr/local/etc/rc.d/janus_server`:
 
 ```sh
-cat > /usr/local/etc/rc.d/strait_server <<'EOF'
+cat > /usr/local/etc/rc.d/janus_server <<'EOF'
 #!/bin/sh
 
-# PROVIDE: strait_server
+# PROVIDE: janus_server
 # REQUIRE: NETWORKING
 # KEYWORD: shutdown
 
 . /etc/rc.subr
 
-name="strait_server"
-rcvar="strait_server_enable"
+name="janus_server"
+rcvar="janus_server_enable"
 
 load_rc_config "$name"
 
-: ${strait_server_enable:="NO"}
-: ${strait_server_user:="strait"}
-: ${strait_server_config:="/usr/local/etc/strait-server/server.toml"}
+: ${janus_server_enable:="NO"}
+: ${janus_server_user:="janus"}
+: ${janus_server_config:="/usr/local/etc/janus-server/server.toml"}
 
-pid_dir="/var/run/strait_server"
-pidfile="${pid_dir}/strait_server.pid"
-logfile="/var/log/strait_server.log"
+pid_dir="/var/run/janus_server"
+pidfile="${pid_dir}/janus_server.pid"
+logfile="/var/log/janus_server.log"
 
 command="/usr/sbin/daemon"
-command_args="-p ${pidfile} -o ${logfile} env PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin /usr/local/bin/strait-server serve --config ${strait_server_config}"
+command_args="-p ${pidfile} -o ${logfile} env PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin /usr/local/bin/janus-server serve --config ${janus_server_config}"
 
-start_precmd="strait_server_precmd"
+start_precmd="janus_server_precmd"
 
-strait_server_precmd()
+janus_server_precmd()
 {
-    install -d -o "${strait_server_user}" -g git -m 2770 "${pid_dir}"
+    install -d -o "${janus_server_user}" -g git -m 2770 "${pid_dir}"
     touch "${logfile}"
-    chown "${strait_server_user}:${strait_server_user}" "${logfile}"
+    chown "${janus_server_user}:${janus_server_user}" "${logfile}"
 }
 
 run_rc_command "$1"
 EOF
 
-chmod 0755 /usr/local/etc/rc.d/strait_server
+chmod 0755 /usr/local/etc/rc.d/janus_server
 ```
 
 Enable and start:
 
 ```sh
-sysrc strait_server_enable=YES
-service strait_server start
-service strait_server status
+sysrc janus_server_enable=YES
+service janus_server start
+service janus_server status
 ```
 
 Check logs:
 
 ```sh
-cat /var/log/strait_server.log
+cat /var/log/janus_server.log
 ```
 
 ## Configure Git SSH
@@ -213,11 +213,11 @@ cat /var/log/strait_server.log
 Install the forced-command wrapper:
 
 ```sh
-cat > /usr/local/libexec/strait-git-ssh <<'EOF'
+cat > /usr/local/libexec/janus-git-ssh <<'EOF'
 #!/bin/sh
 set -eu
 
-SOCKET="/var/run/strait_server/control.sock"
+SOCKET="/var/run/janus_server/control.sock"
 
 case "${SSH_ORIGINAL_COMMAND:-}" in
   "git-upload-pack "*)
@@ -239,7 +239,7 @@ repo=${repo%\'}
 repo=${repo#/}
 repo=${repo%.git}
 
-bare_path=$(/usr/local/bin/strait-server git resolve-repo \
+bare_path=$(/usr/local/bin/janus-server git resolve-repo \
   --socket-path "$SOCKET" \
   --repo "$repo")
 
@@ -250,7 +250,7 @@ export GIT_CONFIG_VALUE_0="$bare_path"
 exec "$git_cmd" "$bare_path"
 EOF
 
-chmod 0755 /usr/local/libexec/strait-git-ssh
+chmod 0755 /usr/local/libexec/janus-git-ssh
 ```
 
 Configure sshd:
@@ -262,7 +262,7 @@ Match User git
     X11Forwarding no
     AllowTcpForwarding no
     PermitTTY no
-    ForceCommand /usr/local/libexec/strait-git-ssh
+    ForceCommand /usr/local/libexec/janus-git-ssh
 ```
 
 Then restart sshd:
@@ -284,14 +284,14 @@ chmod 0600 /home/git/.ssh/authorized_keys
 Verify the socket, repo resolution, and repository access:
 
 ```sh
-ls -ld /var/run/strait_server
-ls -l /var/run/strait_server/control.sock
-su -m git -c '/usr/local/bin/strait-server git resolve-repo --repo your-repo-name'
-su -m git -c 'repo=$(/usr/local/bin/strait-server git resolve-repo --repo your-repo-name) && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$repo" git --git-dir="$repo" rev-parse --git-dir'
+ls -ld /var/run/janus_server
+ls -l /var/run/janus_server/control.sock
+su -m git -c '/usr/local/bin/janus-server git resolve-repo --repo your-repo-name'
+su -m git -c 'repo=$(/usr/local/bin/janus-server git resolve-repo --repo your-repo-name) && GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0="$repo" git --git-dir="$repo" rev-parse --git-dir'
 ```
 
-The runtime directory should be owned by `strait:git` with mode `2770`, and the
-control socket should be owned by `strait:git` with mode `0660`.
+The runtime directory should be owned by `janus:git` with mode `2770`, and the
+control socket should be owned by `janus:git` with mode `0660`.
 
 The `git` user does not need read access to the SQLite database or server
 config. It resolves repository names through the local control socket, then runs
@@ -301,7 +301,7 @@ If any repositories existed before installing this wrapper, regenerate their
 hooks:
 
 ```sh
-/usr/local/bin/strait-server admin reconcile-hooks --config /usr/local/etc/strait-server/server.toml
+/usr/local/bin/janus-server admin reconcile-hooks --config /usr/local/etc/janus-server/server.toml
 ```
 
 ## Verify As Service User
@@ -310,7 +310,7 @@ If the service does not start, first verify that the configured service user can
 run the server:
 
 ```sh
-su -m strait -c '/usr/local/bin/strait-server serve --config /usr/local/etc/strait-server/server.toml'
+su -m janus -c '/usr/local/bin/janus-server serve --config /usr/local/etc/janus-server/server.toml'
 ```
 
 Stop it with `Ctrl-C` after the test.
@@ -320,16 +320,16 @@ database file and its parent directory. SQLite must be able to write sidecar
 files such as `server.sqlite3-wal` or `server.sqlite3-journal`.
 
 ```sh
-service strait_server stop
-chown strait:git /var/db/strait-server
-chmod 0750 /var/db/strait-server
-chown -R strait:strait /var/db/strait-server/db
-chown -R strait:git /var/db/strait-server/repos
-chmod 2770 /var/db/strait-server/repos
-find /var/db/strait-server/repos -type d -exec chmod g+rws {} +
-find /var/db/strait-server/repos -type f -exec chmod g+rw {} +
-chmod 0750 /var/db/strait-server/db
-chmod 0640 /var/db/strait-server/db/server.sqlite3 2>/dev/null || true
+service janus_server stop
+chown janus:git /var/db/janus-server
+chmod 0750 /var/db/janus-server
+chown -R janus:janus /var/db/janus-server/db
+chown -R janus:git /var/db/janus-server/repos
+chmod 2770 /var/db/janus-server/repos
+find /var/db/janus-server/repos -type d -exec chmod g+rws {} +
+find /var/db/janus-server/repos -type f -exec chmod g+rw {} +
+chmod 0750 /var/db/janus-server/db
+chmod 0640 /var/db/janus-server/db/server.sqlite3 2>/dev/null || true
 ```
 
 ## Reverse Proxy
@@ -361,14 +361,14 @@ ssh://git@your-ci-hostname.example.com/repo-name
 
 ## Moving The Binary Or Config
 
-Repository `post-receive` hooks embed the absolute path to the `strait-server`
+Repository `post-receive` hooks embed the absolute path to the `janus-server`
 binary and the control socket path. Install the binary and choose the final
 socket path before creating repositories.
 
 If you move either path later, run:
 
 ```sh
-/usr/local/bin/strait-server admin reconcile-hooks --config /usr/local/etc/strait-server/server.toml
+/usr/local/bin/janus-server admin reconcile-hooks --config /usr/local/etc/janus-server/server.toml
 ```
 
 ## Runner Trust Key
@@ -376,5 +376,5 @@ If you move either path later, run:
 Show the server public key snippet to add to runner configs:
 
 ```sh
-/usr/local/bin/strait-server admin runner-key show --format toml --config /usr/local/etc/strait-server/server.toml
+/usr/local/bin/janus-server admin runner-key show --format toml --config /usr/local/etc/janus-server/server.toml
 ```

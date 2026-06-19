@@ -1,0 +1,646 @@
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{self, Read, Write},
+    net::SocketAddr,
+    os::unix::fs::{FileTypeExt, PermissionsExt},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration as StdDuration, Instant},
+};
+
+use serde_json::json;
+use tracing::{info, warn};
+
+use crate::{
+    artifacts::ArtifactStore, auth::hash_password, config::Config, control, db::Database, git,
+    models::UserRole, runner::RunnerClient, runner_auth::RunnerSigner, scheduler, web,
+};
+
+#[derive(Clone)]
+pub struct AppState {
+    pub(crate) config: Arc<Config>,
+    pub(crate) db: Database,
+    pub(crate) artifacts: ArtifactStore,
+    pub(crate) runner_client: RunnerClient,
+    pub(crate) runner_signer: RunnerSigner,
+    pub(crate) server_bin: Arc<PathBuf>,
+    pub(crate) login_attempts: Arc<Mutex<BTreeMap<String, LoginWindow>>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct LoginWindow {
+    pub(crate) started_at: Instant,
+    pub(crate) count: u64,
+}
+
+pub(crate) fn build_state(
+    config_path: PathBuf,
+    server_bin: PathBuf,
+) -> Result<Arc<AppState>, Box<dyn std::error::Error>> {
+    let config = Arc::new(Config::load_from_path(&config_path)?);
+    prepare_storage(&config)?;
+
+    let db = Database::open(&config.database.path)?;
+    db.cleanup_expired_sessions()?;
+    let runner_signer = RunnerSigner::load_or_generate(&config.runner_auth)?;
+    let limits = config.limits.clone();
+    let runners = config.runners.clone();
+
+    Ok(Arc::new(AppState {
+        artifacts: ArtifactStore::new(&config.data_dir, config.limits.server_artifact_bytes)?,
+        config,
+        db,
+        runner_client: RunnerClient::new(runner_signer.clone(), limits, runners),
+        runner_signer,
+        server_bin: Arc::new(server_bin),
+        login_attempts: Arc::new(Mutex::new(BTreeMap::new())),
+    }))
+}
+
+fn prepare_storage(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(&config.data_dir)?;
+    fs::create_dir_all(&config.repos_dir)?;
+    if let Some(parent) = Path::new(&config.database.path).parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn serve(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
+    let address: SocketAddr = state.config.server.listen.parse()?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let scheduler_handles = scheduler::spawn(Arc::clone(&state), shutdown_rx);
+    let control_handle = spawn_control_server(Arc::clone(&state), shutdown_tx.subscribe()).await?;
+    let app = web::build_router(state);
+    let listener = tokio::net::TcpListener::bind(address).await?;
+    info!(listen = %address, "janus-server listening");
+    let shutdown_tx_for_signal = shutdown_tx.clone();
+    let result = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            info!("shutdown signal received");
+            let _ = shutdown_tx_for_signal.send(true);
+        })
+        .await;
+    let _ = shutdown_tx.send(true);
+    match tokio::time::timeout(
+        StdDuration::from_secs(30),
+        scheduler::shutdown(scheduler_handles),
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(_) => tracing::warn!("timed out waiting for scheduler shutdown"),
+    }
+    match tokio::time::timeout(StdDuration::from_secs(5), control_handle).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => return Err(error),
+        Ok(Err(error)) => return Err(Box::new(error)),
+        Err(_) => tracing::warn!("timed out waiting for control socket shutdown"),
+    }
+    result?;
+    Ok(())
+}
+
+async fn spawn_control_server(
+    state: Arc<AppState>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<
+    tokio::task::JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+    Box<dyn std::error::Error>,
+> {
+    let socket_path = PathBuf::from(&state.config.control.socket_path);
+    prepare_control_socket_path(&socket_path)?;
+    let listener = bind_control_socket(&socket_path, state.config.control.socket_mode)?;
+    if let Err(error) = set_control_socket_mode(&socket_path, state.config.control.socket_mode) {
+        warn!(
+            socket = %socket_path.display(),
+            %error,
+            "failed to chmod control socket after bind"
+        );
+    }
+    let app = control::build_router(state);
+    info!(socket = %socket_path.display(), "janus-server control socket listening");
+    Ok(tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                while shutdown_rx.changed().await.is_ok() {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+            })
+            .await?;
+        let _ = fs::remove_file(socket_path);
+        Ok(())
+    }))
+}
+
+fn bind_control_socket(
+    socket_path: &Path,
+    mode: u32,
+) -> Result<tokio::net::UnixListener, Box<dyn std::error::Error>> {
+    let old_umask = unsafe { libc::umask((!mode & 0o777) as libc::mode_t) };
+    let result = tokio::net::UnixListener::bind(socket_path);
+    unsafe {
+        libc::umask(old_umask);
+    }
+    Ok(result?)
+}
+
+fn prepare_control_socket_path(socket_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = socket_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::symlink_metadata(socket_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_socket() {
+                fs::remove_file(socket_path)?;
+                return Ok(());
+            }
+            Err(format!(
+                "control socket path exists and is not a socket: {}",
+                socket_path.display()
+            )
+            .into())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn set_control_socket_mode(
+    socket_path: &Path,
+    mode: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+pub(crate) fn hook_post_receive(
+    state: Arc<AppState>,
+    repo_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let refs = git::read_push_refs(&mut io::stdin())?;
+    let event_key = git::event_key(repo_id, &refs);
+    state.db.create_push_event(repo_id, &event_key, &refs)?;
+    Ok(())
+}
+
+pub(crate) fn reconcile_hooks(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
+    for repo in state.db.list_repos()? {
+        git::install_post_receive_hook(
+            Path::new(&repo.bare_path),
+            state.server_bin.as_path(),
+            Path::new(&state.config.control.socket_path),
+            &repo.id,
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn seed_user(
+    state: Arc<AppState>,
+    username: &str,
+    password: &str,
+    role: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let password_hash = hash_password(password)?;
+    let role = UserRole::parse(role).ok_or_else(|| format!("unknown user role: {role}"))?;
+    state.db.create_user(username, &password_hash, role)?;
+    Ok(())
+}
+
+pub(crate) fn bootstrap_admin(
+    config_path: &Path,
+    username: &str,
+    password: impl AsRef<str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let password = password.as_ref();
+    let config = Config::load_from_path(config_path)?;
+    prepare_storage(&config)?;
+    let db = Database::open(&config.database.path)?;
+    if db.user_count()? > 0 {
+        return Err("bootstrap-admin can only run when no users exist".into());
+    }
+    validate_bootstrap_admin(username, password)?;
+    let password_hash = hash_password(password)?;
+    let username = username.trim();
+    let user_id = db.create_user(username, &password_hash, UserRole::Admin)?;
+    db.create_audit_event(
+        None,
+        "user.bootstrap_admin",
+        "user",
+        Some(&user_id),
+        Some(username),
+        json!({ "role": UserRole::Admin.as_str() }),
+    )?;
+    info!(
+        action = "user.bootstrap_admin",
+        target_type = "user",
+        target_id = %user_id,
+        target_name = username,
+        "audit event recorded"
+    );
+    println!("bootstrapped admin user {}", username);
+    Ok(())
+}
+
+pub(crate) fn password_from_source(
+    source: &BootstrapPasswordSource,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match source {
+        BootstrapPasswordSource::Prompt => prompt_confirmed_password(),
+        BootstrapPasswordSource::Stdin => {
+            let mut password = String::new();
+            io::stdin().read_to_string(&mut password)?;
+            Ok(password.trim_end_matches(['\r', '\n']).to_string())
+        }
+    }
+}
+
+pub(crate) fn prompt_confirmed_password() -> Result<String, Box<dyn std::error::Error>> {
+    let password = prompt_hidden_password("Password: ")?;
+    let confirmation = prompt_hidden_password("Confirm password: ")?;
+    if password != confirmation {
+        return Err("passwords do not match".into());
+    }
+    Ok(password)
+}
+
+#[cfg(unix)]
+pub(crate) fn prompt_hidden_password(prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let fd = libc::STDIN_FILENO;
+    let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+    if unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+        return Err(
+            "password prompt requires a terminal; use --password-stdin for non-interactive use"
+                .into(),
+        );
+    }
+    let original = unsafe { original.assume_init() };
+    let mut hidden = original;
+    hidden.c_lflag &= !libc::ECHO;
+
+    eprint!("{prompt}");
+    io::stderr().flush()?;
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &hidden) } != 0 {
+        return Err("failed to disable terminal echo".into());
+    }
+
+    let mut password = String::new();
+    let read_result = io::stdin().read_line(&mut password);
+    let restore_result = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &original) };
+    eprintln!();
+
+    read_result?;
+    if restore_result != 0 {
+        return Err("failed to restore terminal echo".into());
+    }
+    Ok(password.trim_end_matches(['\r', '\n']).to_string())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn prompt_hidden_password(_prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
+    Err(
+        "hidden password prompt is not supported on this platform; use --password-stdin instead"
+            .into(),
+    )
+}
+
+fn validate_bootstrap_admin(username: &str, password: &str) -> Result<(), String> {
+    let username = username.trim();
+    if username.len() < 3 {
+        return Err("username must be at least 3 characters".to_string());
+    }
+    if username.chars().count() > 64 {
+        return Err("username must be 64 characters or fewer".to_string());
+    }
+    if !username
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return Err("username contains invalid characters".to_string());
+    }
+    if password.len() < 8 {
+        return Err("password must be at least 8 characters".to_string());
+    }
+    Ok(())
+}
+
+fn set_bootstrap_password_source(
+    current: &mut BootstrapPasswordSource,
+    next: BootstrapPasswordSource,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !matches!(current, BootstrapPasswordSource::Prompt) {
+        return Err("only one bootstrap password source may be provided".into());
+    }
+    *current = next;
+    Ok(())
+}
+
+impl AppState {
+    pub(crate) fn allow_login_attempt(&self, username: &str) -> bool {
+        let mut windows = self
+            .login_attempts
+            .lock()
+            .expect("login attempt mutex poisoned");
+        let now = Instant::now();
+        let window = windows.entry(username.to_string()).or_insert(LoginWindow {
+            started_at: now,
+            count: 0,
+        });
+        if now.duration_since(window.started_at) >= StdDuration::from_secs(60) {
+            window.started_at = now;
+            window.count = 0;
+        }
+        if window.count >= self.config.auth.login_rate_limit_per_minute {
+            return false;
+        }
+        window.count += 1;
+        true
+    }
+}
+
+pub(crate) fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "janus_server=info,axum=info".into()),
+        )
+        .json()
+        .flatten_event(true)
+        .init();
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+pub(crate) struct Cli {
+    pub(crate) config_path: PathBuf,
+    pub(crate) command: Command,
+}
+
+pub(crate) enum Command {
+    Serve,
+    GitResolveRepo {
+        repo: String,
+        socket_path: PathBuf,
+    },
+    GitPostReceive {
+        repo_id: String,
+        socket_path: PathBuf,
+    },
+    HookPostReceive {
+        repo_id: String,
+    },
+    AdminReconcileHooks,
+    AdminSeedUser {
+        username: String,
+        password: String,
+        role: String,
+    },
+    AdminBootstrapAdmin {
+        username: String,
+        password_source: BootstrapPasswordSource,
+    },
+    AdminRunnerKeyShow {
+        format: crate::runner_auth::RunnerKeyShowFormat,
+    },
+    AdminRunnerKeyInit,
+    AdminRunnerKeyRotate,
+}
+
+#[derive(Clone)]
+pub(crate) enum BootstrapPasswordSource {
+    Prompt,
+    Stdin,
+}
+
+impl Cli {
+    pub(crate) fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
+        let args = std::env::args().skip(1).collect::<Vec<_>>();
+        let mut config_path = PathBuf::from("server.toml");
+        if args.is_empty() {
+            return Ok(Self {
+                config_path,
+                command: Command::Serve,
+            });
+        }
+        let mut index = 0;
+        let command = match args.get(index).map(String::as_str) {
+            Some("serve") => {
+                index += 1;
+                while index < args.len() {
+                    if args[index] == "--config" {
+                        index += 1;
+                        config_path = PathBuf::from(args.get(index).ok_or("missing config path")?);
+                    }
+                    index += 1;
+                }
+                Command::Serve
+            }
+            Some("hook") if args.get(index + 1).map(String::as_str) == Some("post-receive") => {
+                index += 2;
+                let mut repo_id = None;
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--repo-id" => {
+                            index += 1;
+                            repo_id = args.get(index).cloned();
+                        }
+                        "--config" => {
+                            index += 1;
+                            config_path =
+                                PathBuf::from(args.get(index).ok_or("missing config path")?);
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                Command::HookPostReceive {
+                    repo_id: repo_id.ok_or("missing --repo-id")?,
+                }
+            }
+            Some("git") if args.get(index + 1).map(String::as_str) == Some("resolve-repo") => {
+                index += 2;
+                let mut repo = None;
+                let mut socket_path = PathBuf::from(control::DEFAULT_SOCKET_PATH);
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--repo" => {
+                            index += 1;
+                            repo = args.get(index).cloned();
+                        }
+                        "--socket-path" => {
+                            index += 1;
+                            socket_path =
+                                PathBuf::from(args.get(index).ok_or("missing socket path")?);
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                Command::GitResolveRepo {
+                    repo: repo.ok_or("missing --repo")?,
+                    socket_path,
+                }
+            }
+            Some("git") if args.get(index + 1).map(String::as_str) == Some("post-receive") => {
+                index += 2;
+                let mut repo_id = None;
+                let mut socket_path = PathBuf::from(control::DEFAULT_SOCKET_PATH);
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--repo-id" => {
+                            index += 1;
+                            repo_id = args.get(index).cloned();
+                        }
+                        "--socket-path" => {
+                            index += 1;
+                            socket_path =
+                                PathBuf::from(args.get(index).ok_or("missing socket path")?);
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                Command::GitPostReceive {
+                    repo_id: repo_id.ok_or("missing --repo-id")?,
+                    socket_path,
+                }
+            }
+            Some("admin") if args.get(index + 1).map(String::as_str) == Some("reconcile-hooks") => {
+                index += 2;
+                while index < args.len() {
+                    if args[index] == "--config" {
+                        index += 1;
+                        config_path = PathBuf::from(args.get(index).ok_or("missing config path")?);
+                    }
+                    index += 1;
+                }
+                Command::AdminReconcileHooks
+            }
+            Some("admin") if args.get(index + 1).map(String::as_str) == Some("seed-user") => {
+                index += 2;
+                let mut username = None;
+                let mut password = None;
+                let mut role = Some("admin".to_string());
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--username" => {
+                            index += 1;
+                            username = args.get(index).cloned();
+                        }
+                        "--password" => {
+                            index += 1;
+                            password = args.get(index).cloned();
+                        }
+                        "--role" => {
+                            index += 1;
+                            role = args.get(index).cloned();
+                        }
+                        "--config" => {
+                            index += 1;
+                            config_path =
+                                PathBuf::from(args.get(index).ok_or("missing config path")?);
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                Command::AdminSeedUser {
+                    username: username.ok_or("missing --username")?,
+                    password: password.ok_or("missing --password")?,
+                    role: role.unwrap_or_else(|| "admin".to_string()),
+                }
+            }
+            Some("admin") if args.get(index + 1).map(String::as_str) == Some("bootstrap-admin") => {
+                index += 2;
+                let mut username = None;
+                let mut password_source = BootstrapPasswordSource::Prompt;
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--username" => {
+                            index += 1;
+                            username = args.get(index).cloned();
+                        }
+                        "--password-stdin" => {
+                            set_bootstrap_password_source(
+                                &mut password_source,
+                                BootstrapPasswordSource::Stdin,
+                            )?;
+                        }
+                        "--config" => {
+                            index += 1;
+                            config_path =
+                                PathBuf::from(args.get(index).ok_or("missing config path")?);
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                Command::AdminBootstrapAdmin {
+                    username: username.ok_or("missing --username")?,
+                    password_source,
+                }
+            }
+            Some("admin") if args.get(index + 1).map(String::as_str) == Some("runner-key") => {
+                index += 2;
+                let action = args.get(index).map(String::as_str).unwrap_or("show");
+                index += 1;
+                let mut format = crate::runner_auth::RunnerKeyShowFormat::Text;
+                while index < args.len() {
+                    match args[index].as_str() {
+                        "--config" => {
+                            index += 1;
+                            config_path =
+                                PathBuf::from(args.get(index).ok_or("missing config path")?);
+                        }
+                        "--format" => {
+                            index += 1;
+                            format = match args.get(index).map(String::as_str) {
+                                Some("text") => crate::runner_auth::RunnerKeyShowFormat::Text,
+                                Some("toml") => crate::runner_auth::RunnerKeyShowFormat::Toml,
+                                Some(value) => {
+                                    return Err(
+                                        format!("unknown runner-key format: {value}").into()
+                                    );
+                                }
+                                None => return Err("missing runner-key format".into()),
+                            };
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                match action {
+                    "init" => Command::AdminRunnerKeyInit,
+                    "show" => Command::AdminRunnerKeyShow { format },
+                    "rotate" => Command::AdminRunnerKeyRotate,
+                    _ => return Err(format!("unknown runner-key action: {action}").into()),
+                }
+            }
+            _ => Command::Serve,
+        };
+        Ok(Self {
+            config_path,
+            command,
+        })
+    }
+}
