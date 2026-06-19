@@ -1,15 +1,7 @@
 name = "build-app"
-script = "/opt/strait-runner/jobs/build-app.sh"
+script = "/usr/local/libexec/strait-runner/jobs/build-app.sh"
 timeout_seconds = 600
 concurrency = "job_exclusive"
-
-[inputs.commit]
-type = "string"
-required = true
-
-[inputs.branch]
-type = "string"
-required = true
 
 [inputs.source]
 type = "artifact"
