@@ -1,0 +1,16 @@
+name: "janus-runner"
+version: "0.1.0"
+origin: "local/janus-runner"
+comment: "Janus CI runner"
+desc: <<EOD
+janus-runner is a small HTTP service for running predefined jobs on a host.
+
+This package installs janus-runner under /opt/janus-runner with a sample config,
+rc script, runtime directories, and example job manifest/script samples.
+EOD
+maintainer: "janus maintainers"
+www: "https://example.invalid/janus"
+prefix: "/opt/janus-runner"
+licenselogic: "single"
+licenses: [ "MIT" ]
+categories: [ "devel" ]

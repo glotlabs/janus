@@ -1,0 +1,18 @@
+@owner root
+@group wheel
+@mode 0755
+bin/janus-runner
+etc/rc.d/janus_runner
+@mode 0640
+@sample etc/runner.toml.sample
+@mode 0755
+@dir jobs
+@dir manifests
+@dir share/examples/janus-runner
+share/examples/janus-runner/build-app.sh.sample
+@mode 0644
+share/examples/janus-runner/build-app.toml.sample
+@mode 0750
+@dir var
+@dir run
+@dir log

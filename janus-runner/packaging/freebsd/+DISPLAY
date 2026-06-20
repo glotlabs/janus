@@ -1,0 +1,51 @@
+janus-runner has been installed under:
+
+    /opt/janus-runner
+
+janus-runner is installed to run as root because job scripts may need host-level
+build tools, sandboxes, or deployment permissions. Only expose trusted job
+manifests and scripts.
+
+Next steps:
+
+1. Edit the runner config:
+
+       vi /opt/janus-runner/etc/runner.toml
+
+   Copy the server trust snippet from janus-server:
+
+       /opt/janus-server/bin/janus-server admin runner-key show \
+         --format toml \
+         --config /opt/janus-server/etc/server.toml
+
+   Paste the resulting [[auth.servers]] block into runner.toml.
+
+2. Add job manifests under:
+
+       /opt/janus-runner/manifests
+
+   Example files are installed under:
+
+       /opt/janus-runner/share/examples/janus-runner
+
+   Copy and edit them before enabling the runner. The example build job expects:
+
+       /opt/janus-runner/jobs/build-app.sh
+
+3. Enable and start the service.
+
+   Either add the package rc directory to local_startup:
+
+       sysrc local_startup="/usr/local/etc/rc.d /opt/janus-runner/etc/rc.d"
+       sysrc janus_runner_enable=YES
+       service janus_runner start
+
+   Or symlink the rc script into /usr/local/etc/rc.d:
+
+       ln -s /opt/janus-runner/etc/rc.d/janus_runner /usr/local/etc/rc.d/janus_runner
+       sysrc janus_runner_enable=YES
+       service janus_runner start
+
+Logs are written to:
+
+    /opt/janus-runner/log/janus_runner.log

@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+PREFIX="${PKG_PREFIX:-/opt/janus-runner}"
+
+install -d -o root -g wheel -m 0755 "${PREFIX}"
+install -d -o root -g wheel -m 0755 "${PREFIX}/bin"
+install -d -o root -g wheel -m 0755 "${PREFIX}/etc"
+install -d -o root -g wheel -m 0755 "${PREFIX}/etc/rc.d"
+install -d -o root -g wheel -m 0755 "${PREFIX}/jobs"
+install -d -o root -g wheel -m 0755 "${PREFIX}/manifests"
+install -d -o root -g wheel -m 0755 "${PREFIX}/share"
+install -d -o root -g wheel -m 0755 "${PREFIX}/share/examples"
+install -d -o root -g wheel -m 0755 "${PREFIX}/share/examples/janus-runner"
+install -d -o root -g wheel -m 0750 "${PREFIX}/var"
+install -d -o root -g wheel -m 0750 "${PREFIX}/run"
+install -d -o root -g wheel -m 0750 "${PREFIX}/log"
+
+touch "${PREFIX}/log/janus_runner.log"
+chown root:wheel "${PREFIX}/log/janus_runner.log"
+chmod 0640 "${PREFIX}/log/janus_runner.log"

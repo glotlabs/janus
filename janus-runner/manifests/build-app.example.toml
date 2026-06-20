@@ -1,5 +1,5 @@
 name = "build-app"
-script = "/usr/local/libexec/janus-runner/jobs/build-app.sh"
+script = "/opt/janus-runner/jobs/build-app.sh"
 timeout_seconds = 600
 concurrency = "job_exclusive"
 

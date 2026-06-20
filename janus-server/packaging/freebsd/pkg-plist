@@ -1,0 +1,29 @@
+@owner root
+@group wheel
+@mode 0755
+bin/janus-server
+etc/rc.d/janus_server
+libexec/janus-git-ssh
+@owner root
+@group janus
+@mode 0640
+@sample etc/server.toml.sample
+@owner janus
+@group git
+@mode 0750
+@dir var
+@mode 2770
+@dir var/repos
+@dir run
+@owner janus
+@group janus
+@mode 0750
+@dir var/db
+@dir var/keys
+@dir log
+@owner git
+@group git
+@mode 0750
+@dir home/git
+@mode 0700
+@dir home/git/.ssh

@@ -1,0 +1,37 @@
+#!/bin/sh
+
+# PROVIDE: janus_server
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="janus_server"
+rcvar="janus_server_enable"
+
+load_rc_config "${name}"
+
+: ${janus_server_enable:="NO"}
+: ${janus_server_user:="janus"}
+: ${janus_server_prefix:="/opt/janus-server"}
+: ${janus_server_config:="${janus_server_prefix}/etc/server.toml"}
+
+pid_dir="${janus_server_prefix}/run"
+pidfile="${pid_dir}/janus_server.pid"
+logfile="${janus_server_prefix}/log/janus_server.log"
+
+command="/usr/sbin/daemon"
+command_args="-u ${janus_server_user} -p ${pidfile} -o ${logfile} env PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:${janus_server_prefix}/bin ${janus_server_prefix}/bin/janus-server serve --config ${janus_server_config}"
+
+start_precmd="janus_server_precmd"
+
+janus_server_precmd()
+{
+    install -d -o "${janus_server_user}" -g git -m 2770 "${pid_dir}"
+    install -d -o "${janus_server_user}" -g "${janus_server_user}" -m 0750 "$(dirname "${logfile}")"
+    touch "${logfile}"
+    chown "${janus_server_user}:${janus_server_user}" "${logfile}"
+    chmod 0640 "${logfile}"
+}
+
+run_rc_command "$1"

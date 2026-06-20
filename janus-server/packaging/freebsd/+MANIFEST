@@ -1,0 +1,31 @@
+name: "janus-server"
+version: "0.1.0"
+origin: "local/janus-server"
+comment: "Janus CI server"
+desc: <<EOD
+janus-server is the orchestration layer for managed repositories, workflows,
+and pipeline runs.
+
+This package installs janus-server under /opt/janus-server with a sample config,
+rc script, git SSH forced-command helper, and runtime directories.
+EOD
+maintainer: "janus maintainers"
+www: "https://example.invalid/janus"
+prefix: "/opt/janus-server"
+licenselogic: "single"
+licenses: [ "MIT" ]
+categories: [ "devel" ]
+deps: {
+  git: {
+    origin: "devel/git",
+    version: ">=0"
+  },
+  ca_root_nss: {
+    origin: "security/ca_root_nss",
+    version: ">=0"
+  },
+  openssl: {
+    origin: "security/openssl",
+    version: ">=0"
+  }
+}

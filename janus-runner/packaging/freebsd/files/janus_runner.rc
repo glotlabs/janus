@@ -1,0 +1,37 @@
+#!/bin/sh
+
+# PROVIDE: janus_runner
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="janus_runner"
+rcvar="janus_runner_enable"
+
+load_rc_config "${name}"
+
+: ${janus_runner_enable:="NO"}
+: ${janus_runner_prefix:="/opt/janus-runner"}
+: ${janus_runner_config:="${janus_runner_prefix}/etc/runner.toml"}
+: ${janus_runner_rust_log:="janus_runner=info,axum=info"}
+
+pid_dir="${janus_runner_prefix}/run"
+pidfile="${pid_dir}/janus_runner.pid"
+logfile="${janus_runner_prefix}/log/janus_runner.log"
+
+command="/usr/sbin/daemon"
+command_args="-p ${pidfile} -o ${logfile} env RUST_LOG=${janus_runner_rust_log} PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin:${janus_runner_prefix}/bin ${janus_runner_prefix}/bin/janus-runner ${janus_runner_config}"
+
+start_precmd="janus_runner_precmd"
+
+janus_runner_precmd()
+{
+    install -d -o root -g wheel -m 0750 "${pid_dir}"
+    install -d -o root -g wheel -m 0750 "$(dirname "${logfile}")"
+    touch "${logfile}"
+    chown root:wheel "${logfile}"
+    chmod 0640 "${logfile}"
+}
+
+run_rc_command "$1"

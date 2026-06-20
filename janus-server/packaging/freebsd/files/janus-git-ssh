@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+PREFIX="/opt/janus-server"
+SOCKET="${PREFIX}/run/control.sock"
+
+case "${SSH_ORIGINAL_COMMAND:-}" in
+  "git-upload-pack "*)
+    git_cmd="git-upload-pack"
+    repo=${SSH_ORIGINAL_COMMAND#git-upload-pack }
+    ;;
+  "git-receive-pack "*)
+    git_cmd="git-receive-pack"
+    repo=${SSH_ORIGINAL_COMMAND#git-receive-pack }
+    ;;
+  *)
+    echo "unsupported git command" >&2
+    exit 1
+    ;;
+esac
+
+repo=${repo#\'}
+repo=${repo%\'}
+repo=${repo#/}
+repo=${repo%.git}
+
+bare_path=$("${PREFIX}/bin/janus-server" git resolve-repo \
+  --socket-path "${SOCKET}" \
+  --repo "${repo}")
+
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=safe.directory
+export GIT_CONFIG_VALUE_0="${bare_path}"
+
+exec "${git_cmd}" "${bare_path}"

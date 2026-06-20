@@ -1,0 +1,64 @@
+janus-server has been installed under:
+
+    /opt/janus-server
+
+Next steps:
+
+1. Edit the server config:
+
+       vi /opt/janus-server/etc/server.toml
+
+   At minimum, set:
+
+       [server]
+       public_base_url = "your-ci-hostname.example.com"
+
+       [auth]
+       session_secret = "replace-this-with-a-long-random-secret"
+
+2. Initialize runner signing keys:
+
+       /opt/janus-server/bin/janus-server admin runner-key init \
+         --config /opt/janus-server/etc/server.toml
+
+3. Bootstrap the first admin user:
+
+       /opt/janus-server/bin/janus-server admin bootstrap-admin \
+         --username admin \
+         --config /opt/janus-server/etc/server.toml
+
+4. Enable and start the service.
+
+   Either add the package rc directory to local_startup:
+
+       sysrc local_startup="/usr/local/etc/rc.d /opt/janus-server/etc/rc.d"
+       sysrc janus_server_enable=YES
+       service janus_server start
+
+   Or symlink the rc script into /usr/local/etc/rc.d:
+
+       ln -s /opt/janus-server/etc/rc.d/janus_server /usr/local/etc/rc.d/janus_server
+       sysrc janus_server_enable=YES
+       service janus_server start
+
+5. For Git-over-SSH, add this block to sshd_config:
+
+       Match User git
+           PubkeyAuthentication yes
+           PasswordAuthentication no
+           X11Forwarding no
+           AllowTcpForwarding no
+           PermitTTY no
+           ForceCommand /opt/janus-server/libexec/janus-git-ssh
+
+   Put Git SSH public keys in:
+
+       /opt/janus-server/home/git/.ssh/authorized_keys
+
+   Then restart sshd:
+
+       service sshd restart
+
+Logs are written to:
+
+    /opt/janus-server/log/janus_server.log

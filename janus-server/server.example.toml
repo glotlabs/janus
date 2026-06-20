@@ -1,15 +1,15 @@
-data_dir = "/var/lib/janus-server"
-repos_dir = "/var/lib/janus-server/repos"
+data_dir = "/opt/janus-server/var"
+repos_dir = "/opt/janus-server/var/repos"
 
 [database]
-path = "/var/lib/janus-server/db/server.sqlite3"
+path = "/opt/janus-server/var/db/server.sqlite3"
 
 [server]
 listen = "127.0.0.1:8090"
 public_base_url = "ci.example.internal"
 
 [control]
-socket_path = "/var/run/janus_server/control.sock"
+socket_path = "/opt/janus-server/run/control.sock"
 socket_mode = 0o660
 
 [auth]

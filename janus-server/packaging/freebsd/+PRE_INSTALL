@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+
+PREFIX="${PKG_PREFIX:-/opt/janus-server}"
+
+ensure_group()
+{
+    group="$1"
+    if ! pw groupshow "${group}" >/dev/null 2>&1; then
+        pw groupadd "${group}"
+    fi
+}
+
+ensure_user()
+{
+    user="$1"
+    group="$2"
+    home="$3"
+    shell="$4"
+    comment="$5"
+
+    if ! pw usershow "${user}" >/dev/null 2>&1; then
+        pw useradd "${user}" -g "${group}" -d "${home}" -s "${shell}" -c "${comment}"
+    fi
+}
+
+ensure_group janus
+ensure_group git
+ensure_user janus janus "${PREFIX}/var" /usr/sbin/nologin "Janus server"
+ensure_user git git "${PREFIX}/home/git" /bin/sh "Janus Git SSH"
+
+install -d -o root -g wheel -m 0755 "${PREFIX}"
+install -d -o root -g wheel -m 0755 "${PREFIX}/bin"
+install -d -o root -g wheel -m 0755 "${PREFIX}/etc"
+install -d -o root -g wheel -m 0755 "${PREFIX}/etc/rc.d"
+install -d -o root -g wheel -m 0755 "${PREFIX}/libexec"
+
+install -d -o janus -g git -m 0750 "${PREFIX}/var"
+install -d -o janus -g git -m 2770 "${PREFIX}/var/repos"
+install -d -o janus -g janus -m 0750 "${PREFIX}/var/db"
+install -d -o janus -g janus -m 0750 "${PREFIX}/var/keys"
+install -d -o janus -g git -m 2770 "${PREFIX}/run"
+install -d -o janus -g janus -m 0750 "${PREFIX}/log"
+
+touch "${PREFIX}/log/janus_server.log"
+chown janus:janus "${PREFIX}/log/janus_server.log"
+chmod 0640 "${PREFIX}/log/janus_server.log"
+
+install -d -o git -g git -m 0750 "${PREFIX}/home/git"
+install -d -o git -g git -m 0700 "${PREFIX}/home/git/.ssh"
+if [ ! -e "${PREFIX}/home/git/.ssh/authorized_keys" ]; then
+    : > "${PREFIX}/home/git/.ssh/authorized_keys"
+fi
+chown git:git "${PREFIX}/home/git/.ssh/authorized_keys"
+chmod 0600 "${PREFIX}/home/git/.ssh/authorized_keys"
