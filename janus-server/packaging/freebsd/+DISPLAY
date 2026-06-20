@@ -4,7 +4,8 @@ janus-server has been installed under:
 
 Next steps:
 
-1. Edit the server config:
+1. Edit the server config. If it did not already exist, it was created from
+   server.toml.sample during package installation:
 
        vi /opt/janus-server/etc/server.toml
 

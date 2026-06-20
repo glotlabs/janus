@@ -8,7 +8,8 @@ manifests and scripts.
 
 Next steps:
 
-1. Edit the runner config:
+1. Edit the runner config. If it did not already exist, it was created from
+   runner.toml.sample during package installation:
 
        vi /opt/janus-runner/etc/runner.toml
 

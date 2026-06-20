@@ -41,6 +41,7 @@ install -m 0755 "${ROOT_DIR}/janus-runner/jobs/build-app.sh" "${FAKE_ROOT}${PREF
 install -d -m 0755 "${METADATA_DIR}" "${OUT_DIR}"
 sed "s/^version:.*/version: \"${VERSION}\"/" "${PKG_DIR}/+MANIFEST" > "${METADATA_DIR}/+MANIFEST"
 install -m 0755 "${PKG_DIR}/+PRE_INSTALL" "${METADATA_DIR}/+PRE_INSTALL"
+install -m 0755 "${PKG_DIR}/+POST_INSTALL" "${METADATA_DIR}/+POST_INSTALL"
 install -m 0644 "${PKG_DIR}/+DISPLAY" "${METADATA_DIR}/+DISPLAY"
 
 pkg create -r "${FAKE_ROOT}" -m "${METADATA_DIR}" -p "${PLIST}" -o "${OUT_DIR}"

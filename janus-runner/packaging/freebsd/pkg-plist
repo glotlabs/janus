@@ -4,7 +4,7 @@
 bin/janus-runner
 etc/rc.d/janus_runner
 @mode 0640
-@sample etc/runner.toml.sample
+etc/runner.toml.sample
 @mode 0755
 @dir jobs
 @dir manifests

@@ -7,7 +7,7 @@ libexec/janus-git-ssh
 @owner root
 @group janus
 @mode 0640
-@sample etc/server.toml.sample
+etc/server.toml.sample
 @owner janus
 @group git
 @mode 0750

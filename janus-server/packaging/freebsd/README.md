@@ -29,8 +29,8 @@ pkg install target/freebsd-pkg/packages/janus-server-0.1.0.pkg
 ```
 
 After install, edit the config and initialize runner signing keys. The package
-uses `@sample`, so `/opt/janus-server/etc/server.toml` is created from the
-sample on first install if it does not already exist.
+creates `/opt/janus-server/etc/server.toml` from `server.toml.sample` if it does
+not already exist.
 
 ```sh
 vi /opt/janus-server/etc/server.toml

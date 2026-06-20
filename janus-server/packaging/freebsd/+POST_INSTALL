@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+PREFIX="${PKG_PREFIX:-/opt/janus-server}"
+CONFIG="${PREFIX}/etc/server.toml"
+SAMPLE="${PREFIX}/etc/server.toml.sample"
+
+if [ ! -e "${CONFIG}" ]; then
+    cp "${SAMPLE}" "${CONFIG}"
+    chown root:janus "${CONFIG}"
+    chmod 0640 "${CONFIG}"
+fi

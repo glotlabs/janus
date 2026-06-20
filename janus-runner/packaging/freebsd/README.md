@@ -28,7 +28,8 @@ Install the generated package:
 pkg install target/freebsd-runner-pkg/packages/janus-runner-0.1.0.pkg
 ```
 
-After install, edit `/opt/janus-runner/etc/runner.toml` and paste the
+After install, `/opt/janus-runner/etc/runner.toml` is created from
+`runner.toml.sample` if it does not already exist. Edit it and paste the
 `[[auth.servers]]` trust snippet from `janus-server admin runner-key show`.
 
 Example manifest and script files are installed in:

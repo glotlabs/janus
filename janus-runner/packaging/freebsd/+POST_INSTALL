@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+PREFIX="${PKG_PREFIX:-/opt/janus-runner}"
+CONFIG="${PREFIX}/etc/runner.toml"
+SAMPLE="${PREFIX}/etc/runner.toml.sample"
+
+if [ ! -e "${CONFIG}" ]; then
+    cp "${SAMPLE}" "${CONFIG}"
+    chown root:wheel "${CONFIG}"
+    chmod 0640 "${CONFIG}"
+fi
